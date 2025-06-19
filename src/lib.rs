@@ -337,7 +337,6 @@ impl<'a> HttpClient<'a> {
         try_push!(http_request.push_str(host));
         try_push!(http_request.push_str("\r\n"));
 
-        let mut content_type_present = false;
         let mut content_length_present = false;
 
         for header in headers {
@@ -346,24 +345,15 @@ impl<'a> HttpClient<'a> {
             try_push!(http_request.push_str(header.value));
             try_push!(http_request.push_str("\r\n"));
 
-            if header.name.eq_ignore_ascii_case("Content-Type") {
-                content_type_present = true;
-            } else if header.name.eq_ignore_ascii_case("Content-Length") {
+            if header.name.eq_ignore_ascii_case("Content-Length") {
                 content_length_present = true;
             }
-        }
-
-        if !content_type_present
-            && body.is_some()
-            && (method == HttpMethod::POST || method == HttpMethod::PUT)
-        {
-            try_push!(http_request.push_str("Content-Type: application/json\r\n"));
         }
 
         if !content_length_present && body.is_some() {
             try_push!(http_request.push_str("Content-Length: "));
             let mut len_str = String::<8>::new();
-            if write!(&mut len_str, "{}", body.unwrap().len()).is_err() {
+            if write!(&mut len_str, "{}", body.unwrap_or_default().len()).is_err() {
                 return Err(Error::InvalidResponse("Failed to write content length"));
             }
             try_push!(http_request.push_str(&len_str));
@@ -448,7 +438,6 @@ impl<'a> HttpClient<'a> {
 
         debug!("Received HTTP response, {} bytes", total_read);
 
-        // Remove unwrap_or_default on from_utf8
         let response_str = core::str::from_utf8(&response_buffer[..total_read])
             .map_err(|_| Error::InvalidResponse("Invalid HTTP response encoding"))?;
 
