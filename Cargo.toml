@@ -1,0 +1,24 @@
+[package]
+name = "nanofish"
+version = "0.1.0"
+edition = "2024"
+description = "🐟 A lightweight, `no_std` HTTP client for embedded systems built on top of Embassy networking."
+documentation = "https://docs.rs/nanofish"
+repository = "https://github.com/rttfd/nanofish"
+license = "MIT"
+keywords = ["no_std", "embedded", "async", "http_client"]
+authors = ["rttf <contact@rttf.dev>"]
+
+[dependencies]
+defmt = "1.0.1"
+embassy-net = { version = "0.7.0", features = [
+    "defmt",
+    "dns",
+    "medium-ethernet",
+    "proto-ipv4",
+    "proto-ipv6",
+    "tcp",
+] }
+embassy-time = { version = "0.4.0", features = ["defmt"] }
+embedded-io-async = { version = "0.6.1", features = ["defmt-03"] }
+heapless = { version = "0.8.0", features = ["defmt-03"] }
