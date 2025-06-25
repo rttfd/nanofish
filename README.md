@@ -18,6 +18,25 @@ Nanofish provides a simple HTTP client implementation that works on constrained 
 - Automatic handling of common headers
 - DNS resolution
 - Timeout handling and retries
+- Optional TLS/HTTPS support (disabled by default)
+
+## Feature Flags
+
+- `tls`: Enables TLS/HTTPS support via `embedded-tls`. When disabled (default), only HTTP requests are supported and HTTPS requests will return an error.
+
+To use nanofish with HTTP only (default):
+
+```toml
+[dependencies]
+nanofish = "0.3.0"
+```
+
+To use nanofish with TLS/HTTPS support:
+
+```toml
+[dependencies]
+nanofish = { version = "0.3.0", features = ["tls"] }
+```
 
 ## Example
 
