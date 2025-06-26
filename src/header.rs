@@ -1,7 +1,3 @@
-use crate::error::Error;
-
-use heapless::String;
-
 /// Common HTTP header names as constants for convenience
 pub mod headers {
     /// Content-Type header
@@ -90,50 +86,5 @@ impl<'a> HttpHeader<'a> {
     #[must_use]
     pub const fn api_key(value: &'a str) -> Self {
         Self::new(headers::X_API_KEY, value)
-    }
-}
-
-/// Owned HTTP Header for response parsing where we need to store the actual values
-#[derive(Clone, Debug)]
-pub struct OwnedHttpHeader {
-    /// The name of the header (e.g., "Content-Type", "Authorization")
-    pub name: String<64>,
-    /// The value of the header (e.g., "application/json", "Bearer token123")
-    pub value: String<256>,
-}
-
-impl OwnedHttpHeader {
-    /// Create a new owned header
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the name or value strings are too long for the fixed-size buffer.
-    pub fn new(name: &str, value: &str) -> Result<Self, Error> {
-        let mut name_str = String::new();
-        let mut value_str = String::new();
-
-        name_str
-            .push_str(name)
-            .map_err(|()| Error::HeaderError("Name too long"))?;
-        value_str
-            .push_str(value)
-            .map_err(|()| Error::HeaderError("Value too long"))?;
-
-        Ok(Self {
-            name: name_str,
-            value: value_str,
-        })
-    }
-
-    /// Get the name as a string slice
-    #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Get the value as a string slice
-    #[must_use]
-    pub fn value(&self) -> &str {
-        &self.value
     }
 }
