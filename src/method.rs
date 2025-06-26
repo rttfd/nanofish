@@ -29,6 +29,7 @@ pub enum HttpMethod {
 }
 
 impl HttpMethod {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             HttpMethod::GET => "GET",

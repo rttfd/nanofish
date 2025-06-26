@@ -28,22 +28,32 @@
 //!
 //! ```toml
 //! [dependencies]
-//! nanofish = { version = "0.3.0", features = ["tls"] }
+//! nanofish = { version = "0.4.0", features = ["tls"] }
 //! ```
 //!
 //! ## Example
 //!
 //! ```no_run
-//! use nanofish::{HttpClient, HttpHeader};
+//! use nanofish::{HttpClient, HttpHeader, headers, mime_types};
 //! use embassy_net::Stack;
 //!
 //! async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
 //!     // Create an HTTP client with a network stack
 //!     let client = HttpClient::new(stack);
-//!     // Define custom headers (optional)
+//!     
+//!     // Define custom headers using convenience methods
 //!     let headers = [
-//!         HttpHeader { name: "User-Agent", value: "Nanofish/0.3.0" },
+//!         HttpHeader::user_agent("Nanofish/0.4.0"),
+//!         HttpHeader::content_type(mime_types::JSON),
+//!         HttpHeader::authorization("Bearer token123"),
 //!     ];
+//!     
+//!     // Or create headers manually
+//!     let manual_headers = [
+//!         HttpHeader { name: "Custom-Header", value: "custom-value" },
+//!         HttpHeader::new(headers::ACCEPT, mime_types::JSON),
+//!     ];
+//!     
 //!     // Make a GET request
 //!     let response = client.get("http://example.com/api/status", &headers).await?;
 //!     // Check the response
@@ -64,10 +74,10 @@ mod response;
 
 pub use client::HttpClient;
 pub use error::Error;
-pub use header::HttpHeader;
+pub use header::{HttpHeader, OwnedHttpHeader, headers, mime_types};
 pub use method::HttpMethod;
 pub use options::HttpClientOptions;
-pub use response::HttpClientResponse;
+pub use response::{HttpResponse, ResponseBody};
 
 #[cfg(test)]
 mod tests {
