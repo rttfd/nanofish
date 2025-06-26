@@ -1,23 +1,23 @@
-use crate::header::OwnedHttpHeader;
-use heapless::{String, Vec};
+use crate::header::HttpHeader;
+use heapless::Vec;
 
-/// HTTP Response body that can handle both text and binary data
+/// HTTP Response body that can handle both text and binary data using zero-copy references
 #[derive(Debug)]
-pub enum ResponseBody {
-    /// Text content (UTF-8 encoded)
-    Text(String<2048>),
-    /// Binary content (raw bytes)
-    Binary(Vec<u8, 2048>),
+pub enum ResponseBody<'a> {
+    /// Text content (UTF-8 encoded) - borrowed from the response buffer
+    Text(&'a str),
+    /// Binary content (raw bytes) - borrowed from the response buffer
+    Binary(&'a [u8]),
     /// Empty body (e.g., for HEAD requests or 204 No Content)
     Empty,
 }
 
-impl ResponseBody {
+impl ResponseBody<'_> {
     /// Try to get the body as a UTF-8 string
     #[must_use]
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            ResponseBody::Text(s) => Some(s.as_str()),
+            ResponseBody::Text(s) => Some(s),
             ResponseBody::Binary(bytes) => core::str::from_utf8(bytes).ok(),
             ResponseBody::Empty => Some(""),
         }
@@ -28,7 +28,7 @@ impl ResponseBody {
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             ResponseBody::Text(s) => s.as_bytes(),
-            ResponseBody::Binary(bytes) => bytes.as_slice(),
+            ResponseBody::Binary(bytes) => bytes,
             ResponseBody::Empty => &[],
         }
     }
@@ -58,23 +58,24 @@ impl ResponseBody {
 ///
 /// This struct represents the response received from an HTTP server.
 /// It contains the status code, headers, and the response body which can be
-/// either text or binary data.
-pub struct HttpResponse {
+/// either text or binary data using zero-copy references.
+pub struct HttpResponse<'a> {
     /// The HTTP status code (e.g., 200 for OK, 404 for Not Found)
     pub status_code: u16,
     /// A collection of response headers with both names and values
-    pub headers: Vec<OwnedHttpHeader, 16>,
+    pub headers: Vec<HttpHeader<'a>, 16>,
     /// The response body that can handle both text and binary data
-    pub body: ResponseBody,
+    pub body: ResponseBody<'a>,
 }
 
-impl HttpResponse {
+impl HttpResponse<'_> {
     /// Get a header value by name (case-insensitive)
+    #[must_use]
     pub fn get_header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
-            .find(|h| h.name().eq_ignore_ascii_case(name))
-            .map(super::header::OwnedHttpHeader::value)
+            .find(|h| h.name.eq_ignore_ascii_case(name))
+            .map(|h| h.value)
     }
 
     /// Get the Content-Type header value

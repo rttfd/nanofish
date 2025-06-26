@@ -6,21 +6,32 @@
 
 # Nanofish
 
-A lightweight, `no_std` HTTP client for embedded systems built on top of Embassy networking.
+A lightweight, `no_std` HTTP client for embedded systems built on top of Embassy networking with **true zero-copy response handling**.
 
-Nanofish provides a simple HTTP client implementation that works on constrained environments with no heap allocation, making it suitable for microcontrollers and other embedded systems. It supports all standard HTTP methods and provides a clean async API for making HTTP requests.
+Nanofish provides a simple HTTP client implementation that works on constrained environments with no heap allocation, making it suitable for microcontrollers and other embedded systems. It features **zero-copy response handling** where all response data is borrowed directly from user-provided buffers, ensuring maximum memory efficiency.
 
-## Features
+## Key Features
 
+- **True Zero-Copy Response Handling** - Response data is borrowed directly from user-provided buffers with no copying
+- **User-Controlled Memory Management** - You provide the buffer, controlling exactly how much memory is used
 - Full `no_std` compatibility with no heap allocations
 - Built on Embassy for async networking
 - Support for all standard HTTP methods (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, CONNECT)
-- Intelligent response body handling (automatic text/binary detection)
+- Intelligent response body handling (automatic text/binary detection based on Content-Type)
 - Convenient header creation with pre-defined constants and methods
 - Automatic handling of common headers
 - DNS resolution
 - Timeout handling and retries
 - Optional TLS/HTTPS support (disabled by default)
+
+## Zero-Copy Architecture
+
+Unlike traditional HTTP clients that copy response data multiple times, Nanofish uses a zero-copy approach:
+
+- **You control the buffer size** - Provide a buffer as large or small as needed for your use case
+- **Direct memory references** - Response body contains direct references to data in your buffer
+- **No hidden allocations** - All memory usage is explicit and controlled by you
+- **Optimal for embedded** - Perfect for memory-constrained environments
 
 ## Feature Flags
 
@@ -30,14 +41,14 @@ To use nanofish with HTTP only (default):
 
 ```toml
 [dependencies]
-nanofish = "0.4.0"
+nanofish = "0.5.0"
 ```
 
 To use nanofish with TLS/HTTPS support:
 
 ```toml
 [dependencies]
-nanofish = { version = "0.4.0", features = ["tls"] }
+nanofish = { version = "0.5.0", features = ["tls"] }
 ```
 
 ## Example
@@ -50,9 +61,12 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
     // Create an HTTP client with a network stack
     let client = HttpClient::new(stack);
     
+    // You control the buffer size - make it as large or small as needed!
+    let mut response_buffer = [0u8; 8192]; // 8KB buffer for this example
+    
     // Define headers using convenience methods
     let headers = [
-        HttpHeader::user_agent("Nanofish/0.4.0"),
+        HttpHeader::user_agent("Nanofish/0.5.0"),
         HttpHeader::content_type(mime_types::JSON),
         HttpHeader::authorization("Bearer token123"),
     ];
@@ -63,8 +77,14 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
         HttpHeader::new(headers::ACCEPT, mime_types::JSON),
     ];
     
-    // Make a GET request
-    let response = client.get("http://example.com/api/status", &headers).await?;
+    // Make a GET request with zero-copy response handling
+    let (response, bytes_read) = client.get(
+        "http://example.com/api/status", 
+        &headers,
+        &mut response_buffer  // Your buffer - no hidden allocations!
+    ).await?;
+    
+    println!("Read {} bytes into buffer", bytes_read);
     
     // Check if the request was successful
     if response.is_success() {
@@ -73,12 +93,14 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
             println!("Content-Type: {}", content_type);
         }
         
-        // Handle different body types
+        // Handle different body types - all data references your buffer directly!
         match &response.body {
             ResponseBody::Text(text) => {
+                // text is a &str referencing data in your response_buffer
                 println!("Received text: {}", text);
             }
             ResponseBody::Binary(bytes) => {
+                // bytes is a &[u8] referencing data in your response_buffer
                 println!("Received {} bytes of binary data", bytes.len());
             }
             ResponseBody::Empty => {
@@ -89,6 +111,27 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
     
     Ok(())
 }
+```
+
+## Zero-Copy Benefits
+
+```rust
+// Traditional approach (copies data):
+// 1. Read from network → internal buffer (copy #1)
+// 2. Parse response → response struct (copy #2) 
+// 3. User gets → copied data (copy #3)
+
+// Nanofish zero-copy approach:
+// 1. Read from network → YOUR buffer (direct)
+// 2. Parse response → references to YOUR buffer (zero-copy)
+// 3. User gets → direct references to YOUR buffer (zero-copy)
+
+let mut small_buffer = [0u8; 1024];    // For small responses
+let mut large_buffer = [0u8; 32768];   // For large responses
+
+// Same API, different memory usage - YOU decide!
+let (small_response, _) = client.get(url, &headers, &mut small_buffer).await?;
+let (large_response, _) = client.get(url, &headers, &mut large_buffer).await?;
 ```
 
 ## Header Convenience Features
@@ -174,33 +217,80 @@ if let Some(content_length) = response.content_length() {
 
 ## Convenience Methods
 
-Nanofish provides convenience methods for all standard HTTP verbs:
+Nanofish provides convenience methods for all standard HTTP verbs, all using the same zero-copy approach:
 
 ```rust
+// All methods require a buffer and return (HttpResponse, bytes_read)
+let mut buffer = [0u8; 4096];
+
 // GET request
-let response = client.get("http://api.example.com/users", &headers).await?;
+let (response, bytes_read) = client.get(
+    "http://api.example.com/users", 
+    &headers, 
+    &mut buffer
+).await?;
 
 // POST request with JSON body
-let json_body = b r#"{"name": "John", "email": "john@example.com"}"#;
+let json_body = br#"{"name": "John", "email": "john@example.com"}"#;
 let post_headers = [
     HttpHeader::content_type(mime_types::JSON),
     HttpHeader::authorization("Bearer token123"),
 ];
-let response = client.post("http://api.example.com/users", &post_headers, json_body).await?;
+let (response, bytes_read) = client.post(
+    "http://api.example.com/users", 
+    &post_headers, 
+    json_body,
+    &mut buffer
+).await?;
 
 // PUT request
-let response = client.put("http://api.example.com/users/123", &headers, update_data).await?;
+let (response, bytes_read) = client.put(
+    "http://api.example.com/users/123", 
+    &headers, 
+    update_data,
+    &mut buffer
+).await?;
 
 // DELETE request
-let response = client.delete("http://api.example.com/users/123", &headers).await?;
+let (response, bytes_read) = client.delete(
+    "http://api.example.com/users/123", 
+    &headers,
+    &mut buffer
+).await?;
 
-// Other methods
-let response = client.patch("http://api.example.com/users/123", &headers, patch_data).await?;
-let response = client.head("http://api.example.com/status", &headers).await?;
-let response = client.options("http://api.example.com", &headers).await?;
+// Other HTTP methods
+let (response, _) = client.patch("http://api.example.com/users/123", &headers, patch_data, &mut buffer).await?;
+let (response, _) = client.head("http://api.example.com/status", &headers, &mut buffer).await?;
+let (response, _) = client.options("http://api.example.com", &headers, &mut buffer).await?;
+let (response, _) = client.trace("http://api.example.com", &headers, &mut buffer).await?;
+let (response, _) = client.connect("http://proxy.example.com", &headers, &mut buffer).await?;
 ```
 
-All methods return a `Result<HttpResponse, Error>` and support the same header and response handling features.
+All methods return a `Result<(HttpResponse, usize), Error>` where:
+- `HttpResponse` contains zero-copy references to data in your buffer
+- `usize` is the number of bytes read into your buffer
+
+## Memory Efficiency Examples
+
+```rust
+// Scenario 1: Memory-constrained device (1KB buffer)
+let mut tiny_buffer = [0u8; 1024];
+let (response, _) = client.get(url, &headers, &mut tiny_buffer).await?;
+// Perfect for small API responses, status checks, etc.
+
+// Scenario 2: Streaming large data (32KB buffer)
+let mut large_buffer = [0u8; 32768];
+let (response, bytes_read) = client.get(large_url, &headers, &mut large_buffer).await?;
+// Handle larger responses, file downloads, etc.
+
+// Scenario 3: Reuse the same buffer for multiple requests
+let mut shared_buffer = [0u8; 8192];
+for url in urls {
+    let (response, _) = client.get(url, &headers, &mut shared_buffer).await?;
+    process_response(&response);
+    // Buffer is reused for each request - no allocations!
+}
+```
 
 ## License
 

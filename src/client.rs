@@ -1,6 +1,8 @@
+#![allow(clippy::large_futures)]
+
 use crate::{
     error::Error,
-    header::{HttpHeader, OwnedHttpHeader},
+    header::HttpHeader,
     method::HttpMethod,
     options::HttpClientOptions,
     response::{HttpResponse, ResponseBody},
@@ -29,8 +31,6 @@ use rand_core::SeedableRng;
 const REQUEST_SIZE: usize = 1024;
 const TRANSMIT_BUFFER_SIZE: usize = 4096;
 const RECEIVE_BUFFER_SIZE: usize = 4096;
-const RESPONSE_BUFFER_SIZE: usize = 4096;
-const RESPONSE_SIZE: usize = 2048;
 const MAX_HEADERS: usize = 16;
 
 macro_rules! try_push {
@@ -41,13 +41,15 @@ macro_rules! try_push {
     };
 }
 
-/// HTTP Client for making HTTP requests
+/// HTTP Client for making HTTP requests with true zero-copy response handling
 ///
 /// This is the main client struct for making HTTP requests. It provides methods
-/// for performing GET, POST, PUT, DELETE and other HTTP requests.
+/// for performing GET, POST, PUT, DELETE and other HTTP requests using a zero-copy
+/// approach where all response data is borrowed directly from user-provided buffers.
 ///
-/// The client is designed to work with Embassy's networking stack and
-/// uses fixed-size buffers for all operations to maintain `no_std` compatibility.
+/// The client is designed to work with Embassy's networking stack and requires
+/// users to provide their own response buffers, ensuring maximum memory efficiency
+/// and control while maintaining `no_std` compatibility.
 pub struct HttpClient<'a> {
     /// Reference to the Embassy network stack
     stack: &'a Stack<'a>,
@@ -71,10 +73,11 @@ impl<'a> HttpClient<'a> {
         Self { stack, options }
     }
 
-    /// Make an HTTP request
+    /// Make an HTTP request with zero-copy response handling
     ///
-    /// This is the core method for making HTTP requests. It handles all HTTP methods
-    /// and manages the entire request flow, from DNS resolution to parsing the response.
+    /// This is the core method for making HTTP requests using zero-copy approach.
+    /// The caller provides a buffer where the response will be stored, and the
+    /// returned `HttpResponse` will contain references to data within that buffer.
     ///
     /// # Arguments
     ///
@@ -82,45 +85,56 @@ impl<'a> HttpClient<'a> {
     /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
     /// * `headers` - A slice of HTTP headers to include in the request
     /// * `body` - Optional request body data (required for POST/PUT requests)
+    /// * `response_buffer` - A mutable buffer to store the response data
     ///
     /// # Returns
     ///
-    /// * `Ok(HttpResponse)` - Successful response with status code, headers, and body
+    /// * `Ok((HttpResponse, usize))` - Response with zero-copy body and bytes read
     /// * `Err(Error)` - Error occurred during the request process
     ///
     /// # Errors
     ///
-    /// This function can return errors for various reasons including:
-    /// - Network connectivity issues
-    /// - DNS resolution failures
-    /// - Invalid URLs or unsupported schemes
-    /// - Connection timeouts
-    /// - Invalid server responses
+    /// This function will return an error if:
+    /// * The URL is malformed or cannot be parsed
+    /// * DNS resolution fails for the hostname
+    /// * Network connection cannot be established
+    /// * The request times out
+    /// * The response cannot be parsed
+    /// * The response buffer is too small for the response data
     ///
     /// # Examples
     ///
     /// ```no_run
-    /// use nanofish::{HttpClient, HttpHeader, HttpMethod};
+    /// use nanofish::{HttpClient, HttpHeader, HttpMethod, ResponseBody};
     /// use embassy_net::Stack;
     ///
     /// async fn example(client: &HttpClient<'_>) -> Result<(), nanofish::Error> {
-    ///     // Making a simple GET request
-    ///     let response = client.request(HttpMethod::GET, "https://example.com", &[], None).await?;
-    ///
-    ///     // Making a POST request with JSON data
-    ///     let json = b"{\"key\": \"value\"}";
-    ///     let headers = [HttpHeader { name: "Content-Type", value: "application/json" }];
-    ///     let response = client.request(HttpMethod::POST, "https://api.example.com/data", &headers, Some(json)).await?;
+    ///     let mut buffer = [0u8; 8192]; // You control the buffer size!
+    ///     let (response, bytes_read) = client.request(
+    ///         HttpMethod::GET,
+    ///         "https://example.com",
+    ///         &[],
+    ///         None,
+    ///         &mut buffer
+    ///     ).await?;
+    ///     
+    ///     // Response body now contains direct references to data in buffer
+    ///     match response.body {
+    ///         ResponseBody::Text(text) => println!("Text: {}", text),
+    ///         ResponseBody::Binary(bytes) => println!("Binary: {} bytes", bytes.len()),
+    ///         ResponseBody::Empty => println!("Empty response"),
+    ///     }
     ///     Ok(())
     /// }
     /// ```
-    pub async fn request(
+    pub async fn request<'b>(
         &self,
         method: HttpMethod,
         endpoint: &str,
         headers: &[HttpHeader<'_>],
         body: Option<&[u8]>,
-    ) -> Result<HttpResponse, Error> {
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
         let (scheme, host_port) = if let Some(rest) = endpoint.strip_prefix("http://") {
             ("http", rest)
         } else if let Some(rest) = endpoint.strip_prefix("https://") {
@@ -147,33 +161,37 @@ impl<'a> HttpClient<'a> {
             (host, if scheme == "https" { 443 } else { 80 })
         };
 
-        match scheme {
+        let total_read = match scheme {
             #[cfg(feature = "tls")]
             "https" => {
-                self.make_https_request(method, host, port, path, headers, body)
-                    .await
+                self.make_https_request(method, (host, port), path, headers, body, response_buffer)
+                    .await?
             }
             #[cfg(not(feature = "tls"))]
-            "https" => Err(Error::UnsupportedScheme("https (TLS support not enabled)")),
+            "https" => return Err(Error::UnsupportedScheme("https (TLS support not enabled)")),
             "http" => {
-                self.make_http_request(method, host, port, path, headers, body)
-                    .await
+                self.make_http_request(method, (host, port), path, headers, body, response_buffer)
+                    .await?
             }
-            _ => Err(Error::UnsupportedScheme(scheme)),
-        }
+            _ => return Err(Error::UnsupportedScheme(scheme)),
+        };
+
+        let response = Self::parse_http_response_zero_copy(&response_buffer[..total_read])?;
+        Ok((response, total_read))
     }
 
-    /// Make HTTPS request over TLS
+    /// Make HTTPS request over TLS with zero-copy response handling
     #[cfg(feature = "tls")]
     async fn make_https_request(
         &self,
         method: HttpMethod,
-        host: &str,
-        port: u16,
+        host_port: (&str, u16),
         path: &str,
         headers: &[HttpHeader<'_>],
         body: Option<&[u8]>,
-    ) -> Result<HttpResponse, Error> {
+        response_buffer: &mut [u8],
+    ) -> Result<usize, Error> {
+        let (host, port) = host_port;
         let mut rx_buffer = [0; RECEIVE_BUFFER_SIZE];
         let mut tx_buffer = [0; TRANSMIT_BUFFER_SIZE];
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
@@ -213,11 +231,10 @@ impl<'a> HttpClient<'a> {
 
         if let Some(body_data) = body {
             tls.write_all(body_data).await?;
-        };
+        }
 
         tls.flush().await?;
 
-        let mut response_buffer = [0u8; RESPONSE_BUFFER_SIZE];
         let mut total_read = 0;
         let mut retries = self.options.max_retries;
 
@@ -253,19 +270,20 @@ impl<'a> HttpClient<'a> {
             return Err(Error::NoResponse);
         }
 
-        Self::parse_http_response(&response_buffer[..total_read])
+        Ok(total_read)
     }
 
-    /// Make HTTP request over plain TCP
+    /// Make HTTP request with zero-copy response handling
     async fn make_http_request(
         &self,
         method: HttpMethod,
-        host: &str,
-        port: u16,
+        host_port: (&str, u16),
         path: &str,
         headers: &[HttpHeader<'_>],
         body: Option<&[u8]>,
-    ) -> Result<HttpResponse, Error> {
+        response_buffer: &mut [u8],
+    ) -> Result<usize, Error> {
+        let (host, port) = host_port;
         let mut rx_buffer = [0; RECEIVE_BUFFER_SIZE];
         let mut tx_buffer = [0; TRANSMIT_BUFFER_SIZE];
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
@@ -306,7 +324,6 @@ impl<'a> HttpClient<'a> {
             })?;
         }
 
-        let mut response_buffer = [0u8; RESPONSE_BUFFER_SIZE];
         let mut total_read = 0;
         let mut retries = self.options.max_retries;
 
@@ -338,38 +355,254 @@ impl<'a> HttpClient<'a> {
             return Err(Error::NoResponse);
         }
 
-        Self::parse_http_response(&response_buffer[..total_read])
+        Ok(total_read)
     }
 
-    /// Check if HTTP response is complete
-    fn is_response_complete(data: &[u8]) -> bool {
-        let response_str = core::str::from_utf8(data).unwrap_or_default();
-
-        if !response_str.contains("\r\n\r\n") {
-            return false;
-        }
-
-        // Check for Content-Length header to determine if we have the full body
-        if let Some(content_length_pos) = response_str.find("Content-Length:") {
-            let content_length_end = response_str[content_length_pos..]
-                .find("\r\n")
-                .unwrap_or_default()
-                + content_length_pos;
-            let content_length_str =
-                &response_str[content_length_pos + 15..content_length_end].trim();
-
-            if let Ok(content_length) = content_length_str.parse::<usize>() {
-                let headers_end = response_str.find("\r\n\r\n").unwrap_or_default() + 4;
-                let body_received = data.len().saturating_sub(headers_end);
-                return body_received >= content_length;
-            }
-        }
-
-        true
+    /// Convenience method for making a PATCH request
+    ///
+    /// # Arguments
+    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
+    /// * `headers` - A slice of HTTP headers to include in the request
+    /// * `body` - The request body data
+    ///
+    /// # Returns
+    /// * `Ok(HttpResponse)` - Successful response
+    /// * `Err(Error)` - Error occurred during the request process
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpClient::request`].
+    pub async fn patch<'b>(
+        &self,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        body: &[u8],
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        self.request(
+            HttpMethod::PATCH,
+            endpoint,
+            headers,
+            Some(body),
+            response_buffer,
+        )
+        .await
     }
 
-    /// Parse HTTP response from raw data
-    fn parse_http_response(data: &[u8]) -> Result<HttpResponse, Error> {
+    /// Convenience method for making a HEAD request
+    ///
+    /// # Arguments
+    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
+    /// * `headers` - A slice of HTTP headers to include in the request
+    ///
+    /// # Returns
+    /// * `Ok(HttpResponse)` - Successful response
+    /// * `Err(Error)` - Error occurred during the request process
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpClient::request`].
+    pub async fn head<'b>(
+        &self,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        self.request(HttpMethod::HEAD, endpoint, headers, None, response_buffer)
+            .await
+    }
+
+    /// Convenience method for making an OPTIONS request
+    ///
+    /// # Arguments
+    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
+    /// * `headers` - A slice of HTTP headers to include in the request
+    ///
+    /// # Returns
+    /// * `Ok(HttpResponse)` - Successful response
+    /// * `Err(Error)` - Error occurred during the request process
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpClient::request`].
+    pub async fn options<'b>(
+        &self,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        self.request(
+            HttpMethod::OPTIONS,
+            endpoint,
+            headers,
+            None,
+            response_buffer,
+        )
+        .await
+    }
+
+    /// Convenience method for making a TRACE request
+    ///
+    /// # Arguments
+    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
+    /// * `headers` - A slice of HTTP headers to include in the request
+    ///
+    /// # Returns
+    /// * `Ok(HttpResponse)` - Successful response
+    /// * `Err(Error)` - Error occurred during the request process
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpClient::request`].
+    pub async fn trace<'b>(
+        &self,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        self.request(HttpMethod::TRACE, endpoint, headers, None, response_buffer)
+            .await
+    }
+
+    /// Convenience method for making a CONNECT request
+    ///
+    /// # Arguments
+    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
+    /// * `headers` - A slice of HTTP headers to include in the request
+    ///
+    /// # Returns
+    /// * `Ok(HttpResponse)` - Successful response
+    /// * `Err(Error)` - Error occurred during the request process
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpClient::request`].
+    pub async fn connect<'b>(
+        &self,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        self.request(
+            HttpMethod::CONNECT,
+            endpoint,
+            headers,
+            None,
+            response_buffer,
+        )
+        .await
+    }
+
+    /// Convenience method for making a GET request
+    ///
+    /// # Arguments
+    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
+    /// * `headers` - A slice of HTTP headers to include in the request
+    ///
+    /// # Returns
+    /// * `Ok(HttpResponse)` - Successful response
+    /// * `Err(Error)` - Error occurred during the request process
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpClient::request`].
+    pub async fn get<'b>(
+        &self,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        self.request(HttpMethod::GET, endpoint, headers, None, response_buffer)
+            .await
+    }
+
+    /// Convenience method for making a POST request
+    ///
+    /// # Arguments
+    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
+    /// * `headers` - A slice of HTTP headers to include in the request
+    /// * `body` - The request body data
+    ///
+    /// # Returns
+    /// * `Ok(HttpResponse)` - Successful response
+    /// * `Err(Error)` - Error occurred during the request process
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpClient::request`].
+    pub async fn post<'b>(
+        &self,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        body: &[u8],
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        self.request(
+            HttpMethod::POST,
+            endpoint,
+            headers,
+            Some(body),
+            response_buffer,
+        )
+        .await
+    }
+
+    /// Convenience method for making a PUT request
+    ///
+    /// # Arguments
+    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
+    /// * `headers` - A slice of HTTP headers to include in the request
+    /// * `body` - The request body data
+    ///
+    /// # Returns
+    /// * `Ok(HttpResponse)` - Successful response
+    /// * `Err(Error)` - Error occurred during the request process
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpClient::request`].
+    pub async fn put<'b>(
+        &self,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        body: &[u8],
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        self.request(
+            HttpMethod::PUT,
+            endpoint,
+            headers,
+            Some(body),
+            response_buffer,
+        )
+        .await
+    }
+
+    /// Convenience method for making a DELETE request
+    ///
+    /// # Arguments
+    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
+    /// * `headers` - A slice of HTTP headers to include in the request
+    ///
+    /// # Returns
+    /// * `Ok(HttpResponse)` - Successful response
+    /// * `Err(Error)` - Error occurred during the request process
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpClient::request`].
+    pub async fn delete<'b>(
+        &self,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        self.request(HttpMethod::DELETE, endpoint, headers, None, response_buffer)
+            .await
+    }
+
+    /// Parse HTTP response from raw data with zero-copy handling
+    fn parse_http_response_zero_copy(data: &[u8]) -> Result<HttpResponse<'_>, Error> {
         let response_str = core::str::from_utf8(data)
             .map_err(|_| Error::InvalidResponse("Invalid HTTP response encoding"))?;
 
@@ -393,17 +626,16 @@ impl<'a> HttpClient<'a> {
             + 4;
 
         let headers_section = &response_str[status_line_end + 2..headers_end - 4];
-        let mut headers = Vec::<OwnedHttpHeader, MAX_HEADERS>::new();
+        let mut headers = Vec::<HttpHeader<'_>, MAX_HEADERS>::new();
 
         for header_line in headers_section.split("\r\n") {
             if let Some(colon_pos) = header_line.find(':') {
                 let name = header_line[..colon_pos].trim();
                 let value = header_line[colon_pos + 1..].trim();
 
-                if let Ok(header) = OwnedHttpHeader::new(name, value) {
-                    if headers.push(header).is_err() {
-                        break;
-                    }
+                let header = HttpHeader::new(name, value);
+                if headers.push(header).is_err() {
+                    break;
                 }
             }
         }
@@ -424,8 +656,11 @@ impl<'a> HttpClient<'a> {
         })
     }
 
-    /// Parse response body based on content type and data
-    fn parse_response_body(headers: &[OwnedHttpHeader], body_data: &[u8]) -> ResponseBody {
+    /// Parse response body based on content type and data (zero-copy)
+    fn parse_response_body<'b>(
+        headers: &[HttpHeader<'_>],
+        body_data: &'b [u8],
+    ) -> ResponseBody<'b> {
         if body_data.is_empty() {
             return ResponseBody::Empty;
         }
@@ -435,7 +670,7 @@ impl<'a> HttpClient<'a> {
             if Self::is_text_content_type(content_type) {
                 Self::parse_as_text_or_binary(body_data)
             } else {
-                Self::parse_as_binary(body_data)
+                ResponseBody::Binary(body_data)
             }
         } else {
             // No content type header, try to guess based on UTF-8 validity
@@ -444,11 +679,11 @@ impl<'a> HttpClient<'a> {
     }
 
     /// Get content type from headers
-    fn get_content_type(headers: &[OwnedHttpHeader]) -> Option<&str> {
+    fn get_content_type<'h>(headers: &'h [HttpHeader<'_>]) -> Option<&'h str> {
         headers
             .iter()
-            .find(|h| h.name().eq_ignore_ascii_case("Content-Type"))
-            .map(super::header::OwnedHttpHeader::value)
+            .find(|h| h.name.eq_ignore_ascii_case("Content-Type"))
+            .map(|h| h.value)
     }
 
     /// Check if content type indicates text content
@@ -460,25 +695,17 @@ impl<'a> HttpClient<'a> {
     }
 
     /// Try to parse as text, fall back to binary if not valid UTF-8
-    fn parse_as_text_or_binary(body_data: &[u8]) -> ResponseBody {
+    fn parse_as_text_or_binary(body_data: &[u8]) -> ResponseBody<'_> {
         if let Ok(text) = core::str::from_utf8(body_data) {
-            let mut body_string = heapless::String::<RESPONSE_SIZE>::new();
-            let _ = body_string.push_str(text);
-            ResponseBody::Text(body_string)
+            ResponseBody::Text(text)
         } else {
             Self::parse_as_binary(body_data)
         }
     }
 
-    /// Parse data as binary
-    fn parse_as_binary(body_data: &[u8]) -> ResponseBody {
-        let mut body_vec = heapless::Vec::<u8, RESPONSE_SIZE>::new();
-        for &byte in body_data.iter().take(RESPONSE_SIZE) {
-            if body_vec.push(byte).is_err() {
-                break;
-            }
-        }
-        ResponseBody::Binary(body_vec)
+    /// Parse data as binary (zero-copy)
+    fn parse_as_binary(body_data: &[u8]) -> ResponseBody<'_> {
+        ResponseBody::Binary(body_data)
     }
 
     /// Build HTTP request string
@@ -534,207 +761,31 @@ impl<'a> HttpClient<'a> {
         Ok(http_request)
     }
 
-    /// Convenience method for making a PATCH request
-    ///
-    /// # Arguments
-    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
-    /// * `headers` - A slice of HTTP headers to include in the request
-    /// * `body` - The request body data
-    ///
-    /// # Returns
-    /// * `Ok(HttpResponse)` - Successful response
-    /// * `Err(Error)` - Error occurred during the request process
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`HttpClient::request`].
-    pub async fn patch(
-        &self,
-        endpoint: &str,
-        headers: &[HttpHeader<'_>],
-        body: &[u8],
-    ) -> Result<HttpResponse, Error> {
-        self.request(HttpMethod::PATCH, endpoint, headers, Some(body))
-            .await
-    }
+    /// Check if HTTP response is complete
+    fn is_response_complete(data: &[u8]) -> bool {
+        let response_str = core::str::from_utf8(data).unwrap_or_default();
 
-    /// Convenience method for making a HEAD request
-    ///
-    /// # Arguments
-    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
-    /// * `headers` - A slice of HTTP headers to include in the request
-    ///
-    /// # Returns
-    /// * `Ok(HttpResponse)` - Successful response
-    /// * `Err(Error)` - Error occurred during the request process
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`HttpClient::request`].
-    pub async fn head(
-        &self,
-        endpoint: &str,
-        headers: &[HttpHeader<'_>],
-    ) -> Result<HttpResponse, Error> {
-        self.request(HttpMethod::HEAD, endpoint, headers, None)
-            .await
-    }
+        if !response_str.contains("\r\n\r\n") {
+            return false;
+        }
 
-    /// Convenience method for making an OPTIONS request
-    ///
-    /// # Arguments
-    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
-    /// * `headers` - A slice of HTTP headers to include in the request
-    ///
-    /// # Returns
-    /// * `Ok(HttpResponse)` - Successful response
-    /// * `Err(Error)` - Error occurred during the request process
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`HttpClient::request`].
-    pub async fn options(
-        &self,
-        endpoint: &str,
-        headers: &[HttpHeader<'_>],
-    ) -> Result<HttpResponse, Error> {
-        self.request(HttpMethod::OPTIONS, endpoint, headers, None)
-            .await
-    }
+        // Check for Content-Length header to determine if we have the full body
+        if let Some(content_length_pos) = response_str.find("Content-Length:") {
+            let content_length_end = response_str[content_length_pos..]
+                .find("\r\n")
+                .unwrap_or_default()
+                + content_length_pos;
+            let content_length_str =
+                &response_str[content_length_pos + 15..content_length_end].trim();
 
-    /// Convenience method for making a TRACE request
-    ///
-    /// # Arguments
-    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
-    /// * `headers` - A slice of HTTP headers to include in the request
-    ///
-    /// # Returns
-    /// * `Ok(HttpResponse)` - Successful response
-    /// * `Err(Error)` - Error occurred during the request process
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`HttpClient::request`].
-    pub async fn trace(
-        &self,
-        endpoint: &str,
-        headers: &[HttpHeader<'_>],
-    ) -> Result<HttpResponse, Error> {
-        self.request(HttpMethod::TRACE, endpoint, headers, None)
-            .await
-    }
+            if let Ok(content_length) = content_length_str.parse::<usize>() {
+                let headers_end = response_str.find("\r\n\r\n").unwrap_or_default() + 4;
+                let body_received = data.len().saturating_sub(headers_end);
+                return body_received >= content_length;
+            }
+        }
 
-    /// Convenience method for making a CONNECT request
-    ///
-    /// # Arguments
-    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
-    /// * `headers` - A slice of HTTP headers to include in the request
-    ///
-    /// # Returns
-    /// * `Ok(HttpResponse)` - Successful response
-    /// * `Err(Error)` - Error occurred during the request process
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`HttpClient::request`].
-    pub async fn connect(
-        &self,
-        endpoint: &str,
-        headers: &[HttpHeader<'_>],
-    ) -> Result<HttpResponse, Error> {
-        self.request(HttpMethod::CONNECT, endpoint, headers, None)
-            .await
-    }
-
-    /// Convenience method for making a GET request
-    ///
-    /// # Arguments
-    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
-    /// * `headers` - A slice of HTTP headers to include in the request
-    ///
-    /// # Returns
-    /// * `Ok(HttpResponse)` - Successful response
-    /// * `Err(Error)` - Error occurred during the request process
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`HttpClient::request`].
-    pub async fn get(
-        &self,
-        endpoint: &str,
-        headers: &[HttpHeader<'_>],
-    ) -> Result<HttpResponse, Error> {
-        self.request(HttpMethod::GET, endpoint, headers, None).await
-    }
-
-    /// Convenience method for making a POST request
-    ///
-    /// # Arguments
-    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
-    /// * `headers` - A slice of HTTP headers to include in the request
-    /// * `body` - The request body data
-    ///
-    /// # Returns
-    /// * `Ok(HttpResponse)` - Successful response
-    /// * `Err(Error)` - Error occurred during the request process
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`HttpClient::request`].
-    pub async fn post(
-        &self,
-        endpoint: &str,
-        headers: &[HttpHeader<'_>],
-        body: &[u8],
-    ) -> Result<HttpResponse, Error> {
-        self.request(HttpMethod::POST, endpoint, headers, Some(body))
-            .await
-    }
-
-    /// Convenience method for making a PUT request
-    ///
-    /// # Arguments
-    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
-    /// * `headers` - A slice of HTTP headers to include in the request
-    /// * `body` - The request body data
-    ///
-    /// # Returns
-    /// * `Ok(HttpResponse)` - Successful response
-    /// * `Err(Error)` - Error occurred during the request process
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`HttpClient::request`].
-    pub async fn put(
-        &self,
-        endpoint: &str,
-        headers: &[HttpHeader<'_>],
-        body: &[u8],
-    ) -> Result<HttpResponse, Error> {
-        self.request(HttpMethod::PUT, endpoint, headers, Some(body))
-            .await
-    }
-
-    /// Convenience method for making a DELETE request
-    ///
-    /// # Arguments
-    /// * `endpoint` - The URL to request (e.g., <http://example.com/api>)
-    /// * `headers` - A slice of HTTP headers to include in the request
-    ///
-    /// # Returns
-    /// * `Ok(HttpResponse)` - Successful response
-    /// * `Err(Error)` - Error occurred during the request process
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`HttpClient::request`].
-    pub async fn delete(
-        &self,
-        endpoint: &str,
-        headers: &[HttpHeader<'_>],
-    ) -> Result<HttpResponse, Error> {
-        self.request(HttpMethod::DELETE, endpoint, headers, None)
-            .await
+        true
     }
 }
 
