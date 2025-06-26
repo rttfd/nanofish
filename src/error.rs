@@ -24,11 +24,13 @@ pub enum Error {
     TlsError(embedded_tls::TlsError),
     // Scheme not supported
     UnsupportedScheme(&'static str),
+    // Header error, e.g. too long name or value
+    HeaderError(&'static str),
 }
 
 impl defmt::Format for Error {
     fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "{:?}", self)
+        defmt::write!(fmt, "{:?}", self);
     }
 }
 
@@ -54,5 +56,23 @@ impl From<embassy_net::tcp::Error> for Error {
 impl From<embedded_tls::TlsError> for Error {
     fn from(err: embedded_tls::TlsError) -> Self {
         Error::TlsError(err)
+    }
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Error::InvalidUrl => write!(f, "Invalid URL"),
+            Error::DnsError(_) => write!(f, "DNS resolution failed"),
+            Error::IpAddressEmpty => write!(f, "No IP addresses returned by DNS"),
+            Error::ConnectionError(_) => write!(f, "Failed to establish TCP connection"),
+            Error::TcpError(_) => write!(f, "TCP communication error"),
+            Error::NoResponse => write!(f, "No response received from server"),
+            Error::InvalidResponse(msg) => write!(f, "Invalid response: {msg}"),
+            #[cfg(feature = "tls")]
+            Error::TlsError(_) => write!(f, "TLS error occurred"),
+            Error::UnsupportedScheme(scheme) => write!(f, "Unsupported scheme: {scheme}"),
+            Error::HeaderError(msg) => write!(f, "Header error: {msg}"),
+        }
     }
 }
