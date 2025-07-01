@@ -22,3 +22,32 @@ impl Default for HttpClientOptions {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use embassy_time::Duration;
+
+    #[test]
+    fn test_default_options() {
+        let opts = HttpClientOptions::default();
+        assert_eq!(opts.max_retries, 5);
+        assert_eq!(opts.socket_timeout, Duration::from_secs(60));
+        assert_eq!(opts.retry_delay, Duration::from_millis(200));
+        assert_eq!(opts.socket_close_delay, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_custom_options() {
+        let opts = HttpClientOptions {
+            max_retries: 2,
+            socket_timeout: Duration::from_secs(10),
+            retry_delay: Duration::from_millis(50),
+            socket_close_delay: Duration::from_millis(20),
+        };
+        assert_eq!(opts.max_retries, 2);
+        assert_eq!(opts.socket_timeout, Duration::from_secs(10));
+        assert_eq!(opts.retry_delay, Duration::from_millis(50));
+        assert_eq!(opts.socket_close_delay, Duration::from_millis(20));
+    }
+}

@@ -44,3 +44,21 @@ impl HttpMethod {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_http_method_as_str() {
+        assert_eq!(HttpMethod::GET.as_str(), "GET");
+        assert_eq!(HttpMethod::POST.as_str(), "POST");
+        assert_eq!(HttpMethod::PUT.as_str(), "PUT");
+        assert_eq!(HttpMethod::DELETE.as_str(), "DELETE");
+        assert_eq!(HttpMethod::PATCH.as_str(), "PATCH");
+        assert_eq!(HttpMethod::CONNECT.as_str(), "CONNECT");
+        assert_eq!(HttpMethod::OPTIONS.as_str(), "OPTIONS");
+        assert_eq!(HttpMethod::TRACE.as_str(), "TRACE");
+        assert_eq!(HttpMethod::HEAD.as_str(), "HEAD");
+    }
+}

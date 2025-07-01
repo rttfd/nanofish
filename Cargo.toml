@@ -1,6 +1,6 @@
 [package]
 name = "nanofish"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "🐟 A lightweight, `no_std` HTTP client for embedded systems built on top of Embassy networking."
 documentation = "https://docs.rs/nanofish"
@@ -19,13 +19,12 @@ embassy-net = { version = "0.7.0", features = [
     "defmt",
     "dns",
     "medium-ethernet",
-    "proto-ipv4",
     "proto-ipv6",
     "tcp",
 ] }
-embassy-time = { version = "0.4.0", features = ["defmt"] }
-embedded-io-async = { version = "0.6.1", features = ["defmt-03"] }
+embassy-time = "0.4.0"
+embedded-io-async = "0.6.1"
 embedded-tls = { version = "0.17.0", default-features = false, optional = true }
-heapless = { version = "0.8.0", features = ["defmt-03"] }
+heapless = "0.8.0"
 rand_chacha = { version = "0.3", default-features = false, optional = true }
 rand_core = { version = "0.6.4", optional = true }

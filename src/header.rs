@@ -88,3 +88,18 @@ impl<'a> HttpHeader<'a> {
         Self::new(headers::X_API_KEY, value)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_http_header_creation() {
+        let header = HttpHeader {
+            name: "Content-Type",
+            value: "application/json",
+        };
+        assert_eq!(header.name, "Content-Type");
+        assert_eq!(header.value, "application/json");
+    }
+}

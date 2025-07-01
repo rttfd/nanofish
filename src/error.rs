@@ -76,3 +76,46 @@ impl core::fmt::Display for Error {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use embassy_net::dns;
+    use embassy_net::tcp;
+
+    #[test]
+    fn test_error_display() {
+        let e = Error::InvalidUrl;
+        assert_eq!(format!("{}", e), "Invalid URL");
+        let e = Error::IpAddressEmpty;
+        assert_eq!(format!("{}", e), "No IP addresses returned by DNS");
+        let e = Error::NoResponse;
+        assert_eq!(format!("{}", e), "No response received from server");
+        let e = Error::InvalidResponse("bad");
+        assert_eq!(format!("{}", e), "Invalid response: bad");
+        let e = Error::UnsupportedScheme("ftp");
+        assert_eq!(format!("{}", e), "Unsupported scheme: ftp");
+        let e = Error::HeaderError("too long");
+        assert_eq!(format!("{}", e), "Header error: too long");
+    }
+
+    #[test]
+    fn test_from_dns_error() {
+        let dns_err = dns::Error::InvalidName;
+        let err: Error = dns_err.into();
+        match err {
+            Error::DnsError(_) => {}
+            _ => panic!("Expected DnsError variant"),
+        }
+    }
+
+    #[test]
+    fn test_from_tcp_error() {
+        let tcp_err = tcp::Error::ConnectionReset;
+        let err: Error = tcp_err.into();
+        match err {
+            Error::TcpError(_) => {}
+            _ => panic!("Expected TcpError variant"),
+        }
+    }
+}
