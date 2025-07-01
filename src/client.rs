@@ -1,5 +1,3 @@
-#![allow(clippy::large_futures)]
-
 use crate::{
     error::Error,
     header::HttpHeader,
@@ -795,4 +793,46 @@ fn timeseed() -> [u8; 32] {
     let mut result: [u8; 32] = [0; 32];
     result[..8].copy_from_slice(&bytes);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::options::HttpClientOptions;
+    use embassy_net::Stack;
+
+    #[test]
+    fn test_is_response_complete_headers_only() {
+        let data = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n";
+        assert!(HttpClient::is_response_complete(data));
+    }
+
+    #[test]
+    fn test_is_response_complete_with_content_length() {
+        let data = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        assert!(HttpClient::is_response_complete(data));
+    }
+
+    #[test]
+    fn test_is_response_complete_incomplete() {
+        let data = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort";
+        assert!(!HttpClient::is_response_complete(data));
+    }
+
+    #[test]
+    fn test_new_and_with_options() {
+        // This test only checks that the options are set correctly, not that the stack is valid.
+        // Use a raw pointer to avoid UB and static mut issues. This is safe for type-checking only.
+        let fake_stack: *const Stack = core::ptr::NonNull::dangling().as_ptr();
+        let client = HttpClient::new(unsafe { &*fake_stack });
+        let opts = HttpClientOptions {
+            max_retries: 1,
+            socket_timeout: embassy_time::Duration::from_secs(1),
+            retry_delay: embassy_time::Duration::from_millis(1),
+            socket_close_delay: embassy_time::Duration::from_millis(1),
+        };
+        let client2 = HttpClient::with_options(unsafe { &*fake_stack }, opts);
+        assert_eq!(client.options.max_retries, 5);
+        assert_eq!(client2.options.max_retries, 1);
+    }
 }

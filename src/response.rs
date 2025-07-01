@@ -108,3 +108,54 @@ impl HttpResponse<'_> {
         (500..600).contains(&self.status_code)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::header::HttpHeader;
+    use heapless::Vec;
+
+    #[test]
+    fn test_response_body_as_str_and_bytes() {
+        let text = ResponseBody::Text("hello");
+        assert_eq!(text.as_str(), Some("hello"));
+        assert_eq!(text.as_bytes(), b"hello");
+        let bin = ResponseBody::Binary(b"bin");
+        assert_eq!(bin.as_str(), Some("bin"));
+        assert_eq!(bin.as_bytes(), b"bin");
+        let empty = ResponseBody::Empty;
+        assert_eq!(empty.as_str(), Some(""));
+        assert_eq!(empty.as_bytes(), b"");
+    }
+
+    #[test]
+    fn test_response_body_is_empty_and_len() {
+        let text = ResponseBody::Text("");
+        assert!(text.is_empty());
+        assert_eq!(text.len(), 0);
+        let bin = ResponseBody::Binary(b"");
+        assert!(bin.is_empty());
+        assert_eq!(bin.len(), 0);
+        let nonempty = ResponseBody::Text("abc");
+        assert!(!nonempty.is_empty());
+        assert_eq!(nonempty.len(), 3);
+    }
+
+    #[test]
+    fn test_http_response_get_header() {
+        let mut headers: Vec<HttpHeader, 16> = Vec::new();
+        headers
+            .push(HttpHeader {
+                name: "Content-Type",
+                value: "text/plain",
+            })
+            .unwrap();
+        let resp = HttpResponse {
+            status_code: 200,
+            headers,
+            body: ResponseBody::Empty,
+        };
+        assert_eq!(resp.get_header("content-type"), Some("text/plain"));
+        assert_eq!(resp.get_header("missing"), None);
+    }
+}

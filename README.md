@@ -41,14 +41,14 @@ To use nanofish with HTTP only (default):
 
 ```toml
 [dependencies]
-nanofish = "0.5.0"
+nanofish = "0.6.0"
 ```
 
 To use nanofish with TLS/HTTPS support:
 
 ```toml
 [dependencies]
-nanofish = { version = "0.5.0", features = ["tls"] }
+nanofish = { version = "0.6.0", features = ["tls"] }
 ```
 
 ## Example

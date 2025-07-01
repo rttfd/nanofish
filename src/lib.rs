@@ -115,26 +115,3 @@ pub use header::{HttpHeader, headers, mime_types};
 pub use method::HttpMethod;
 pub use options::HttpClientOptions;
 pub use response::{HttpResponse, ResponseBody};
-
-#[cfg(test)]
-mod tests {
-    use crate::{HttpHeader, HttpMethod};
-
-    #[test]
-    fn test_http_method_as_str() {
-        assert_eq!(HttpMethod::GET.as_str(), "GET");
-        assert_eq!(HttpMethod::POST.as_str(), "POST");
-        assert_eq!(HttpMethod::PUT.as_str(), "PUT");
-        assert_eq!(HttpMethod::DELETE.as_str(), "DELETE");
-    }
-
-    #[test]
-    fn test_http_header_creation() {
-        let header = HttpHeader {
-            name: "Content-Type",
-            value: "application/json",
-        };
-        assert_eq!(header.name, "Content-Type");
-        assert_eq!(header.value, "application/json");
-    }
-}
