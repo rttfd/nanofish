@@ -28,3 +28,7 @@ embedded-tls = { version = "0.17.0", default-features = false, optional = true }
 heapless = "0.8.0"
 rand_chacha = { version = "0.3", default-features = false, optional = true }
 rand_core = { version = "0.6.4", optional = true }
+
+[patch.crates-io]
+embassy-net = { git = "https://github.com/rttfd/embassy.git", branch = "renik" }
+embassy-time = { git = "https://github.com/rttfd/embassy.git", branch = "renik" }
