@@ -6,116 +6,97 @@
 
 # Nanofish
 
-A lightweight, `no_std` HTTP client for embedded systems built on top of Embassy networking with **true zero-copy response handling**.
+A lightweight, `no_std` HTTP client for embedded systems built on Embassy networking with zero-copy response handling.
 
-Nanofish provides a simple HTTP client implementation that works on constrained environments with no heap allocation, making it suitable for microcontrollers and other embedded systems. It features **zero-copy response handling** where all response data is borrowed directly from user-provided buffers, ensuring maximum memory efficiency.
+Nanofish is designed for embedded systems with limited memory. It provides a simple HTTP client that works without heap allocation, making it suitable for microcontrollers and `IoT` devices. The library uses zero-copy response handling where response data is borrowed directly from user-provided buffers, keeping memory usage predictable and efficient.
 
 ## Key Features
 
-- **True Zero-Copy Response Handling** - Response data is borrowed directly from user-provided buffers with no copying
-- **User-Controlled Memory Management** - You provide the buffer, controlling exactly how much memory is used
-- Full `no_std` compatibility with no heap allocations
-- Built on Embassy for async networking
-- Support for all standard HTTP methods (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, CONNECT)
-- Intelligent response body handling (automatic text/binary detection based on Content-Type)
-- Convenient header creation with pre-defined constants and methods
-- Automatic handling of common headers
-- DNS resolution
-- Timeout handling and retries
-- Optional TLS/HTTPS support (disabled by default)
+- **Zero-Copy Response Handling** - Response data is borrowed directly from user-provided buffers with no copying
+- **User-Controlled Memory** - You provide the buffer and control exactly how much memory is used
+- **No Standard Library** - Full `no_std` compatibility with no heap allocations
+- **Embassy Integration** - Built on Embassy's async networking
+- **Complete HTTP Support** - All standard HTTP methods (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, CONNECT)
+- **Smart Response Parsing** - Automatic text/binary detection based on Content-Type headers
+- **Easy Header Management** - Pre-defined constants and helper methods for common headers
+- **Optional TLS Support** - HTTPS support with embedded-tls when enabled
+- **Timeout & Retry Support** - Built-in handling for network issues
+- **DNS Resolution** - Automatic hostname resolution
 
 ## Zero-Copy Architecture
 
 Unlike traditional HTTP clients that copy response data multiple times, Nanofish uses a zero-copy approach:
 
-- **You control the buffer size** - Provide a buffer as large or small as needed for your use case
-- **Direct memory references** - Response body contains direct references to data in your buffer
-- **No hidden allocations** - All memory usage is explicit and controlled by you
-- **Optimal for embedded** - Perfect for memory-constrained environments
-
-## Feature Flags
-
-- `tls`: Enables TLS/HTTPS support via `embedded-tls`. When disabled (default), only HTTP requests are supported and HTTPS requests will return an error.
-
-To use nanofish with HTTP only (default):
-
-```toml
-[dependencies]
-nanofish = "0.5.1"
+**Traditional HTTP Clients:**
+```shell
+Network → Internal Buffer (copy #1) → Response Struct (copy #2) → User Code (copy #3)
 ```
 
-To use nanofish with TLS/HTTPS support:
-
-```toml
-[dependencies]
-nanofish = { version = "0.5.1", features = ["tls"] }
+**Nanofish Zero-Copy:**
+```shell
+Network → YOUR Buffer (direct) → Zero-Copy References → User Code (no copies!)
 ```
 
-## Example
+### Benefits:
+- **Better Performance** - No memory copying overhead
+- **Memory Efficient** - Uses only the memory you provide
+- **Predictable** - No hidden allocations
+- **Embedded-Friendly** - Works well in resource-limited environments
 
-```rust
+## Installation & Feature Flags
+
+### Basic HTTP Support (Default)
+```toml
+[dependencies]
+nanofish = "0.6.0"
+```
+
+### With TLS/HTTPS Support
+```toml
+[dependencies]
+nanofish = { version = "0.6.0", features = ["tls"] }
+```
+
+### Available Features
+- **`tls`** - Enables HTTPS/TLS support via `embedded-tls`
+  - When disabled (default): Only HTTP requests are supported
+  - When enabled: Full HTTPS support with TLS 1.2/1.3
+
+## Quick Start
+
+Here's a simple example showing how to use Nanofish:
+
+```rust,ignore
 use nanofish::{HttpClient, HttpHeader, ResponseBody, headers, mime_types};
 use embassy_net::Stack;
 
 async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
-    // Create an HTTP client with a network stack
-    let client = HttpClient::new(stack);
-    
-    // You control the buffer size - make it as large or small as needed!
-    let mut response_buffer = [0u8; 8192]; // 8KB buffer for this example
-    
-    // Define headers using convenience methods
-    let headers = [
-        HttpHeader::user_agent("Nanofish/0.5.0"),
-        HttpHeader::content_type(mime_types::JSON),
-        HttpHeader::authorization("Bearer token123"),
-    ];
-    
-    // Or create headers manually for custom needs
-    let custom_headers = [
-        HttpHeader { name: "X-Custom-Header", value: "custom-value" },
-        HttpHeader::new(headers::ACCEPT, mime_types::JSON),
-    ];
-    
-    // Make a GET request with zero-copy response handling
-    let (response, bytes_read) = client.get(
-        "http://example.com/api/status", 
-        &headers,
-        &mut response_buffer  // Your buffer - no hidden allocations!
-    ).await?;
-    
-    println!("Read {} bytes into buffer", bytes_read);
-    
-    // Check if the request was successful
-    if response.is_success() {
-        // Get specific headers
-        if let Some(content_type) = response.content_type() {
-            println!("Content-Type: {}", content_type);
-        }
-        
-        // Handle different body types - all data references your buffer directly!
-        match &response.body {
-            ResponseBody::Text(text) => {
-                // text is a &str referencing data in your response_buffer
-                println!("Received text: {}", text);
-            }
-            ResponseBody::Binary(bytes) => {
-                // bytes is a &[u8] referencing data in your response_buffer
-                println!("Received {} bytes of binary data", bytes.len());
-            }
-            ResponseBody::Empty => {
-                println!("Empty response body");
-            }
-        }
-    }
-    
-    Ok(())
+    ...
+    // See crate docs for full async usage example
 }
+
+let client = HttpClient::new(unsafe { core::ptr::NonNull::dangling().as_ref() });
+let mut response_buffer = [0u8; 8192];
+let headers = [
+    HttpHeader::user_agent("Nanofish/0.6.0"),
+    HttpHeader::content_type(mime_types::JSON),
+    HttpHeader::authorization("Bearer token123"),
+];
+let custom_headers = [
+    HttpHeader { name: "X-Custom-Header", value: "custom-value" },
+    HttpHeader::new(headers::ACCEPT, mime_types::JSON),
+];
+let (response, bytes_read) = client.get(
+    "http://example.com/api/status", 
+    &headers,
+    &mut response_buffer
+).await?;
+println!("Read {} bytes into buffer", bytes_read);
 ```
 
 ## Zero-Copy Benefits
 
-```rust
+```rust,ignore
 // Traditional approach (copies data):
 // 1. Read from network → internal buffer (copy #1)
 // 2. Parse response → response struct (copy #2) 
@@ -136,7 +117,7 @@ let (large_response, _) = client.get(url, &headers, &mut large_buffer).await?;
 
 ## Header Convenience Features
 
-Nanofish provides convenient ways to work with common HTTP headers:
+Nanofish provides helpful APIs for working with HTTP headers:
 
 ### Pre-defined Header Constants
 
@@ -165,6 +146,7 @@ let html = mime_types::HTML;    // "text/html"
 ### Convenience Methods
 
 ```rust
+use nanofish::{HttpHeader, mime_types};
 // Easy creation of common headers
 let headers = [
     HttpHeader::content_type(mime_types::JSON),
@@ -179,47 +161,40 @@ let headers = [
 
 Nanofish automatically determines the appropriate response body type based on the Content-Type header:
 
-```rust
+```rust,ignore
+use nanofish::ResponseBody;
 // The response body is automatically parsed based on content type
 match &response.body {
     ResponseBody::Text(text) => {
-        // Text content (text/*, application/json, application/xml, etc.)
         println!("Text response: {}", text);
     }
     ResponseBody::Binary(bytes) => {
-        // Binary content (images, files, etc.)
         println!("Binary response: {} bytes", bytes.len());
     }
     ResponseBody::Empty => {
-        // No response body
         println!("Empty response");
     }
 }
 
-// Convenience methods for response analysis
 if response.is_success() {
     println!("Request successful! Status: {}", response.status_code);
 }
-
 if response.is_client_error() {
     println!("Client error: {}", response.status_code);
 }
-
 if response.is_server_error() {
     println!("Server error: {}", response.status_code);
 }
-
-// Easy access to common headers
 if let Some(content_length) = response.content_length() {
     println!("Content length: {} bytes", content_length);
 }
-```
 
-## Convenience Methods
 
-Nanofish provides convenience methods for all standard HTTP verbs, all using the same zero-copy approach:
+## HTTP Methods Support
 
-```rust
+Nanofish provides convenience methods for all standard HTTP verbs:
+
+```rust,ignore
 // All methods require a buffer and return (HttpResponse, bytes_read)
 let mut buffer = [0u8; 4096];
 
@@ -272,7 +247,9 @@ All methods return a `Result<(HttpResponse, usize), Error>` where:
 
 ## Memory Efficiency Examples
 
-```rust
+Choose your buffer size based on your needs:
+
+```rust,ignore
 // Scenario 1: Memory-constrained device (1KB buffer)
 let mut tiny_buffer = [0u8; 1024];
 let (response, _) = client.get(url, &headers, &mut tiny_buffer).await?;
@@ -294,11 +271,4 @@ for url in urls {
 
 ## License
 
-The MIT License (MIT)
-Copyright © 2025 rttf.dev
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+[MIT](license)
