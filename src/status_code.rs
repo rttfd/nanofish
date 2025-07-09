@@ -97,10 +97,9 @@ pub enum StatusCode {
 
 #[allow(dead_code)]
 impl StatusCode {
-    /// Get the standard reason phrase for the status code.
-    /// Returns the standard reason phrase for the status code.
+    /// Returns the status code text.
     #[must_use]
-    pub fn reason_phrase(self) -> &'static str {
+    pub fn text(self) -> &'static str {
         match self {
             // 1xx
             StatusCode::Continue => "Continue",
@@ -227,18 +226,15 @@ mod tests {
     }
 
     #[test]
-    fn test_reason_phrase() {
-        assert_eq!(StatusCode::Ok.reason_phrase(), "OK");
-        assert_eq!(StatusCode::NotFound.reason_phrase(), "Not Found");
+    fn test_text() {
+        assert_eq!(StatusCode::Ok.text(), "OK");
+        assert_eq!(StatusCode::NotFound.text(), "Not Found");
         assert_eq!(
-            StatusCode::InternalServerError.reason_phrase(),
+            StatusCode::InternalServerError.text(),
             "Internal Server Error"
         );
-        assert_eq!(StatusCode::BadRequest.reason_phrase(), "Bad Request");
-        assert_eq!(
-            StatusCode::TemporaryRedirect.reason_phrase(),
-            "Temporary Redirect"
-        );
+        assert_eq!(StatusCode::BadRequest.text(), "Bad Request");
+        assert_eq!(StatusCode::TemporaryRedirect.text(), "Temporary Redirect");
     }
 
     #[test]
