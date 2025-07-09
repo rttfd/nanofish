@@ -337,7 +337,7 @@ impl<'a> HttpClient<'a> {
                     }
                 }
                 Err(e) => {
-                    error!("Socket read error: {:?}", e);
+                    error!("Socket read error: {:?}", defmt::Debug2Format(&e));
                     retries -= 1;
                     if retries > 0 {
                         Timer::after(self.options.retry_delay).await;

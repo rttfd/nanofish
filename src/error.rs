@@ -4,6 +4,7 @@
 /// during various stages of request processing, from URL parsing to connection
 /// establishment and response handling.
 #[derive(Debug)]
+/// All possible errors returned by the HTTP client.
 pub enum Error {
     /// The provided URL was invalid or malformed
     InvalidUrl,
@@ -22,15 +23,15 @@ pub enum Error {
     /// This error occurs when there is an issue with the TLS handshake or communication.
     #[cfg(feature = "tls")]
     TlsError(embedded_tls::TlsError),
-    // Scheme not supported
+    /// Scheme not supported
     UnsupportedScheme(&'static str),
-    // Header error, e.g. too long name or value
+    /// Header error, e.g. too long name or value
     HeaderError(&'static str),
 }
 
 impl defmt::Format for Error {
     fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "{:?}", self);
+        defmt::write!(fmt, "{:?}", defmt::Debug2Format(self));
     }
 }
 
@@ -86,17 +87,17 @@ mod tests {
     #[test]
     fn test_error_display() {
         let e = Error::InvalidUrl;
-        assert_eq!(format!("{}", e), "Invalid URL");
+        assert_eq!(format!("{e}"), "Invalid URL");
         let e = Error::IpAddressEmpty;
-        assert_eq!(format!("{}", e), "No IP addresses returned by DNS");
+        assert_eq!(format!("{e}"), "No IP addresses returned by DNS");
         let e = Error::NoResponse;
-        assert_eq!(format!("{}", e), "No response received from server");
+        assert_eq!(format!("{e}"), "No response received from server");
         let e = Error::InvalidResponse("bad");
-        assert_eq!(format!("{}", e), "Invalid response: bad");
+        assert_eq!(format!("{e}"), "Invalid response: bad");
         let e = Error::UnsupportedScheme("ftp");
-        assert_eq!(format!("{}", e), "Unsupported scheme: ftp");
+        assert_eq!(format!("{e}"), "Unsupported scheme: ftp");
         let e = Error::HeaderError("too long");
-        assert_eq!(format!("{}", e), "Header error: too long");
+        assert_eq!(format!("{e}"), "Header error: too long");
     }
 
     #[test]
