@@ -4,6 +4,7 @@ use crate::{
     method::HttpMethod,
     options::HttpClientOptions,
     response::{HttpResponse, ResponseBody},
+    status_code::StatusCode,
 };
 #[cfg(feature = "tls")]
 use defmt::debug;
@@ -614,9 +615,7 @@ impl<'a> HttpClient<'a> {
             .nth(1)
             .ok_or(Error::InvalidResponse("Invalid HTTP status line"))?;
 
-        let status_code = status_code_str
-            .parse::<u16>()
-            .map_err(|_| Error::InvalidResponse("Invalid HTTP status code"))?;
+        let status_code: StatusCode = status_code_str.try_into()?;
 
         let headers_end = response_str
             .find("\r\n\r\n")

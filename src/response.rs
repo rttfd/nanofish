@@ -1,4 +1,4 @@
-use crate::header::HttpHeader;
+use crate::{HttpHeader, StatusCode};
 use heapless::Vec;
 
 /// HTTP Response body that can handle both text and binary data using zero-copy references
@@ -61,7 +61,7 @@ impl ResponseBody<'_> {
 /// either text or binary data using zero-copy references.
 pub struct HttpResponse<'a> {
     /// The HTTP status code (e.g., 200 for OK, 404 for Not Found)
-    pub status_code: u16,
+    pub status_code: StatusCode,
     /// A collection of response headers with both names and values
     pub headers: Vec<HttpHeader<'a>, 16>,
     /// The response body that can handle both text and binary data
@@ -93,19 +93,19 @@ impl HttpResponse<'_> {
     /// Check if the response indicates success (2xx status codes)
     #[must_use]
     pub fn is_success(&self) -> bool {
-        (200..300).contains(&self.status_code)
+        self.status_code.is_success()
     }
 
     /// Check if the response is a client error (4xx status codes)
     #[must_use]
     pub fn is_client_error(&self) -> bool {
-        (400..500).contains(&self.status_code)
+        self.status_code.is_client_error()
     }
 
     /// Check if the response is a server error (5xx status codes)
     #[must_use]
     pub fn is_server_error(&self) -> bool {
-        (500..600).contains(&self.status_code)
+        self.status_code.is_server_error()
     }
 }
 
@@ -151,7 +151,7 @@ mod tests {
             })
             .unwrap();
         let resp = HttpResponse {
-            status_code: 200,
+            status_code: StatusCode::Ok,
             headers,
             body: ResponseBody::Empty,
         };
