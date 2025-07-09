@@ -1,5 +1,4 @@
 /// HTTP/1.1 status codes as defined in RFC 2616 section 10
-/// Predefined HTTP status codes as per RFC 2616 section 10.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum StatusCode {
@@ -93,10 +92,59 @@ pub enum StatusCode {
     GatewayTimeout = 504,
     /// 505 HTTP Version Not Supported: The HTTP version used in the request is not supported by the server.
     HttpVersionNotSupported = 505,
+    /// Any other (unknown or non-standard) status code
+    Other(u16),
 }
 
 #[allow(dead_code)]
 impl StatusCode {
+    /// Returns the numeric status code as u16.
+    #[must_use]
+    pub fn as_u16(self) -> u16 {
+        match self {
+            StatusCode::Continue => 100,
+            StatusCode::SwitchingProtocols => 101,
+            StatusCode::Ok => 200,
+            StatusCode::Created => 201,
+            StatusCode::Accepted => 202,
+            StatusCode::NonAuthoritativeInformation => 203,
+            StatusCode::NoContent => 204,
+            StatusCode::ResetContent => 205,
+            StatusCode::PartialContent => 206,
+            StatusCode::MultipleChoices => 300,
+            StatusCode::MovedPermanently => 301,
+            StatusCode::Found => 302,
+            StatusCode::SeeOther => 303,
+            StatusCode::NotModified => 304,
+            StatusCode::UseProxy => 305,
+            StatusCode::TemporaryRedirect => 307,
+            StatusCode::BadRequest => 400,
+            StatusCode::Unauthorized => 401,
+            StatusCode::PaymentRequired => 402,
+            StatusCode::Forbidden => 403,
+            StatusCode::NotFound => 404,
+            StatusCode::MethodNotAllowed => 405,
+            StatusCode::NotAcceptable => 406,
+            StatusCode::ProxyAuthenticationRequired => 407,
+            StatusCode::RequestTimeout => 408,
+            StatusCode::Conflict => 409,
+            StatusCode::Gone => 410,
+            StatusCode::LengthRequired => 411,
+            StatusCode::PreconditionFailed => 412,
+            StatusCode::RequestEntityTooLarge => 413,
+            StatusCode::RequestUriTooLong => 414,
+            StatusCode::UnsupportedMediaType => 415,
+            StatusCode::RequestedRangeNotSatisfiable => 416,
+            StatusCode::ExpectationFailed => 417,
+            StatusCode::InternalServerError => 500,
+            StatusCode::NotImplemented => 501,
+            StatusCode::BadGateway => 502,
+            StatusCode::ServiceUnavailable => 503,
+            StatusCode::GatewayTimeout => 504,
+            StatusCode::HttpVersionNotSupported => 505,
+            StatusCode::Other(code) => code,
+        }
+    }
     /// Returns the status code text.
     #[must_use]
     pub fn text(self) -> &'static str {
@@ -146,54 +194,101 @@ impl StatusCode {
             StatusCode::ServiceUnavailable => "Service Unavailable",
             StatusCode::GatewayTimeout => "Gateway Timeout",
             StatusCode::HttpVersionNotSupported => "HTTP Version Not Supported",
+            StatusCode::Other(_) => "Other",
         }
     }
 
-    /// Try to convert a u16 to a `StatusCode`.
+    /// Check if the status code indicates success (2xx status codes)
     #[must_use]
-    pub fn from_u16(code: u16) -> Option<StatusCode> {
+    pub fn is_success(self) -> bool {
+        let code = self.as_u16();
+        (200..300).contains(&code)
+    }
+
+    /// Check if the status code is a client error (4xx status codes)
+    #[must_use]
+    pub fn is_client_error(self) -> bool {
+        let code = self.as_u16();
+        (400..500).contains(&code)
+    }
+
+    /// Check if the status code is a server error (5xx status codes)
+    #[must_use]
+    pub fn is_server_error(self) -> bool {
+        let code = self.as_u16();
+        (500..600).contains(&code)
+    }
+}
+
+impl From<u16> for StatusCode {
+    fn from(code: u16) -> Self {
         match code {
-            100 => Some(StatusCode::Continue),
-            101 => Some(StatusCode::SwitchingProtocols),
-            200 => Some(StatusCode::Ok),
-            201 => Some(StatusCode::Created),
-            202 => Some(StatusCode::Accepted),
-            203 => Some(StatusCode::NonAuthoritativeInformation),
-            204 => Some(StatusCode::NoContent),
-            205 => Some(StatusCode::ResetContent),
-            206 => Some(StatusCode::PartialContent),
-            300 => Some(StatusCode::MultipleChoices),
-            301 => Some(StatusCode::MovedPermanently),
-            302 => Some(StatusCode::Found),
-            303 => Some(StatusCode::SeeOther),
-            304 => Some(StatusCode::NotModified),
-            305 => Some(StatusCode::UseProxy),
-            307 => Some(StatusCode::TemporaryRedirect),
-            400 => Some(StatusCode::BadRequest),
-            401 => Some(StatusCode::Unauthorized),
-            402 => Some(StatusCode::PaymentRequired),
-            403 => Some(StatusCode::Forbidden),
-            404 => Some(StatusCode::NotFound),
-            405 => Some(StatusCode::MethodNotAllowed),
-            406 => Some(StatusCode::NotAcceptable),
-            407 => Some(StatusCode::ProxyAuthenticationRequired),
-            408 => Some(StatusCode::RequestTimeout),
-            409 => Some(StatusCode::Conflict),
-            410 => Some(StatusCode::Gone),
-            411 => Some(StatusCode::LengthRequired),
-            412 => Some(StatusCode::PreconditionFailed),
-            413 => Some(StatusCode::RequestEntityTooLarge),
-            414 => Some(StatusCode::RequestUriTooLong),
-            415 => Some(StatusCode::UnsupportedMediaType),
-            416 => Some(StatusCode::RequestedRangeNotSatisfiable),
-            417 => Some(StatusCode::ExpectationFailed),
-            500 => Some(StatusCode::InternalServerError),
-            501 => Some(StatusCode::NotImplemented),
-            502 => Some(StatusCode::BadGateway),
-            503 => Some(StatusCode::ServiceUnavailable),
-            504 => Some(StatusCode::GatewayTimeout),
-            505 => Some(StatusCode::HttpVersionNotSupported),
-            _ => None,
+            100 => StatusCode::Continue,
+            101 => StatusCode::SwitchingProtocols,
+            200 => StatusCode::Ok,
+            201 => StatusCode::Created,
+            202 => StatusCode::Accepted,
+            203 => StatusCode::NonAuthoritativeInformation,
+            204 => StatusCode::NoContent,
+            205 => StatusCode::ResetContent,
+            206 => StatusCode::PartialContent,
+            300 => StatusCode::MultipleChoices,
+            301 => StatusCode::MovedPermanently,
+            302 => StatusCode::Found,
+            303 => StatusCode::SeeOther,
+            304 => StatusCode::NotModified,
+            305 => StatusCode::UseProxy,
+            307 => StatusCode::TemporaryRedirect,
+            400 => StatusCode::BadRequest,
+            401 => StatusCode::Unauthorized,
+            402 => StatusCode::PaymentRequired,
+            403 => StatusCode::Forbidden,
+            404 => StatusCode::NotFound,
+            405 => StatusCode::MethodNotAllowed,
+            406 => StatusCode::NotAcceptable,
+            407 => StatusCode::ProxyAuthenticationRequired,
+            408 => StatusCode::RequestTimeout,
+            409 => StatusCode::Conflict,
+            410 => StatusCode::Gone,
+            411 => StatusCode::LengthRequired,
+            412 => StatusCode::PreconditionFailed,
+            413 => StatusCode::RequestEntityTooLarge,
+            414 => StatusCode::RequestUriTooLong,
+            415 => StatusCode::UnsupportedMediaType,
+            416 => StatusCode::RequestedRangeNotSatisfiable,
+            417 => StatusCode::ExpectationFailed,
+            500 => StatusCode::InternalServerError,
+            501 => StatusCode::NotImplemented,
+            502 => StatusCode::BadGateway,
+            503 => StatusCode::ServiceUnavailable,
+            504 => StatusCode::GatewayTimeout,
+            505 => StatusCode::HttpVersionNotSupported,
+            other => StatusCode::Other(other),
+        }
+    }
+}
+
+impl TryFrom<&str> for StatusCode {
+    type Error = crate::Error;
+
+    /// Parse a status code from a string slice.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use nanofish::StatusCode;
+    ///
+    /// let code: StatusCode = "200".try_into().unwrap();
+    /// assert_eq!(code, StatusCode::Ok);
+    ///
+    /// let result: Result<StatusCode, _> = "999".try_into();
+    /// assert_eq!(result.unwrap(), StatusCode::Other(999));
+    /// ```
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if let Ok(code) = value.parse::<u16>() {
+            Ok(StatusCode::from(code))
+        } else {
+            Err(crate::Error::InvalidStatusCode)
         }
     }
 }
@@ -204,25 +299,30 @@ mod tests {
 
     #[test]
     fn test_from_u16_known_codes() {
-        // Test a few known codes
-        assert_eq!(StatusCode::from_u16(200), Some(StatusCode::Ok));
-        assert_eq!(StatusCode::from_u16(404), Some(StatusCode::NotFound));
-        assert_eq!(
-            StatusCode::from_u16(500),
-            Some(StatusCode::InternalServerError)
-        );
-        assert_eq!(StatusCode::from_u16(100), Some(StatusCode::Continue));
-        assert_eq!(
-            StatusCode::from_u16(307),
-            Some(StatusCode::TemporaryRedirect)
-        );
+        // Test a few known codes using From
+        let code: StatusCode = 200_u16.into();
+        assert_eq!(code, StatusCode::Ok);
+
+        let code: StatusCode = 404_u16.into();
+        assert_eq!(code, StatusCode::NotFound);
+
+        let code: StatusCode = 500_u16.into();
+        assert_eq!(code, StatusCode::InternalServerError);
+
+        let code: StatusCode = 100_u16.into();
+        assert_eq!(code, StatusCode::Continue);
+
+        let code: StatusCode = 307_u16.into();
+        assert_eq!(code, StatusCode::TemporaryRedirect);
     }
 
     #[test]
     fn test_from_u16_unknown_code() {
-        // Test an unknown code
-        assert_eq!(StatusCode::from_u16(999), None);
-        assert_eq!(StatusCode::from_u16(150), None);
+        // Test unknown codes using From
+        let code: StatusCode = 999_u16.into();
+        assert_eq!(code, StatusCode::Other(999));
+        let code: StatusCode = 150_u16.into();
+        assert_eq!(code, StatusCode::Other(150));
     }
 
     #[test]
@@ -240,10 +340,105 @@ mod tests {
     #[test]
     fn test_enum_values_match_code() {
         // Ensure the discriminant matches the HTTP code
-        assert_eq!(StatusCode::Ok as u16, 200);
-        assert_eq!(StatusCode::NotFound as u16, 404);
-        assert_eq!(StatusCode::InternalServerError as u16, 500);
-        assert_eq!(StatusCode::Continue as u16, 100);
-        assert_eq!(StatusCode::TemporaryRedirect as u16, 307);
+        assert_eq!(StatusCode::Ok.as_u16(), 200);
+        assert_eq!(StatusCode::NotFound.as_u16(), 404);
+        assert_eq!(StatusCode::InternalServerError.as_u16(), 500);
+        assert_eq!(StatusCode::Continue.as_u16(), 100);
+        assert_eq!(StatusCode::TemporaryRedirect.as_u16(), 307);
+    }
+
+    #[test]
+    fn test_is_success() {
+        assert!(StatusCode::Ok.is_success());
+        assert!(StatusCode::Created.is_success());
+        assert!(StatusCode::Accepted.is_success());
+        assert!(StatusCode::NoContent.is_success());
+
+        assert!(!StatusCode::Continue.is_success());
+        assert!(!StatusCode::NotFound.is_success());
+        assert!(!StatusCode::InternalServerError.is_success());
+        assert!(!StatusCode::MovedPermanently.is_success());
+    }
+
+    #[test]
+    fn test_is_client_error() {
+        assert!(StatusCode::BadRequest.is_client_error());
+        assert!(StatusCode::Unauthorized.is_client_error());
+        assert!(StatusCode::Forbidden.is_client_error());
+        assert!(StatusCode::NotFound.is_client_error());
+        assert!(StatusCode::MethodNotAllowed.is_client_error());
+
+        assert!(!StatusCode::Ok.is_client_error());
+        assert!(!StatusCode::Continue.is_client_error());
+        assert!(!StatusCode::InternalServerError.is_client_error());
+        assert!(!StatusCode::MovedPermanently.is_client_error());
+    }
+
+    #[test]
+    fn test_is_server_error() {
+        assert!(StatusCode::InternalServerError.is_server_error());
+        assert!(StatusCode::NotImplemented.is_server_error());
+        assert!(StatusCode::BadGateway.is_server_error());
+        assert!(StatusCode::ServiceUnavailable.is_server_error());
+        assert!(StatusCode::GatewayTimeout.is_server_error());
+
+        assert!(!StatusCode::Ok.is_server_error());
+        assert!(!StatusCode::Continue.is_server_error());
+        assert!(!StatusCode::NotFound.is_server_error());
+        assert!(!StatusCode::MovedPermanently.is_server_error());
+    }
+
+    #[test]
+    fn test_try_from_str_valid() {
+        // Test valid status code strings
+        let code: StatusCode = "200".try_into().unwrap();
+        assert_eq!(code, StatusCode::Ok);
+
+        let code: StatusCode = "404".try_into().unwrap();
+        assert_eq!(code, StatusCode::NotFound);
+
+        let code: StatusCode = "500".try_into().unwrap();
+        assert_eq!(code, StatusCode::InternalServerError);
+
+        let code: StatusCode = "100".try_into().unwrap();
+        assert_eq!(code, StatusCode::Continue);
+    }
+
+    #[test]
+    fn test_try_from_str_invalid() {
+        // Only non-numeric/invalid strings should error
+        let result: Result<StatusCode, _> = "abc".try_into();
+        assert!(result.is_err());
+
+        let result: Result<StatusCode, _> = "".try_into();
+        assert!(result.is_err());
+
+        let result: Result<StatusCode, _> = "12345".try_into();
+        assert_eq!(result.unwrap(), StatusCode::Other(12345));
+
+        // Numeric strings always succeed, even if unknown
+        let result: Result<StatusCode, _> = "999".try_into();
+        assert_eq!(result.unwrap(), StatusCode::Other(999));
+        let result: Result<StatusCode, _> = "150".try_into();
+        assert_eq!(result.unwrap(), StatusCode::Other(150));
+    }
+
+    #[test]
+    fn test_try_from_u16_valid() {
+        // Test valid status codes
+        let code: StatusCode = 200_u16.into();
+        assert_eq!(code, StatusCode::Ok);
+
+        let code: StatusCode = 404_u16.into();
+        assert_eq!(code, StatusCode::NotFound);
+
+        let code: StatusCode = 500_u16.into();
+        assert_eq!(code, StatusCode::InternalServerError);
+
+        let code: StatusCode = 100_u16.into();
+        assert_eq!(code, StatusCode::Continue);
+
+        let code: StatusCode = 307_u16.into();
+        assert_eq!(code, StatusCode::TemporaryRedirect);
     }
 }

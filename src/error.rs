@@ -27,6 +27,8 @@ pub enum Error {
     UnsupportedScheme(&'static str),
     /// Header error, e.g. too long name or value
     HeaderError(&'static str),
+    /// Invalid status code received from the server
+    InvalidStatusCode,
 }
 
 impl defmt::Format for Error {
@@ -74,6 +76,7 @@ impl core::fmt::Display for Error {
             Error::TlsError(_) => write!(f, "TLS error occurred"),
             Error::UnsupportedScheme(scheme) => write!(f, "Unsupported scheme: {scheme}"),
             Error::HeaderError(msg) => write!(f, "Header error: {msg}"),
+            Error::InvalidStatusCode => write!(f, "Invalid status code"),
         }
     }
 }
@@ -98,6 +101,8 @@ mod tests {
         assert_eq!(format!("{e}"), "Unsupported scheme: ftp");
         let e = Error::HeaderError("too long");
         assert_eq!(format!("{e}"), "Header error: too long");
+        let e = Error::InvalidStatusCode;
+        assert_eq!(format!("{e}"), "Invalid status code");
     }
 
     #[test]

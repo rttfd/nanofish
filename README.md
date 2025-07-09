@@ -48,13 +48,13 @@ Network → YOUR Buffer (direct) → Zero-Copy References → User Code (no copi
 ### Basic HTTP Support (Default)
 ```toml
 [dependencies]
-nanofish = "0.6.0"
+nanofish = "0.7.0"
 ```
 
 ### With TLS/HTTPS Support
 ```toml
 [dependencies]
-nanofish = { version = "0.6.0", features = ["tls"] }
+nanofish = { version = "0.7.0", features = ["tls"] }
 ```
 
 ### Available Features
@@ -184,6 +184,11 @@ if response.is_client_error() {
 }
 if response.is_server_error() {
     println!("Server error: {}", response.status_code);
+}
+
+// You can also check status directly on the status code:
+if response.status_code.is_success() {
+    println!("Success!");
 }
 if let Some(content_length) = response.content_length() {
     println!("Content length: {} bytes", content_length);
