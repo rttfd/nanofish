@@ -28,9 +28,17 @@ use rand_core::SeedableRng;
 
 // Buffer sizes remain as compile-time constants
 const REQUEST_SIZE: usize = 1024;
-const TRANSMIT_BUFFER_SIZE: usize = 4096;
-const RECEIVE_BUFFER_SIZE: usize = 4096;
 const MAX_HEADERS: usize = 16;
+const SMALL_BUFFER_SIZE: usize = 1024;
+const MEDIUM_BUFFER_SIZE: usize = 4096;
+
+/// Type alias for `HttpClient` with default buffer sizes
+pub type DefaultHttpClient<'a> =
+    HttpClient<'a, MEDIUM_BUFFER_SIZE, MEDIUM_BUFFER_SIZE, MEDIUM_BUFFER_SIZE, MEDIUM_BUFFER_SIZE>;
+
+/// Type alias for `HttpClient` with small buffer sizes for memory-constrained environments
+pub type SmallHttpClient<'a> =
+    HttpClient<'a, SMALL_BUFFER_SIZE, SMALL_BUFFER_SIZE, SMALL_BUFFER_SIZE, SMALL_BUFFER_SIZE>;
 
 macro_rules! try_push {
     ($expr:expr) => {
@@ -49,15 +57,30 @@ macro_rules! try_push {
 /// The client is designed to work with Embassy's networking stack and requires
 /// users to provide their own response buffers, ensuring maximum memory efficiency
 /// and control while maintaining `no_std` compatibility.
-pub struct HttpClient<'a> {
+///
+/// # Type Parameters
+///
+/// * `TCP_RX` - TCP receive buffer size
+/// * `TCP_TX` - TCP transmit buffer size  
+/// * `TLS_READ` - TLS read record buffer size (when TLS feature is enabled)
+/// * `TLS_WRITE` - TLS write record buffer size (when TLS feature is enabled)
+pub struct HttpClient<
+    'a,
+    const TCP_RX: usize = MEDIUM_BUFFER_SIZE,
+    const TCP_TX: usize = MEDIUM_BUFFER_SIZE,
+    const TLS_READ: usize = MEDIUM_BUFFER_SIZE,
+    const TLS_WRITE: usize = MEDIUM_BUFFER_SIZE,
+> {
     /// Reference to the Embassy network stack
     stack: &'a Stack<'a>,
     /// HTTP client options
     options: HttpClientOptions,
 }
 
-impl<'a> HttpClient<'a> {
-    /// Create a new HTTP client with default options
+impl<'a, const TCP_RX: usize, const TCP_TX: usize, const TLS_READ: usize, const TLS_WRITE: usize>
+    HttpClient<'a, TCP_RX, TCP_TX, TLS_READ, TLS_WRITE>
+{
+    /// Create a new HTTP client with custom buffer sizes and default options
     #[must_use]
     pub fn new(stack: &'a Stack<'a>) -> Self {
         Self {
@@ -66,7 +89,7 @@ impl<'a> HttpClient<'a> {
         }
     }
 
-    /// Create a new HTTP client with custom options
+    /// Create a new HTTP client with custom buffer sizes and custom options
     #[must_use]
     pub fn with_options(stack: &'a Stack<'a>, options: HttpClientOptions) -> Self {
         Self { stack, options }
@@ -104,10 +127,11 @@ impl<'a> HttpClient<'a> {
     /// # Examples
     ///
     /// ```no_run
-    /// use nanofish::{HttpClient, HttpHeader, HttpMethod, ResponseBody};
+    /// use nanofish::{DefaultHttpClient, HttpHeader, HttpMethod, ResponseBody};
     /// use embassy_net::Stack;
     ///
-    /// async fn example(client: &HttpClient<'_>) -> Result<(), nanofish::Error> {
+    /// async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
+    ///     let client = DefaultHttpClient::new(stack);
     ///     let mut buffer = [0u8; 8192]; // You control the buffer size!
     ///     let (response, bytes_read) = client.request(
     ///         HttpMethod::GET,
@@ -142,7 +166,12 @@ impl<'a> HttpClient<'a> {
             return Err(Error::InvalidUrl);
         };
 
-        let url_parts: Vec<&str, 8> = host_port.split('/').collect();
+        let mut url_parts = heapless::Vec::<&str, 8>::new();
+        for part in host_port.splitn(8, '/') {
+            if url_parts.push(part).is_err() {
+                break;
+            }
+        }
         if url_parts.is_empty() {
             return Err(Error::InvalidUrl);
         }
@@ -191,8 +220,8 @@ impl<'a> HttpClient<'a> {
         response_buffer: &mut [u8],
     ) -> Result<usize, Error> {
         let (host, port) = host_port;
-        let mut rx_buffer = [0; RECEIVE_BUFFER_SIZE];
-        let mut tx_buffer = [0; TRANSMIT_BUFFER_SIZE];
+        let mut rx_buffer = [0; TCP_RX];
+        let mut tx_buffer = [0; TCP_TX];
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(self.options.socket_timeout));
 
@@ -214,8 +243,8 @@ impl<'a> HttpClient<'a> {
                 Error::from(e)
             })?;
 
-        let mut read_record_buffer = [0; 16384];
-        let mut write_record_buffer = [0; 16384];
+        let mut read_record_buffer = [0; TLS_READ];
+        let mut write_record_buffer = [0; TLS_WRITE];
 
         let tls_config: TlsConfig<'_, Aes128GcmSha256> = TlsConfig::new().with_server_name(host);
         let mut tls = TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
@@ -283,8 +312,8 @@ impl<'a> HttpClient<'a> {
         response_buffer: &mut [u8],
     ) -> Result<usize, Error> {
         let (host, port) = host_port;
-        let mut rx_buffer = [0; RECEIVE_BUFFER_SIZE];
-        let mut tx_buffer = [0; TRANSMIT_BUFFER_SIZE];
+        let mut rx_buffer = [0; TCP_RX];
+        let mut tx_buffer = [0; TCP_TX];
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(self.options.socket_timeout));
 
@@ -797,25 +826,25 @@ fn timeseed() -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::options::HttpClientOptions;
+    use crate::options::*;
     use embassy_net::Stack;
 
     #[test]
     fn test_is_response_complete_headers_only() {
         let data = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n";
-        assert!(HttpClient::is_response_complete(data));
+        assert!(DefaultHttpClient::is_response_complete(data));
     }
 
     #[test]
     fn test_is_response_complete_with_content_length() {
         let data = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
-        assert!(HttpClient::is_response_complete(data));
+        assert!(DefaultHttpClient::is_response_complete(data));
     }
 
     #[test]
     fn test_is_response_complete_incomplete() {
         let data = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort";
-        assert!(!HttpClient::is_response_complete(data));
+        assert!(!DefaultHttpClient::is_response_complete(data));
     }
 
     #[test]
@@ -823,15 +852,51 @@ mod tests {
         // This test only checks that the options are set correctly, not that the stack is valid.
         // Use a raw pointer to avoid UB and static mut issues. This is safe for type-checking only.
         let fake_stack: *const Stack = core::ptr::NonNull::dangling().as_ptr();
-        let client = HttpClient::new(unsafe { &*fake_stack });
+        let client = DefaultHttpClient::new(unsafe { &*fake_stack });
         let opts = HttpClientOptions {
             max_retries: 1,
             socket_timeout: embassy_time::Duration::from_secs(1),
             retry_delay: embassy_time::Duration::from_millis(1),
             socket_close_delay: embassy_time::Duration::from_millis(1),
         };
-        let client2 = HttpClient::with_options(unsafe { &*fake_stack }, opts);
+        let client2 = DefaultHttpClient::with_options(unsafe { &*fake_stack }, opts);
         assert_eq!(client.options.max_retries, 5);
         assert_eq!(client2.options.max_retries, 1);
+    }
+
+    #[test]
+    fn test_default_http_client_constructors() {
+        let fake_stack: *const Stack = core::ptr::NonNull::dangling().as_ptr();
+        let client_default = DefaultHttpClient::new(unsafe { &*fake_stack });
+        assert_eq!(client_default.options.max_retries, 5);
+
+        let client_custom = DefaultHttpClient::with_options(
+            unsafe { &*fake_stack },
+            HttpClientOptions {
+                max_retries: 3,
+                socket_timeout: embassy_time::Duration::from_secs(2),
+                retry_delay: embassy_time::Duration::from_millis(10),
+                socket_close_delay: embassy_time::Duration::from_millis(5),
+            },
+        );
+        assert_eq!(client_custom.options.max_retries, 3);
+    }
+
+    #[test]
+    fn test_small_http_client_constructors() {
+        let fake_stack: *const Stack = core::ptr::NonNull::dangling().as_ptr();
+        let client_small = SmallHttpClient::new(unsafe { &*fake_stack });
+        assert_eq!(client_small.options.max_retries, 5);
+
+        let client_small_custom = SmallHttpClient::with_options(
+            unsafe { &*fake_stack },
+            HttpClientOptions {
+                max_retries: 2,
+                socket_timeout: embassy_time::Duration::from_secs(1),
+                retry_delay: embassy_time::Duration::from_millis(5),
+                socket_close_delay: embassy_time::Duration::from_millis(2),
+            },
+        );
+        assert_eq!(client_small_custom.options.max_retries, 2);
     }
 }

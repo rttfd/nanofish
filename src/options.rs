@@ -1,6 +1,7 @@
 use embassy_time::Duration;
 
 /// Options for configuring the HTTP client
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HttpClientOptions {
     /// Maximum number of retries for read operations
     pub max_retries: usize,
@@ -10,6 +11,15 @@ pub struct HttpClientOptions {
     pub retry_delay: Duration,
     /// Delay after closing a socket before proceeding
     pub socket_close_delay: Duration,
+}
+
+/// Buffer sizes for read and write operations
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BufferSize {
+    /// Size of the read buffer
+    pub read: usize,
+    /// Size of the write buffer
+    pub write: usize,
 }
 
 impl Default for HttpClientOptions {

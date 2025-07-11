@@ -14,6 +14,7 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 
 - **Zero-Copy Response Handling** - Response data is borrowed directly from user-provided buffers with no copying
 - **User-Controlled Memory** - You provide the buffer and control exactly how much memory is used
+- **Configurable Buffer Sizes** - Compile-time buffer size configuration using const generics for optimal memory usage
 - **No Standard Library** - Full `no_std` compatibility with no heap allocations
 - **Embassy Integration** - Built on Embassy's async networking
 - **Complete HTTP Support** - All standard HTTP methods (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, CONNECT)
@@ -48,13 +49,13 @@ Network → YOUR Buffer (direct) → Zero-Copy References → User Code (no copi
 ### Basic HTTP Support (Default)
 ```toml
 [dependencies]
-nanofish = "0.7.0"
+nanofish = "0.8.0"
 ```
 
 ### With TLS/HTTPS Support
 ```toml
 [dependencies]
-nanofish = { version = "0.7.0", features = ["tls"] }
+nanofish = { version = "0.8.0", features = ["tls"] }
 ```
 
 ### Available Features
@@ -67,7 +68,7 @@ nanofish = { version = "0.7.0", features = ["tls"] }
 Here's a simple example showing how to use Nanofish:
 
 ```rust,ignore
-use nanofish::{HttpClient, HttpHeader, ResponseBody, headers, mime_types};
+use nanofish::{DefaultHttpClient, HttpHeader, ResponseBody, headers, mime_types};
 use embassy_net::Stack;
 
 async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
@@ -75,10 +76,10 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
     // See crate docs for full async usage example
 }
 
-let client = HttpClient::new(unsafe { core::ptr::NonNull::dangling().as_ref() });
+let client = DefaultHttpClient::new(unsafe { core::ptr::NonNull::dangling().as_ref() });
 let mut response_buffer = [0u8; 8192];
 let headers = [
-    HttpHeader::user_agent("Nanofish/0.6.0"),
+    HttpHeader::user_agent("Nanofish/0.8.0"),
     HttpHeader::content_type(mime_types::JSON),
     HttpHeader::authorization("Bearer token123"),
 ];
@@ -273,6 +274,43 @@ for url in urls {
     // Buffer is reused for each request - no allocations!
 }
 ```
+
+## Buffer Size Configuration
+
+Nanofish uses const generics to allow compile-time configuration of internal buffer sizes for optimal memory usage in different environments:
+
+### Default Configuration
+```rust,ignore
+use nanofish::DefaultHttpClient;
+
+let client = DefaultHttpClient::new(stack);
+```
+
+### Memory-Constrained Environments
+```rust,ignore
+use nanofish::SmallHttpClient;  
+
+let client = SmallHttpClient::new(stack);
+```
+
+### Custom Buffer Sizes
+```rust,ignore
+use nanofish::HttpClient;
+
+// Custom TCP and TLS buffer sizes
+type CustomClient<'a> = HttpClient<'a, 2048, 2048, 8192, 8192>;
+//                              TCP_RX ↑    ↑ TCP_TX  ↑     ↑ TLS_WRITE
+//                                           TLS_READ ↑
+let client = CustomClient::new(stack);
+```
+
+### Buffer Size Parameters
+- **`TCP_RX`**: TCP receive buffer size (default: 4096 bytes)
+- **`TCP_TX`**: TCP transmit buffer size (default: 4096 bytes)  
+- **`TLS_READ`**: TLS read record buffer size (default: 4096 bytes)
+- **`TLS_WRITE`**: TLS write record buffer size (default: 4096 bytes)
+
+Choose buffer sizes based on your memory constraints and expected payload sizes.
 
 ## License
 
