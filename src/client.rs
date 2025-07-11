@@ -26,19 +26,30 @@ use rand_chacha::ChaCha8Rng;
 #[cfg(feature = "tls")]
 use rand_core::SeedableRng;
 
-// Buffer sizes remain as compile-time constants
 const REQUEST_SIZE: usize = 1024;
 const MAX_HEADERS: usize = 16;
 const SMALL_BUFFER_SIZE: usize = 1024;
 const MEDIUM_BUFFER_SIZE: usize = 4096;
 
 /// Type alias for `HttpClient` with default buffer sizes
-pub type DefaultHttpClient<'a> =
-    HttpClient<'a, MEDIUM_BUFFER_SIZE, MEDIUM_BUFFER_SIZE, MEDIUM_BUFFER_SIZE, MEDIUM_BUFFER_SIZE>;
+pub type DefaultHttpClient<'a> = HttpClient<
+    'a,
+    MEDIUM_BUFFER_SIZE, // TCP_RX: 4KB
+    MEDIUM_BUFFER_SIZE, // TCP_TX: 4KB
+    MEDIUM_BUFFER_SIZE, // TLS_READ: 4KB
+    MEDIUM_BUFFER_SIZE, // TLS_WRITE: 4KB
+    REQUEST_SIZE,       // RQ: 1KB
+>;
 
 /// Type alias for `HttpClient` with small buffer sizes for memory-constrained environments
-pub type SmallHttpClient<'a> =
-    HttpClient<'a, SMALL_BUFFER_SIZE, SMALL_BUFFER_SIZE, SMALL_BUFFER_SIZE, SMALL_BUFFER_SIZE>;
+pub type SmallHttpClient<'a> = HttpClient<
+    'a,
+    SMALL_BUFFER_SIZE, // TCP_RX: 1KB
+    SMALL_BUFFER_SIZE, // TCP_TX: 1KB
+    SMALL_BUFFER_SIZE, // TLS_READ: 1KB
+    SMALL_BUFFER_SIZE, // TLS_WRITE: 1KB
+    REQUEST_SIZE,      // RQ: 1KB
+>;
 
 macro_rules! try_push {
     ($expr:expr) => {
@@ -60,16 +71,18 @@ macro_rules! try_push {
 ///
 /// # Type Parameters
 ///
-/// * `TCP_RX` - TCP receive buffer size
-/// * `TCP_TX` - TCP transmit buffer size  
-/// * `TLS_READ` - TLS read record buffer size (when TLS feature is enabled)
-/// * `TLS_WRITE` - TLS write record buffer size (when TLS feature is enabled)
+/// * `TCP_RX` - TCP receive buffer size (default: 4096 bytes)
+/// * `TCP_TX` - TCP transmit buffer size (default: 4096 bytes)
+/// * `TLS_READ` - TLS read record buffer size (default: 4096 bytes, when TLS feature is enabled)
+/// * `TLS_WRITE` - TLS write record buffer size (default: 4096 bytes, when TLS feature is enabled)
+/// * `RQ` - HTTP request buffer size for building requests (default: 1024 bytes)
 pub struct HttpClient<
     'a,
     const TCP_RX: usize = MEDIUM_BUFFER_SIZE,
     const TCP_TX: usize = MEDIUM_BUFFER_SIZE,
     const TLS_READ: usize = MEDIUM_BUFFER_SIZE,
     const TLS_WRITE: usize = MEDIUM_BUFFER_SIZE,
+    const RQ: usize = REQUEST_SIZE,
 > {
     /// Reference to the Embassy network stack
     stack: &'a Stack<'a>,
@@ -77,8 +90,14 @@ pub struct HttpClient<
     options: HttpClientOptions,
 }
 
-impl<'a, const TCP_RX: usize, const TCP_TX: usize, const TLS_READ: usize, const TLS_WRITE: usize>
-    HttpClient<'a, TCP_RX, TCP_TX, TLS_READ, TLS_WRITE>
+impl<
+    'a,
+    const TCP_RX: usize,
+    const TCP_TX: usize,
+    const TLS_READ: usize,
+    const TLS_WRITE: usize,
+    const RQ: usize,
+> HttpClient<'a, TCP_RX, TCP_TX, TLS_READ, TLS_WRITE, RQ>
 {
     /// Create a new HTTP client with custom buffer sizes and default options
     #[must_use]
@@ -741,8 +760,8 @@ impl<'a, const TCP_RX: usize, const TCP_TX: usize, const TLS_READ: usize, const 
         path: &str,
         headers: &[HttpHeader<'_>],
         body: Option<&[u8]>,
-    ) -> Result<heapless::String<REQUEST_SIZE>, Error> {
-        let mut http_request = heapless::String::<REQUEST_SIZE>::new();
+    ) -> Result<heapless::String<RQ>, Error> {
+        let mut http_request = heapless::String::<RQ>::new();
 
         try_push!(http_request.push_str(method.as_str()));
         try_push!(http_request.push_str(" "));
@@ -826,7 +845,6 @@ fn timeseed() -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::options::*;
     use embassy_net::Stack;
 
     #[test]

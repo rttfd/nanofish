@@ -281,14 +281,14 @@ Nanofish uses const generics to allow compile-time configuration of internal buf
 
 ### Default Configuration
 ```rust,ignore
-use nanofish::DefaultHttpClient;
+use nanofish::DefaultHttpClient;  // TCP: 4KB/4KB, TLS: 4KB/4KB, Request: 1KB
 
 let client = DefaultHttpClient::new(stack);
 ```
 
 ### Memory-Constrained Environments
 ```rust,ignore
-use nanofish::SmallHttpClient;  
+use nanofish::SmallHttpClient;   // TCP: 1KB/1KB, TLS: 1KB/1KB, Request: 1KB
 
 let client = SmallHttpClient::new(stack);
 ```
@@ -297,9 +297,9 @@ let client = SmallHttpClient::new(stack);
 ```rust,ignore
 use nanofish::HttpClient;
 
-// Custom TCP and TLS buffer sizes
-type CustomClient<'a> = HttpClient<'a, 2048, 2048, 8192, 8192>;
-//                              TCP_RX ↑    ↑ TCP_TX  ↑     ↑ TLS_WRITE
+// Custom TCP, TLS and request buffer sizes
+type CustomClient<'a> = HttpClient<'a, 2048, 2048, 8192, 8192, 2048>;
+//                              TCP_RX ↑    ↑ TCP_TX  ↑     ↑ TLS_WRITE ↑ REQUEST
 //                                           TLS_READ ↑
 let client = CustomClient::new(stack);
 ```
@@ -309,8 +309,9 @@ let client = CustomClient::new(stack);
 - **`TCP_TX`**: TCP transmit buffer size (default: 4096 bytes)  
 - **`TLS_READ`**: TLS read record buffer size (default: 4096 bytes)
 - **`TLS_WRITE`**: TLS write record buffer size (default: 4096 bytes)
+- **`RQ`**: HTTP request buffer size for building requests (default: 1024 bytes)
 
-Choose buffer sizes based on your memory constraints and expected payload sizes.
+Choose buffer sizes based on your memory constraints and expected payload sizes. The request buffer size determines the maximum size of HTTP requests that can be built, including headers and request line.
 
 ## License
 
