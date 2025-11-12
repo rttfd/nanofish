@@ -93,7 +93,7 @@ impl<
     where
         H: HttpHandler,
     {
-        defmt::info!("HTTP server started on port {}", self.port);
+        info!("HTTP server started on port {}", self.port);
 
         let mut rx_buffer = [0; RX_SIZE];
         let mut tx_buffer = [0; TX_SIZE];
@@ -104,7 +104,7 @@ impl<
             socket.set_timeout(Some(Duration::from_secs(self.timeouts.accept_timeout)));
 
             if let Err(e) = socket.accept(self.port).await {
-                defmt::warn!("Accept error: {:?}", e);
+                warn!("Accept error: {:?}", e);
                 Timer::after(Duration::from_millis(100)).await;
                 continue;
             }
@@ -121,11 +121,11 @@ impl<
                 }
                 Ok(Ok(n)) => n,
                 Ok(Err(e)) => {
-                    defmt::warn!("Read error: {:?}", e);
+                    warn!("Read error: {:?}", e);
                     continue;
                 }
                 Err(_) => {
-                    defmt::warn!("Socket read timeout");
+                    warn!("Socket read timeout");
                     continue;
                 }
             };
@@ -134,11 +134,11 @@ impl<
             match self.handle_connection(&buf[..n], &mut handler).await {
                 Ok(response_bytes) => {
                     if let Err(e) = socket.write_all(&response_bytes).await {
-                        defmt::warn!("Failed to write response: {:?}", e);
+                        warn!("Failed to write response: {:?}", e);
                     }
                 }
                 Err(e) => {
-                    defmt::error!("Error handling request: {:?}", e);
+                    error!("Error handling request: {:?}", e);
                     // Send a 500 error response
                     let error_response = b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: 21\r\n\r\nInternal Server Error";
                     let _ = socket.write_all(error_response).await;
@@ -169,7 +169,7 @@ impl<
         {
             Ok(Ok(response)) => response,
             Ok(Err(e)) => {
-                defmt::warn!("Handler error: {:?}", e);
+                warn!("Handler error: {:?}", e);
                 let mut headers = Vec::new();
                 let _ = headers.push(HttpHeader::new("Content-Type", "text/plain"));
                 let error_response = HttpResponse {
@@ -180,7 +180,7 @@ impl<
                 return Ok(error_response.build_bytes::<MAX_RESPONSE_SIZE>());
             }
             Err(_) => {
-                defmt::warn!("Request handling timed out");
+                warn!("Request handling timed out");
                 let mut headers = Vec::new();
                 let _ = headers.push(HttpHeader::new("Content-Type", "text/plain"));
                 let timeout_response = HttpResponse {
