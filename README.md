@@ -22,6 +22,7 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 - **Smart Response Parsing** - Automatic text/binary detection based on Content-Type headers
 - **Easy Header Management** - Pre-defined constants and helper methods for common headers
 - **Optional TLS Support** - HTTPS client support with embedded-tls when enabled (server is HTTP-only)
+- **Optional Logging** - Choose between `defmt` or `log` for diagnostics, or disable both for zero overhead
 - **Timeout & Retry Support** - Built-in handling for network issues
 - **DNS Resolution** - Automatic hostname resolution
 
@@ -30,19 +31,36 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 ### Basic HTTP Support (Default)
 ```toml
 [dependencies]
-nanofish = "0.9.1"
+nanofish = "0.10.0"
 ```
 
 ### With TLS/HTTPS Support
 ```toml
 [dependencies]
-nanofish = { version = "0.9.1", features = ["tls"] }
+nanofish = { version = "0.10.0", features = ["tls"] }
 ```
+
+### With Logging
+```toml
+# Using defmt (common in embedded/probe-based workflows)
+[dependencies]
+nanofish = { version = "0.10.0", features = ["defmt"] }
+
+# Using the log crate (common in std or defmt-incompatible environments)
+[dependencies]
+nanofish = { version = "0.10.0", features = ["log"] }
+```
+
+> **Note:** The `defmt` and `log` features are **mutually exclusive**. Enabling both will produce a compile-time error. If neither is enabled, all logging calls are compiled away to no-ops.
 
 ### Available Features
 - **`tls`** - Enables HTTPS/TLS support via `embedded-tls`
   - When disabled (default): Only HTTP requests are supported
   - When enabled: Full HTTPS support with TLS 1.2/1.3
+- **`defmt`** - Enables logging via the [`defmt`](https://github.com/knurling-rs/defmt) framework (commonly used with probe-rs)
+- **`log`** - Enables logging via the [`log`](https://docs.rs/log) crate
+
+Features can be combined freely (except `defmt` + `log`), for example `features = ["tls", "defmt"]`.
 
 ## Zero-Copy Architecture
 
@@ -84,7 +102,7 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
 let client = DefaultHttpClient::new(unsafe { core::ptr::NonNull::dangling().as_ref() });
 let mut response_buffer = [0u8; 8192];
 let headers = [
-    HttpHeader::user_agent("Nanofish/0.9.1"),
+    HttpHeader::user_agent("Nanofish/0.10.0"),
     HttpHeader::content_type(mime_types::JSON),
     HttpHeader::authorization("Bearer token123"),
 ];
@@ -446,6 +464,10 @@ The `SimpleHandler` provides:
 - `GET /` → HTML welcome page
 - `GET /health` → JSON status response  
 - Everything else → 404 Not Found
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a full list of changes across all versions.
 
 ## License
 
