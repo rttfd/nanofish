@@ -21,18 +21,30 @@ jobs:
         run: cargo fmt --all --check
 
   clippy:
-    name: 🔍 Clippy (${{ matrix.features }})
+    name: 🔍 Clippy (${{ matrix.name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        features:
-          - ""
-          - "tls"
-          - "log"
-          - "defmt"
-          - "tls,log"
-          - "tls,defmt"
+        include:
+          - name: "default"
+            features: ""
+            cache_key: "default"
+          - name: "tls"
+            features: "tls"
+            cache_key: "tls"
+          - name: "log"
+            features: "log"
+            cache_key: "log"
+          - name: "defmt"
+            features: "defmt"
+            cache_key: "defmt"
+          - name: "tls+log"
+            features: "tls,log"
+            cache_key: "tls-log"
+          - name: "tls+defmt"
+            features: "tls,defmt"
+            cache_key: "tls-defmt"
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
@@ -48,23 +60,35 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-clippy-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-clippy-${{ matrix.cache_key }}-${{ hashFiles('**/Cargo.lock') }}
       - name: 🔍 Clippy lint
         run: cargo clippy --features "${{ matrix.features }}" -- -D warnings -W clippy::pedantic
 
   test:
-    name: 🧪 Test (${{ matrix.features }})
+    name: 🧪 Test (${{ matrix.name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        features:
-          - ""
-          - "tls"
-          - "log"
-          - "defmt"
-          - "tls,log"
-          - "tls,defmt"
+        include:
+          - name: "default"
+            features: ""
+            cache_key: "default"
+          - name: "tls"
+            features: "tls"
+            cache_key: "tls"
+          - name: "log"
+            features: "log"
+            cache_key: "log"
+          - name: "defmt"
+            features: "defmt"
+            cache_key: "defmt"
+          - name: "tls+log"
+            features: "tls,log"
+            cache_key: "tls-log"
+          - name: "tls+defmt"
+            features: "tls,defmt"
+            cache_key: "tls-defmt"
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
@@ -79,6 +103,6 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-test-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-test-${{ matrix.cache_key }}-${{ hashFiles('**/Cargo.lock') }}
       - name: 🧪 Run tests
         run: cargo test --features "${{ matrix.features }}"
