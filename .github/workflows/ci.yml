@@ -7,21 +7,21 @@ on:
 
 jobs:
   fmt:
-    name: 🧹 Format check
+    name: Format check
     runs-on: ubuntu-latest
     steps:
-      - name: 📥 Checkout code
+      - name: Checkout code
         uses: actions/checkout@v4
-      - name: 🛠️ Set up Rust
+      - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.89
           components: rustfmt
-      - name: 🧹 Format check
+      - name: Format check
         run: cargo fmt --all --check
 
   clippy:
-    name: 🔍 Clippy (${{ matrix.name }})
+    name: Clippy (${{ matrix.name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -46,14 +46,14 @@ jobs:
             features: "tls,defmt"
             cache_key: "tls-defmt"
     steps:
-      - name: 📥 Checkout code
+      - name: Checkout code
         uses: actions/checkout@v4
-      - name: 🛠️ Set up Rust
+      - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.89
           components: clippy
-      - name: 💾 Cache dependencies
+      - name: Cache dependencies
         uses: actions/cache@v4
         with:
           path: |
@@ -61,11 +61,11 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-clippy-${{ matrix.cache_key }}-${{ hashFiles('**/Cargo.lock') }}
-      - name: 🔍 Clippy lint
+      - name: Clippy lint
         run: cargo clippy --features "${{ matrix.features }}" -- -D warnings -W clippy::pedantic
 
   test:
-    name: 🧪 Test (${{ matrix.name }})
+    name: Test (${{ matrix.name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -90,13 +90,13 @@ jobs:
             features: "tls,defmt"
             cache_key: "tls-defmt"
     steps:
-      - name: 📥 Checkout code
+      - name: Checkout code
         uses: actions/checkout@v4
-      - name: 🛠️ Set up Rust
+      - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.89
-      - name: 💾 Cache dependencies
+      - name: Cache dependencies
         uses: actions/cache@v4
         with:
           path: |
@@ -104,5 +104,5 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-test-${{ matrix.cache_key }}-${{ hashFiles('**/Cargo.lock') }}
-      - name: 🧪 Run tests
+      - name: Run tests
         run: cargo test --features "${{ matrix.features }}"

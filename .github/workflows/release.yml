@@ -1,4 +1,4 @@
-name: 🚀 Release
+name: Release
 
 on:
   push:
@@ -10,45 +10,45 @@ env:
 
 jobs:
   check-version:
-    name: 🏷️ Check Version Consistency
+    name: Check Version Consistency
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.get-version.outputs.version }}
       tag-version: ${{ steps.get-tag.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - name: 📋 Get version from Cargo.toml
+      - name: Get version from Cargo.toml
         id: get-version
         run: |
           VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Cargo.toml version: $VERSION"
-      - name: 🏷️ Get version from tag
+      - name: Get version from tag
         id: get-tag
         run: |
           TAG_VERSION=${GITHUB_REF#refs/tags/v}
           echo "version=$TAG_VERSION" >> $GITHUB_OUTPUT
           echo "Tag version: $TAG_VERSION"
-      - name: ✅ Verify versions match
+      - name: Verify versions match
         run: |
           if [ "${{ steps.get-version.outputs.version }}" != "${{ steps.get-tag.outputs.version }}" ]; then
-            echo "❌ Version mismatch: Cargo.toml has ${{ steps.get-version.outputs.version }}, tag has ${{ steps.get-tag.outputs.version }}"
+            echo "Version mismatch: Cargo.toml has ${{ steps.get-version.outputs.version }}, tag has ${{ steps.get-tag.outputs.version }}"
             exit 1
           fi
-          echo "✅ Versions match: ${{ steps.get-version.outputs.version }}"
+          echo "Versions match: ${{ steps.get-version.outputs.version }}"
 
   test:
-    name: 🧪 Test Before Release
+    name: Test Before Release
     runs-on: ubuntu-latest
     needs: check-version
     steps:
-      - name: 📥 Checkout code
+      - name: Checkout code
         uses: actions/checkout@v4
-      - name: 🛠️ Set up Rust
+      - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.89
-      - name: 💾 Cache dependencies
+      - name: Cache dependencies
         uses: actions/cache@v4
         with:
           path: |
@@ -56,15 +56,15 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: 🧪 Run tests (no features)
+      - name: Run tests (no features)
         run: cargo test
-      - name: 🧪 Run tests (tls,log)
+      - name: Run tests (tls,log)
         run: cargo test --features tls,log
-      - name: 🧪 Run tests (tls,defmt)
+      - name: Run tests (tls,defmt)
         run: cargo test --features tls,defmt
 
   check-crates-published:
-    name: 🔍 Check if Version Already Published
+    name: Check if Version Already Published
     runs-on: ubuntu-latest
     needs: check-version
     outputs:
@@ -72,45 +72,45 @@ jobs:
       crate-name: ${{ steps.get-crate-name.outputs.crate-name }}
     steps:
       - uses: actions/checkout@v4
-      - name: 📋 Get crate name
+      - name: Get crate name
         id: get-crate-name
         run: |
           CRATE_NAME=$(grep '^name = ' Cargo.toml | head -1 | sed 's/name = "\(.*\)"/\1/')
           echo "crate-name=$CRATE_NAME" >> $GITHUB_OUTPUT
           echo "Crate name: $CRATE_NAME"
-      - name: 🔍 Check if version is already published
+      - name: Check if version is already published
         id: check-published
         run: |
           VERSION="${{ needs.check-version.outputs.version }}"
           CRATE_NAME="${{ steps.get-crate-name.outputs.crate-name }}"
-          
-          echo "🔍 Checking if $CRATE_NAME@$VERSION is already published on crates.io..."
-          
+
+          echo "Checking if $CRATE_NAME@$VERSION is already published on crates.io..."
+
           # Check if version exists on crates.io
           HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://crates.io/api/v1/crates/$CRATE_NAME/$VERSION")
-          
+
           if [ "$HTTP_STATUS" = "200" ]; then
-            echo "⚠️ Version $VERSION is already published on crates.io"
+            echo "Version $VERSION is already published on crates.io"
             echo "already-published=true" >> $GITHUB_OUTPUT
           else
-            echo "✅ Version $VERSION is not yet published"
+            echo "Version $VERSION is not yet published"
             echo "already-published=false" >> $GITHUB_OUTPUT
           fi
 
 
   publish:
-    name: 📦 Publish to crates.io
+    name: Publish to crates.io
     runs-on: ubuntu-latest
     needs: [ check-version, test, check-crates-published ]
     if: needs.check-crates-published.outputs.already-published == 'false'
     steps:
-      - name: 📥 Checkout code
+      - name: Checkout code
         uses: actions/checkout@v4
-      - name: 🛠️ Set up Rust
+      - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.87
-      - name: 💾 Cache dependencies
+      - name: Cache dependencies
         uses: actions/cache@v4
         with:
           path: |
@@ -118,24 +118,24 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: 📦 Publish to crates.io
+      - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish
 
   skip-publish:
-    name: ⏭️ Skip Publishing (Already Published)
+    name: Skip Publishing (Already Published)
     runs-on: ubuntu-latest
     needs: [ check-version, check-crates-published ]
     if: needs.check-crates-published.outputs.already-published == 'true'
     steps:
-      - name: ⏭️ Skip publishing
+      - name: Skip publishing
         run: |
-          echo "⚠️ Skipping publish: ${{ needs.check-crates-published.outputs.crate-name }}@${{ needs.check-version.outputs.version }} is already published on crates.io"
-          echo "ℹ️ This is normal if you're re-running a release workflow"
+          echo "Skipping publish: ${{ needs.check-crates-published.outputs.crate-name }}@${{ needs.check-version.outputs.version }} is already published on crates.io"
+          echo "This is normal if you're re-running a release workflow"
 
   check-release:
-    name: 🔍 Check if GitHub Release Exists
+    name: Check if GitHub Release Exists
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -144,29 +144,29 @@ jobs:
       release-exists: ${{ steps.check-release.outputs.release-exists }}
     steps:
       - uses: actions/checkout@v4
-      - name: 🔍 Check if GitHub release exists
+      - name: Check if GitHub release exists
         id: check-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG_NAME="v${{ needs.check-version.outputs.version }}"
-          echo "🔍 Checking if GitHub release for tag $TAG_NAME exists..."
-          
+          echo "Checking if GitHub release for tag $TAG_NAME exists..."
+
           # Check if release exists
           HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG_NAME")
-          
+
           if [ "$HTTP_STATUS" = "200" ]; then
-            echo "⚠️ GitHub release for $TAG_NAME already exists"
+            echo "GitHub release for $TAG_NAME already exists"
             echo "release-exists=true" >> $GITHUB_OUTPUT
           else
-            echo "✅ GitHub release for $TAG_NAME does not exist"
+            echo "GitHub release for $TAG_NAME does not exist"
             echo "release-exists=false" >> $GITHUB_OUTPUT
           fi
 
   create-release:
-    name: 🎉 Create GitHub Release
+    name: Create GitHub Release
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -176,31 +176,38 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: 📝 Generate changelog
+      - name: Extract changelog for version
         id: changelog
         run: |
-          # Get the previous tag
-          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${{ github.ref_name }}$" | head -1)
-          
-          if [ -z "$PREV_TAG" ]; then
-            echo "No previous tag found, using initial commit"
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)" ${{ github.ref_name }})
-          else
-            echo "Previous tag: $PREV_TAG"
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..${{ github.ref_name }})
+          VERSION="${{ needs.check-version.outputs.version }}"
+          echo "Extracting changelog for version $VERSION from CHANGELOG.md..."
+
+          # Extract the section for this version from CHANGELOG.md
+          # Match from "## [<version>]" up to (but not including) the next "## [" or link reference "[" line
+          CHANGELOG=$(awk '/^## \['"$VERSION"'\]/{found=1; next} /^## \[|^\[/{if(found) exit} found{print}' CHANGELOG.md)
+
+          if [ -z "$CHANGELOG" ]; then
+            echo "No changelog entry found for version $VERSION in CHANGELOG.md, falling back to git log"
+            PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${{ github.ref_name }}$" | head -1)
+            if [ -z "$PREV_TAG" ]; then
+              CHANGELOG=$(git log --pretty=format:"- %s (%h)" ${{ github.ref_name }})
+            else
+              CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..${{ github.ref_name }})
+            fi
           fi
-          
+
           # Save changelog to file
           echo "$CHANGELOG" > changelog.txt
-          echo "Generated changelog with $(echo "$CHANGELOG" | wc -l) entries"
+          echo "Generated changelog:"
+          cat changelog.txt
 
-      - name: 🎉 Create Release
+      - name: Create Release
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ github.ref_name }}
-          release_name: 🚀 Release ${{ needs.check-version.outputs.version }}
+          release_name: Release ${{ needs.check-version.outputs.version }}
           body_path: changelog.txt
           draft: false
           prerelease: ${{ contains(needs.check-version.outputs.version, '-') }}
