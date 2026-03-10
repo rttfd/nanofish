@@ -31,6 +31,7 @@ pub enum Error {
     InvalidStatusCode,
 }
 
+#[cfg(feature = "defmt")]
 impl defmt::Format for Error {
     fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(fmt, "{:?}", defmt::Debug2Format(self));

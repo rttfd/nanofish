@@ -2,6 +2,9 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 
+/// Logging macros
+pub(crate) mod fmt;
+
 /// HTTP client implementation and request logic.
 pub mod client;
 /// Error types for HTTP operations.
