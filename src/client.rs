@@ -6,13 +6,10 @@ use crate::{
     response::{HttpResponse, ResponseBody},
     status_code::StatusCode,
 };
-#[cfg(feature = "tls")]
-use defmt::debug;
-use defmt::error;
 use embassy_net::{
-    Stack,
     dns::{self, DnsSocket},
     tcp::TcpSocket,
+    Stack,
 };
 #[cfg(feature = "tls")]
 use embassy_time::Instant;
@@ -386,7 +383,7 @@ impl<
                     }
                 }
                 Err(e) => {
-                    error!("Socket read error: {:?}", defmt::Debug2Format(&e));
+                    error!("Socket read error: {:?}", e);
                     retries -= 1;
                     if retries > 0 {
                         Timer::after(self.options.retry_delay).await;
