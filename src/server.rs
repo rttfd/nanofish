@@ -136,12 +136,16 @@ impl<
                     if let Err(e) = socket.write_all(&response_bytes).await {
                         warn!("Failed to write response: {:?}", e);
                     }
+                    if let Err(e) = socket.flush().await {
+                        defmt::warn!("Failed to flush response: {:?}", e);
+                    }
                 }
                 Err(e) => {
                     error!("Error handling request: {:?}", e);
                     // Send a 500 error response
                     let error_response = b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: 21\r\n\r\nInternal Server Error";
                     let _ = socket.write_all(error_response).await;
+                    let _ = socket.flush().await;
                 }
             }
 

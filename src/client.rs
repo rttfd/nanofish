@@ -235,6 +235,8 @@ impl<
         body: Option<&[u8]>,
         response_buffer: &mut [u8],
     ) -> Result<usize, Error> {
+        use embedded_tls::UnsecureProvider;
+
         let (host, port) = host_port;
         let mut rx_buffer = [0; TCP_RX];
         let mut tx_buffer = [0; TCP_TX];
@@ -262,11 +264,11 @@ impl<
         let mut read_record_buffer = [0; TLS_READ];
         let mut write_record_buffer = [0; TLS_WRITE];
 
-        let tls_config: TlsConfig<'_, Aes128GcmSha256> = TlsConfig::new().with_server_name(host);
+        let tls_config = TlsConfig::new().with_server_name(host);
         let mut tls = TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
-        let mut rng = ChaCha8Rng::from_seed(timeseed());
+        let rng = ChaCha8Rng::from_seed(timeseed());
 
-        tls.open::<_, NoVerify>(TlsContext::new(&tls_config, &mut rng))
+        tls.open(TlsContext::new(&tls_config, UnsecureProvider::new::<Aes128GcmSha256>(rng)))
             .await?;
 
         let http_request = Self::build_http_request(method, host, path, headers, body)?;
