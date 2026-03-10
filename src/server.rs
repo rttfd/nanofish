@@ -20,7 +20,7 @@ const DEFAULT_MAX_RESPONSE_SIZE: usize = 4096;
 pub struct ServerTimeouts {
     /// Socket accept timeout in seconds
     pub accept_timeout: u64,
-    /// Socket read timeout in seconds  
+    /// Socket read timeout in seconds
     pub read_timeout: u64,
     /// Request handler timeout in seconds
     pub handler_timeout: u64,
@@ -137,7 +137,7 @@ impl<
                         warn!("Failed to write response: {:?}", e);
                     }
                     if let Err(e) = socket.flush().await {
-                        defmt::warn!("Failed to flush response: {:?}", e);
+                        warn!("Failed to flush response: {:?}", e);
                     }
                 }
                 Err(e) => {
