@@ -57,11 +57,11 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Run tests (no features)
-        run: cargo test
+        run: make test
       - name: Run tests (tls,log)
-        run: cargo test --features tls,log
+        run: make test FEATURES="tls,log"
       - name: Run tests (tls,defmt)
-        run: cargo test --features tls,defmt
+        run: make test FEATURES="tls,defmt"
 
   check-crates-published:
     name: Check if Version Already Published
@@ -86,7 +86,6 @@ jobs:
 
           echo "Checking if $CRATE_NAME@$VERSION is already published on crates.io..."
 
-          # Check if version exists on crates.io
           HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://crates.io/api/v1/crates/$CRATE_NAME/$VERSION")
 
           if [ "$HTTP_STATUS" = "200" ]; then
@@ -121,7 +120,7 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
+        run: make publish
 
   skip-publish:
     name: Skip Publishing (Already Published)
@@ -152,7 +151,6 @@ jobs:
           TAG_NAME="v${{ needs.check-version.outputs.version }}"
           echo "Checking if GitHub release for tag $TAG_NAME exists..."
 
-          # Check if release exists
           HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG_NAME")
@@ -182,8 +180,6 @@ jobs:
           VERSION="${{ needs.check-version.outputs.version }}"
           echo "Extracting changelog for version $VERSION from CHANGELOG.md..."
 
-          # Extract the section for this version from CHANGELOG.md
-          # Match from "## [<version>]" up to (but not including) the next "## [" or link reference "[" line
           CHANGELOG=$(awk '/^## \['"$VERSION"'\]/{found=1; next} /^## \[|^\[/{if(found) exit} found{print}' CHANGELOG.md)
 
           if [ -z "$CHANGELOG" ]; then
@@ -196,7 +192,6 @@ jobs:
             fi
           fi
 
-          # Save changelog to file
           echo "$CHANGELOG" > changelog.txt
           echo "Generated changelog:"
           cat changelog.txt

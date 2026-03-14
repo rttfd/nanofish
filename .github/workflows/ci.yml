@@ -18,7 +18,7 @@ jobs:
           toolchain: 1.89
           components: rustfmt
       - name: Format check
-        run: cargo fmt --all --check
+        run: make fmt-check
 
   clippy:
     name: Clippy (${{ matrix.name }})
@@ -62,7 +62,7 @@ jobs:
             target
           key: ${{ runner.os }}-clippy-${{ matrix.cache_key }}-${{ hashFiles('**/Cargo.lock') }}
       - name: Clippy lint
-        run: cargo clippy --features "${{ matrix.features }}" -- -D warnings -W clippy::pedantic
+        run: make clippy FEATURES="${{ matrix.features }}"
 
   test:
     name: Test (${{ matrix.name }})
@@ -105,4 +105,4 @@ jobs:
             target
           key: ${{ runner.os }}-test-${{ matrix.cache_key }}-${{ hashFiles('**/Cargo.lock') }}
       - name: Run tests
-        run: cargo test --features "${{ matrix.features }}"
+        run: make test FEATURES="${{ matrix.features }}"
