@@ -652,7 +652,16 @@ impl<
 
     /// Parse HTTP response from raw data with zero-copy handling
     fn parse_http_response_zero_copy(data: &[u8]) -> Result<HttpResponse<'_>, Error> {
-        let response_str = core::str::from_utf8(data)
+        // Find the end of headers delimiter in raw bytes to avoid
+        // requiring the entire response (including binary body) to be valid UTF-8.
+        let headers_end = data
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or(Error::InvalidResponse("Invalid HTTP response format"))?
+            + 4;
+
+        let header_bytes = &data[..headers_end];
+        let response_str = core::str::from_utf8(header_bytes)
             .map_err(|_| Error::InvalidResponse("Invalid HTTP response encoding"))?;
 
         let status_line_end = response_str
@@ -666,11 +675,6 @@ impl<
             .ok_or(Error::InvalidResponse("Invalid HTTP status line"))?;
 
         let status_code: StatusCode = status_code_str.try_into()?;
-
-        let headers_end = response_str
-            .find("\r\n\r\n")
-            .ok_or(Error::InvalidResponse("Invalid HTTP response format"))?
-            + 4;
 
         let headers_section = &response_str[status_line_end + 2..headers_end - 4];
         let mut headers = Vec::<HttpHeader<'_>, MAX_HEADERS>::new();
@@ -918,5 +922,33 @@ mod tests {
             },
         );
         assert_eq!(client_small_custom.options.max_retries, 2);
+    }
+
+    #[test]
+    fn test_parse_http_response_binary_body() {
+        // Simulate a PNG-like response with invalid UTF-8 in the body
+        let header = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 8\r\n\r\n";
+        let binary_body: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // PNG magic bytes
+        let mut data = [0u8; 256];
+        data[..header.len()].copy_from_slice(header);
+        data[header.len()..header.len() + binary_body.len()].copy_from_slice(&binary_body);
+        let data = &data[..header.len() + binary_body.len()];
+
+        let response = DefaultHttpClient::parse_http_response_zero_copy(data)
+            .expect("should parse binary response");
+
+        assert_eq!(response.status_code, StatusCode::Ok);
+        assert!(matches!(response.body, ResponseBody::Binary(b) if b == binary_body));
+    }
+
+    #[test]
+    fn test_parse_http_response_text_body() {
+        let data = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello";
+
+        let response = DefaultHttpClient::parse_http_response_zero_copy(data)
+            .expect("should parse text response");
+
+        assert_eq!(response.status_code, StatusCode::Ok);
+        assert!(matches!(response.body, ResponseBody::Text("hello")));
     }
 }

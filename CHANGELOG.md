@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-04-22
+
+### Fixed
+
+- Fixed requests failing with `Error::InvalidResponse("Invalid HTTP response encoding")` on binary responses (e.g., PNG images). The HTTP response parser now only requires headers to be valid UTF-8, not the entire response body ([#26](https://github.com/rttfd/nanofish/issues/26)).
+
+### Changed
+
+- Bumped `embassy-net` from `0.9.0` to `0.9.1`.
+
 ## [0.11.2] - 2026-03-30
 
 ### Fixed
