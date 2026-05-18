@@ -78,5 +78,3 @@ memory_x_tools = "0.1.0"
 
 # Keep this example as a standalone crate when opened directly by rust-analyzer.
 [workspace]
-resolver = "3"
-exclude = ["./build_script_toolkit/*"]
