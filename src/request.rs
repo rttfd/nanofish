@@ -1,8 +1,10 @@
-use crate::{error::Error, header::HttpHeader, method::HttpMethod};
+use crate::{
+    error::Error,
+    header::HttpHeader,
+    method::HttpMethod,
+    protocol::{self, DOUBLE_CRLF_LEN, MAX_HEADERS},
+};
 use heapless::Vec;
-
-/// Maximum number of headers allowed in a request
-pub const MAX_HEADERS: usize = 16;
 
 /// HTTP request parsed from client
 #[derive(Debug)]
@@ -17,12 +19,6 @@ pub struct HttpRequest<'a> {
     pub headers: Vec<HttpHeader<'a>, MAX_HEADERS>,
     /// Request body (if present)
     pub body: &'a [u8],
-}
-
-/// Find the position of the double CRLF sequence that separates headers from body
-fn find_double_crlf(data: &[u8]) -> Option<usize> {
-    const DOUBLE_CRLF: &[u8] = b"\r\n\r\n";
-    (0..data.len().saturating_sub(3)).find(|&i| &data[i..i + 4] == DOUBLE_CRLF)
 }
 
 impl<'a> HttpRequest<'a> {
@@ -88,15 +84,15 @@ impl<'a> TryFrom<&'a [u8]> for HttpRequest<'a> {
 
     fn try_from(buffer: &'a [u8]) -> Result<Self, Self::Error> {
         // Find the end of headers (double CRLF)
-        let end_of_headers =
-            find_double_crlf(buffer).ok_or(Error::InvalidResponse("Incomplete request headers"))?;
+        let end_of_headers = protocol::find_double_crlf(buffer)
+            .ok_or(Error::InvalidResponse("Incomplete request headers"))?;
 
         // Parse the headers string
         let headers_str = core::str::from_utf8(&buffer[..end_of_headers])
             .map_err(|_| Error::InvalidResponse("Invalid UTF-8 in request"))?;
 
         // Body starts after the double CRLF
-        let body = &buffer[end_of_headers + 4..];
+        let body = &buffer[end_of_headers + DOUBLE_CRLF_LEN..];
 
         Self::parse_from(headers_str, body)
     }
@@ -195,6 +191,8 @@ mod tests {
 
     #[test]
     fn test_find_double_crlf() {
+        use crate::protocol::find_double_crlf;
+
         // Normal case
         let data = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\nBody";
         assert_eq!(find_double_crlf(data), Some(33));

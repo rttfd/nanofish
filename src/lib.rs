@@ -5,6 +5,9 @@
 /// Logging macros
 pub(crate) mod fmt;
 
+/// HTTP protocol constants and shared utilities.
+pub mod protocol;
+
 /// HTTP client implementation and request logic.
 pub mod client;
 /// Error types for HTTP operations.

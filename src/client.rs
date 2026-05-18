@@ -1,8 +1,15 @@
 use crate::{
     error::Error,
-    header::HttpHeader,
+    header::{
+        HttpHeader,
+        headers::{CONTENT_LENGTH, CONTENT_TYPE},
+    },
     method::HttpMethod,
     options::HttpClientOptions,
+    protocol::{
+        self, CHUNKED, CHUNKED_END_MARKER, CRLF_LEN, DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT,
+        DOUBLE_CRLF_LEN, HTTP_VERSION_LINE_SUFFIX, MAX_HEADERS, MAX_URL_PARTS, TRANSFER_ENCODING,
+    },
     response::{HttpResponse, ResponseBody},
     status_code::StatusCode,
 };
@@ -24,7 +31,6 @@ use rand_chacha::ChaCha8Rng;
 use rand_core::SeedableRng;
 
 const REQUEST_SIZE: usize = 1024;
-const MAX_HEADERS: usize = 16;
 const SMALL_BUFFER_SIZE: usize = 1024;
 const MEDIUM_BUFFER_SIZE: usize = 4096;
 
@@ -182,8 +188,8 @@ impl<
             return Err(Error::InvalidUrl);
         };
 
-        let mut url_parts = heapless::Vec::<&str, 8>::new();
-        for part in host_port.splitn(8, '/') {
+        let mut url_parts = heapless::Vec::<&str, MAX_URL_PARTS>::new();
+        for part in host_port.splitn(MAX_URL_PARTS, '/') {
             if url_parts.push(part).is_err() {
                 break;
             }
@@ -195,14 +201,19 @@ impl<
         let host = url_parts[0];
         let path = &host_port[host.len()..];
 
+        let default_port = if scheme == "https" {
+            DEFAULT_HTTPS_PORT
+        } else {
+            DEFAULT_HTTP_PORT
+        };
         let (host, port) = if let Some(colon_pos) = host.rfind(':') {
             if let Ok(port) = host[colon_pos + 1..].parse::<u16>() {
                 (&host[..colon_pos], port)
             } else {
-                (host, if scheme == "https" { 443 } else { 80 })
+                (host, default_port)
             }
         } else {
-            (host, if scheme == "https" { 443 } else { 80 })
+            (host, default_port)
         };
 
         let total_read = match scheme {
@@ -219,6 +230,9 @@ impl<
             }
             _ => return Err(Error::UnsupportedScheme(scheme)),
         };
+
+        // Decode chunked transfer-encoding in-place if present
+        let total_read = Self::dechunk(response_buffer, total_read)?;
 
         let response = Self::parse_http_response_zero_copy(&response_buffer[..total_read])?;
         Ok((response, total_read))
@@ -654,18 +668,15 @@ impl<
     fn parse_http_response_zero_copy(data: &[u8]) -> Result<HttpResponse<'_>, Error> {
         // Find the end of headers delimiter in raw bytes to avoid
         // requiring the entire response (including binary body) to be valid UTF-8.
-        let headers_end = data
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
+        let headers_end = protocol::find_double_crlf(data)
             .ok_or(Error::InvalidResponse("Invalid HTTP response format"))?
-            + 4;
+            + DOUBLE_CRLF_LEN;
 
         let header_bytes = &data[..headers_end];
         let response_str = core::str::from_utf8(header_bytes)
             .map_err(|_| Error::InvalidResponse("Invalid HTTP response encoding"))?;
 
-        let status_line_end = response_str
-            .find("\r\n")
+        let status_line_end = protocol::find_crlf(header_bytes)
             .ok_or(Error::InvalidResponse("Invalid HTTP response format"))?;
 
         let status_line = &response_str[..status_line_end];
@@ -676,7 +687,8 @@ impl<
 
         let status_code: StatusCode = status_code_str.try_into()?;
 
-        let headers_section = &response_str[status_line_end + 2..headers_end - 4];
+        let headers_section =
+            &response_str[status_line_end + CRLF_LEN..headers_end - DOUBLE_CRLF_LEN];
         let mut headers = Vec::<HttpHeader<'_>, MAX_HEADERS>::new();
 
         for header_line in headers_section.split("\r\n") {
@@ -733,7 +745,7 @@ impl<
     fn get_content_type<'h>(headers: &'h [HttpHeader<'_>]) -> Option<&'h str> {
         headers
             .iter()
-            .find(|h| h.name.eq_ignore_ascii_case("Content-Type"))
+            .find(|h| h.name.eq_ignore_ascii_case(CONTENT_TYPE))
             .map(|h| h.value)
     }
 
@@ -772,7 +784,7 @@ impl<
         try_push!(http_request.push_str(method.as_str()));
         try_push!(http_request.push_str(" "));
         try_push!(http_request.push_str(path));
-        try_push!(http_request.push_str(" HTTP/1.1\r\n"));
+        try_push!(http_request.push_str(HTTP_VERSION_LINE_SUFFIX));
         try_push!(http_request.push_str("Host: "));
         try_push!(http_request.push_str(host));
         try_push!(http_request.push_str("\r\n"));
@@ -785,7 +797,7 @@ impl<
             try_push!(http_request.push_str(header.value));
             try_push!(http_request.push_str("\r\n"));
 
-            if header.name.eq_ignore_ascii_case("Content-Length") {
+            if header.name.eq_ignore_ascii_case(CONTENT_LENGTH) {
                 content_length_present = true;
             }
         }
@@ -806,37 +818,117 @@ impl<
             try_push!(http_request.push_str("\r\n"));
         }
 
-        try_push!(http_request.push_str("Connection: close\r\n"));
-        try_push!(http_request.push_str("\r\n"));
+        try_push!(http_request.push_str("Connection: close\r\n\r\n"));
 
         Ok(http_request)
     }
 
     /// Check if HTTP response is complete
     fn is_response_complete(data: &[u8]) -> bool {
-        let response_str = core::str::from_utf8(data).unwrap_or_default();
-
-        if !response_str.contains("\r\n\r\n") {
+        if protocol::find_double_crlf(data).is_none() {
             return false;
         }
 
-        // Check for Content-Length header to determine if we have the full body
-        if let Some(content_length_pos) = response_str.find("Content-Length:") {
-            let content_length_end = response_str[content_length_pos..]
-                .find("\r\n")
-                .unwrap_or_default()
-                + content_length_pos;
-            let content_length_str =
-                &response_str[content_length_pos + 15..content_length_end].trim();
+        // Check for chunked transfer encoding
+        if Self::has_chunked_transfer_encoding(data) {
+            return data
+                .windows(CHUNKED_END_MARKER.len())
+                .any(|w| w == CHUNKED_END_MARKER);
+        }
 
-            if let Ok(content_length) = content_length_str.parse::<usize>() {
-                let headers_end = response_str.find("\r\n\r\n").unwrap_or_default() + 4;
-                let body_received = data.len().saturating_sub(headers_end);
-                return body_received >= content_length;
-            }
+        // Check for Content-Length header to determine if we have the full body
+        let headers_end = match protocol::find_double_crlf(data) {
+            Some(pos) => pos + DOUBLE_CRLF_LEN,
+            None => return true,
+        };
+        let header_bytes = &data[..headers_end];
+        if let Ok(headers_str) = core::str::from_utf8(header_bytes)
+            && let Some(value) = protocol::find_header_value(headers_str, CONTENT_LENGTH)
+            && let Ok(content_length) = value.parse::<usize>()
+        {
+            let body_received = data.len().saturating_sub(headers_end);
+            return body_received >= content_length;
         }
 
         true
+    }
+
+    /// Check if the response uses chunked transfer encoding
+    fn has_chunked_transfer_encoding(data: &[u8]) -> bool {
+        let headers_end = match protocol::find_double_crlf(data) {
+            Some(pos) => pos + DOUBLE_CRLF_LEN,
+            None => return false,
+        };
+
+        let header_bytes = &data[..headers_end];
+        if let Ok(headers_str) = core::str::from_utf8(header_bytes)
+            && let Some(value) = protocol::find_header_value(headers_str, TRANSFER_ENCODING)
+        {
+            return value.eq_ignore_ascii_case(CHUNKED);
+        }
+        false
+    }
+
+    /// Decode chunked transfer-encoding in-place if the response uses it.
+    /// Returns the new total length after decoding.
+    fn dechunk(buffer: &mut [u8], total_read: usize) -> Result<usize, Error> {
+        let data = &buffer[..total_read];
+
+        if !Self::has_chunked_transfer_encoding(data) {
+            return Ok(total_read);
+        }
+
+        // Find end of headers
+        let headers_end = protocol::find_double_crlf(data)
+            .ok_or(Error::InvalidResponse("Invalid HTTP response format"))?
+            + DOUBLE_CRLF_LEN;
+
+        // Decode chunks in-place starting after headers
+        let mut read_pos = headers_end;
+        let mut write_pos = headers_end;
+
+        while read_pos < total_read {
+            // Find end of chunk size line
+            let chunk_line_end = match protocol::find_crlf(&buffer[read_pos..total_read]) {
+                Some(pos) => read_pos + pos,
+                None => break,
+            };
+
+            // Parse chunk size (hex)
+            let chunk_size_str = match core::str::from_utf8(&buffer[read_pos..chunk_line_end]) {
+                Ok(s) => s.trim(),
+                Err(_) => return Err(Error::InvalidResponse("Invalid chunk size encoding")),
+            };
+
+            // Chunk size may have extensions after a semicolon
+            let size_part = chunk_size_str.split(';').next().unwrap_or("0").trim();
+            let chunk_size = usize::from_str_radix(size_part, 16)
+                .map_err(|_| Error::InvalidResponse("Invalid chunk size"))?;
+
+            if chunk_size == 0 {
+                // Final chunk
+                break;
+            }
+
+            // Move past chunk size line (\r\n)
+            let chunk_data_start = chunk_line_end + CRLF_LEN;
+            let chunk_data_end = chunk_data_start + chunk_size;
+
+            if chunk_data_end > total_read {
+                return Err(Error::InvalidResponse("Incomplete chunked body"));
+            }
+
+            // Copy chunk data in-place (memmove semantics)
+            if write_pos != chunk_data_start {
+                buffer.copy_within(chunk_data_start..chunk_data_end, write_pos);
+            }
+            write_pos += chunk_size;
+
+            // Skip past chunk data and trailing \r\n
+            read_pos = chunk_data_end + CRLF_LEN;
+        }
+
+        Ok(write_pos)
     }
 }
 
@@ -950,5 +1042,57 @@ mod tests {
 
         assert_eq!(response.status_code, StatusCode::Ok);
         assert!(matches!(response.body, ResponseBody::Text("hello")));
+    }
+
+    #[test]
+    fn test_is_response_complete_chunked() {
+        let incomplete = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
+        assert!(!DefaultHttpClient::is_response_complete(incomplete));
+
+        let complete =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        assert!(DefaultHttpClient::is_response_complete(complete));
+    }
+
+    #[test]
+    fn test_dechunk_single_chunk() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        let mut buf = [0u8; 256];
+        buf[..raw.len()].copy_from_slice(raw);
+
+        let new_len =
+            DefaultHttpClient::dechunk(&mut buf, raw.len()).expect("should decode chunked");
+
+        let response = DefaultHttpClient::parse_http_response_zero_copy(&buf[..new_len])
+            .expect("should parse dechunked response");
+
+        assert_eq!(response.status_code, StatusCode::Ok);
+        assert_eq!(response.body.as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn test_dechunk_multiple_chunks() {
+        // Mimics the weather API response from issue #29
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\nb\r\n{\"temp\":23}\r\n0\r\n\r\n";
+        let mut buf = [0u8; 256];
+        buf[..raw.len()].copy_from_slice(raw);
+
+        let new_len =
+            DefaultHttpClient::dechunk(&mut buf, raw.len()).expect("should decode chunked");
+
+        let response = DefaultHttpClient::parse_http_response_zero_copy(&buf[..new_len])
+            .expect("should parse dechunked response");
+
+        assert_eq!(response.body.as_str(), Some("{\"temp\":23}"));
+    }
+
+    #[test]
+    fn test_dechunk_noop_when_not_chunked() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        let mut buf = [0u8; 128];
+        buf[..raw.len()].copy_from_slice(raw);
+
+        let new_len = DefaultHttpClient::dechunk(&mut buf, raw.len()).expect("should pass through");
+        assert_eq!(new_len, raw.len());
     }
 }

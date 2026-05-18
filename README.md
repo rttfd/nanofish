@@ -31,24 +31,24 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 ### Basic HTTP Support (Default)
 ```toml
 [dependencies]
-nanofish = "0.11.1"
+nanofish = "0.11.4"
 ```
 
 ### With TLS/HTTPS Support
 ```toml
 [dependencies]
-nanofish = { version = "0.11.0", features = ["tls"] }
+nanofish = { version = "0.11.4", features = ["tls"] }
 ```
 
 ### With Logging
 ```toml
 # Using defmt (common in embedded/probe-based workflows)
 [dependencies]
-nanofish = { version = "0.11.0", features = ["defmt"] }
+nanofish = { version = "0.11.4", features = ["defmt"] }
 
 # Using the log crate (common in std or defmt-incompatible environments)
 [dependencies]
-nanofish = { version = "0.11.0", features = ["log"] }
+nanofish = { version = "0.11.4", features = ["log"] }
 ```
 
 > **Note:** The `defmt` and `log` features are **mutually exclusive**. Enabling both will produce a compile-time error. If neither is enabled, all logging calls are compiled away to no-ops.
@@ -95,27 +95,25 @@ use nanofish::{DefaultHttpClient, HttpHeader, ResponseBody, headers, mime_types}
 use embassy_net::Stack;
 
 async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
-    ...
-    // See crate docs for full async usage example
+    let client = DefaultHttpClient::new(stack);
+    let mut response_buffer = [0u8; 8192];
+    let headers = [
+        HttpHeader::user_agent("Nanofish/0.11.4"),
+        HttpHeader::content_type(mime_types::JSON),
+        HttpHeader::authorization("Bearer token123"),
+    ];
+    let custom_headers = [
+        HttpHeader { name: "X-Custom-Header", value: "custom-value" },
+        HttpHeader::new(headers::ACCEPT, mime_types::JSON),
+    ];
+    let (response, bytes_read) = client.get(
+        "http://example.com/api/status",
+        &headers,
+        &mut response_buffer
+    ).await?;
+    println!("Read {} bytes into buffer", bytes_read);
+    Ok(())
 }
-
-let client = DefaultHttpClient::new(unsafe { core::ptr::NonNull::dangling().as_ref() });
-let mut response_buffer = [0u8; 8192];
-let headers = [
-    HttpHeader::user_agent("Nanofish/0.11.1"),
-    HttpHeader::content_type(mime_types::JSON),
-    HttpHeader::authorization("Bearer token123"),
-];
-let custom_headers = [
-    HttpHeader { name: "X-Custom-Header", value: "custom-value" },
-    HttpHeader::new(headers::ACCEPT, mime_types::JSON),
-];
-let (response, bytes_read) = client.get(
-    "http://example.com/api/status", 
-    &headers,
-    &mut response_buffer
-).await?;
-println!("Read {} bytes into buffer", bytes_read);
 ```
 
 ## Zero-Copy Benefits
