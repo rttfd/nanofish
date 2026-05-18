@@ -1,5 +1,5 @@
-pub use crate::abstarct_socket::mocks::error::MockStreamError;
-use crate::abstarct_socket::socket::{SocketClose, SocketEndpoint, SocketInfo, SocketReadWith, SocketWriteWith, State};
+pub use crate::socket::mocks::error::MockStreamError;
+use crate::socket::{SocketClose, SocketEndpoint, SocketInfo, SocketReadWith, SocketWriteWith, State};
 use embedded_io_async::{ErrorType, Read, ReadReady, Write, WriteReady};
 extern crate alloc;
 extern crate std;

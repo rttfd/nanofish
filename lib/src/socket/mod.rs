@@ -1,6 +1,6 @@
 #![doc = include_str!("./README.md")]
 /// Socket pool implementation for managing multiple socket connections.
-pub mod socket;
+mod socket;
 
 /// Implementations for various socket types.
 #[cfg(feature = "embassy_impl")]
@@ -13,5 +13,5 @@ pub mod mocks;
 #[cfg(feature = "tokio_impl")]
 pub mod tokio_impl;
 
-/// Socket builder trait and related utilities for constructing socket instances.
-pub use socket::AbstractSocketListener;
+/// Re-export of the socket module for easier access to socket traits and types.
+pub use socket::*;

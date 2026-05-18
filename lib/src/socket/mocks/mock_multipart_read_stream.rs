@@ -1,5 +1,5 @@
-pub use crate::abstarct_socket::mocks::error::MockReadError;
-pub use crate::abstarct_socket::socket::SocketReadWith;
+pub use crate::socket::SocketReadWith;
+pub use crate::socket::mocks::error::MockReadError;
 
 use heapless::Vec;
 

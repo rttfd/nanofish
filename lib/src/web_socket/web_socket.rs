@@ -1,4 +1,4 @@
-use crate::abstarct_socket::socket::{SocketWaitReadReady, SocketWaitWriteReady};
+use crate::socket::{SocketWaitReadReady, SocketWaitWriteReady};
 use crate::web_socket::header::*;
 use crate::web_socket::header_reader::*;
 use core::fmt::Debug;

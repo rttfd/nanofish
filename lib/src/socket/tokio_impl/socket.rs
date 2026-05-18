@@ -1,9 +1,9 @@
-pub use crate::abstarct_socket::tokio_impl::tokio_socket_wrapper::{
+pub use crate::socket::tokio_impl::tokio_socket_wrapper::{
     TokioSocketOwnedReadHalfWrapper, TokioSocketOwnedWriteHalfWrapper, TokioSocketReadHalfWrapper, TokioSocketWrapper,
     TokioSocketWriteHalfWrapper,
 };
 
-use crate::abstarct_socket::socket::{AbstarctSocketConnector, AbstractSocketListener, SocketEndpoint};
+use crate::socket::{AbstarctSocketConnector, AbstractSocketListener, SocketEndpoint};
 use defmt_or_log as log;
 use tokio::net::TcpListener;
 

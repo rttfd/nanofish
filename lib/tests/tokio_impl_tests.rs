@@ -9,11 +9,11 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
-    use nanooctopus::abstarct_socket::socket::{
-        AbstarctSocketConnector, AbstractSocketListener, SocketClose, SocketInfo, SocketReadWith, State,
-    };
-    use nanooctopus::abstarct_socket::tokio_impl::socket::{
+    use nanooctopus::socket::tokio_impl::socket::{
         TokioSocketReadHalfWrapper, TokioTcpListener, TokioTcpSocketConnector,
+    };
+    use nanooctopus::socket::{
+        AbstarctSocketConnector, AbstractSocketListener, SocketClose, SocketInfo, SocketReadWith, State,
     };
 
     #[tokio::test]
@@ -132,8 +132,8 @@ mod tests {
 
     mod tokio_listener {
         use super::*;
-        use nanooctopus::abstarct_socket::socket::AbstractSocketListener;
-        use nanooctopus::abstarct_socket::tokio_impl::socket::TokioTcpListener;
+        use nanooctopus::socket::AbstractSocketListener;
+        use nanooctopus::socket::tokio_impl::socket::TokioTcpListener;
         use tokio::net::TcpStream;
 
         #[tokio::test]

@@ -1,10 +1,10 @@
 #[cfg(feature = "defmt")]
 use core::fmt::Debug;
 
-use crate::abstarct_socket::socket::SocketReadWith;
 use crate::error::Error;
 use crate::header::HttpHeader;
 use crate::method::HttpMethod;
+use crate::socket::SocketReadWith;
 use crate::stream_search::{StreamReadError, StreamSearch};
 use prefix_arena::PrefixArena;
 
@@ -237,8 +237,8 @@ impl<'reader, Reader: ?Sized> HttpHeaderParser<'reader, Reader, ReadHeaders> {
 #[cfg(all(test, not(feature = "embassy_impl")))]
 mod tests {
     use super::*;
-    use crate::abstarct_socket::mocks::mock_multipart_read_stream::*;
     use crate::header;
+    use crate::socket::mocks::mock_multipart_read_stream::*;
 
     #[derive(Debug)]
     struct DummyStreamReadError;

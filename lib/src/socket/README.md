@@ -1,6 +1,6 @@
-# abstarct_socket
+# socket
 
-`abstarct_socket` provides a minimal async TCP abstraction used by `nanooctopus`.
+`socket` provides a minimal async TCP abstraction used by `nanooctopus`.
 
 The crate defines transport-agnostic traits and ships adapter modules for Embassy and Tokio so higher-level HTTP/WebSocket logic can run on both embedded and host environments.
 

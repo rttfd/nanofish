@@ -36,7 +36,7 @@ mod defmt_test_logger {
 
 /// This module contains the implementation of the abstract socket traits and utilities,
 /// providing a common interface for socket operations.
-pub mod abstarct_socket;
+pub mod socket;
 
 /// Utility to find value sequences in a stream.
 mod find_sequence;
@@ -95,5 +95,5 @@ pub mod http_handler {
 
     pub use crate::header::{HttpHeader, headers, mime_types};
 
-    pub use crate::abstarct_socket::socket::SocketEndpoint;
+    pub use crate::socket::SocketEndpoint;
 }

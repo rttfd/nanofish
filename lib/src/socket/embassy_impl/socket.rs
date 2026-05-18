@@ -1,4 +1,4 @@
-use crate::abstarct_socket::socket::{
+use crate::socket::{
     SocketClose, SocketEndpoint, SocketInfo, SocketReadWith, SocketWaitReadReady, SocketWaitWriteReady,
     SocketWriteWith, State,
 };
