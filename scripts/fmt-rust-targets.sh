@@ -1,6 +1,6 @@
 set -euo pipefail
 
-(cd lib && cargo fmt --all -- --config edition=2024)
+(cargo fmt --all -- --config edition=2024)
 
 for example_dir in demos/*/; do
 	[[ -d "$example_dir" ]] || continue

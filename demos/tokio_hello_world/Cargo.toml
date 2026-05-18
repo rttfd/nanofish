@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-nanooctopus = { path = "../../lib", features = ["tokio_impl", "log"] }
+nanooctopus = { path = "../..", features = ["tokio_impl", "log"] }
 tokio = { version = "1", features = ["full"] }
 
 # Enable logging for the example

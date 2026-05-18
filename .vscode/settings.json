@@ -4,7 +4,7 @@
     "rust-analyzer.cargo.allTargets": false,
     //"rust-analyzer.cargo.noDefaultFeatures": true,
     "rust-analyzer.linkedProjects": [
-        "lib/Cargo.toml",
+        "Cargo.toml",
         "demos/rasberry_pico_w/Cargo.toml",
         "demos/tokio_hello_world/Cargo.toml"
     ],

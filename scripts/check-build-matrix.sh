@@ -72,26 +72,26 @@ case "${1:-all}" in
     printf '%s\n' "${FEATURE_SETS[@]}"
     ;;
   build)
-    run_for_all_features ./lib build
+    run_for_all_features . build
     simple_run ./demos/rasberry_pico_w build
     simple_run ./demos/tokio_hello_world build
     ;;
   clippy)
-    run_for_all_features ./lib clippy --no-deps
+    run_for_all_features . clippy --no-deps
     simple_run ./demos/rasberry_pico_w clippy --no-deps
     simple_run ./demos/tokio_hello_world clippy --no-deps
     ;;
   test)
-    run_for_all_features ./lib test
+    run_for_all_features . test
     ;;
   all)
-    run_for_all_features ./lib build
+    run_for_all_features . build
     simple_run ./demos/rasberry_pico_w build
     simple_run ./demos/tokio_hello_world build
-    run_for_all_features ./lib clippy --no-deps
+    run_for_all_features . clippy --no-deps
     simple_run ./demos/rasberry_pico_w clippy --no-deps
     simple_run ./demos/tokio_hello_world clippy --no-deps
-    run_for_all_features ./lib test
+    run_for_all_features . test
     ;;
   *)
     echo "usage: $0 [list|build|clippy|test|all]" >&2
