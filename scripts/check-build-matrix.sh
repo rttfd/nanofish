@@ -73,24 +73,24 @@ case "${1:-all}" in
     ;;
   build)
     run_for_all_features ./lib build
-    simple_run ./examples/rasberry_pico_w build
-    simple_run ./examples/tokio_hello_world build
+    simple_run ./demos/rasberry_pico_w build
+    simple_run ./demos/tokio_hello_world build
     ;;
   clippy)
     run_for_all_features ./lib clippy --no-deps
-    simple_run ./examples/rasberry_pico_w clippy --no-deps
-    simple_run ./examples/tokio_hello_world clippy --no-deps
+    simple_run ./demos/rasberry_pico_w clippy --no-deps
+    simple_run ./demos/tokio_hello_world clippy --no-deps
     ;;
   test)
     run_for_all_features ./lib test
     ;;
   all)
     run_for_all_features ./lib build
-    simple_run ./examples/rasberry_pico_w build
-    simple_run ./examples/tokio_hello_world build
+    simple_run ./demos/rasberry_pico_w build
+    simple_run ./demos/tokio_hello_world build
     run_for_all_features ./lib clippy --no-deps
-    simple_run ./examples/rasberry_pico_w clippy --no-deps
-    simple_run ./examples/tokio_hello_world clippy --no-deps
+    simple_run ./demos/rasberry_pico_w clippy --no-deps
+    simple_run ./demos/tokio_hello_world clippy --no-deps
     run_for_all_features ./lib test
     ;;
   *)

@@ -26,7 +26,7 @@
 				"thumbv6m-none-eabi"
 			],
 			"options": {
-				"cwd": "${workspaceFolder}/examples/rasberry_pico_w"
+				"cwd": "${workspaceFolder}/demos/rasberry_pico_w"
 			},
 			"problemMatcher": [
 				"$rustc"

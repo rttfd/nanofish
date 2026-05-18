@@ -164,9 +164,9 @@ async fn main() {
 
 This example exists in:
 
-- [`examples/tokio_hello_world`](examples/tokio_hello_world/README.md)
-- <a href="https://github.com/kdimonych/nanooctopus/tree/0.1.0/examples/tokio_hello_world">
-  examples/tokio_hello_world
+- [`demos/tokio_hello_world`](demos/tokio_hello_world/README.md)
+- <a href="https://github.com/kdimonych/nanooctopus/tree/0.1.0/demos/tokio_hello_world">
+  demos/tokio_hello_world
   <img alt="GitHub" src="https://github.githubassets.com/favicons/favicon.svg" height="14">
 
 </a>
@@ -183,9 +183,9 @@ The Raspberry Pico W example shows the intended embedded deployment model:
 
 The example is in:
 
-- [`examples/rasberry_pico_w`](examples/rasberry_pico_w/README.md)
-- <a href="https://github.com/kdimonych/nanooctopus/tree/0.1.0/examples/rasberry_pico_w">
-  examples/rasberry_pico_w
+- [`demos/rasberry_pico_w`](demos/rasberry_pico_w/README.md)
+- <a href="https://github.com/kdimonych/nanooctopus/tree/0.1.0/demos/rasberry_pico_w">
+  demos/rasberry_pico_w
   <img alt="GitHub" src="https://github.githubassets.com/favicons/favicon.svg" height="14">
 
 </a>
@@ -283,10 +283,10 @@ If you do not implement that method, incoming WebSocket connections are closed b
 - On embedded targets, you are responsible for sizing socket buffers, worker count, and worker memory according to your traffic profile.
 - `embassy_impl` and `tokio_impl` cannot be enabled together.
 
-## Examples
+## Demos
 
-- `examples/rasberry_pico_w`: Embassy + CYW43 + RP2040 + socket pool + multiple workers
-- `examples/tokio_hello_world`: minimal host-side Tokio server
+- `demos/rasberry_pico_w`: Embassy + CYW43 + RP2040 + socket pool + multiple workers
+- `demos/tokio_hello_world`: minimal host-side Tokio server
 
 ## Development Notes
 
@@ -296,7 +296,7 @@ Nanooctopus is structured to make embedded development less painful:
 - the platform abstraction helps with host-side tests and emulators
 - the Embassy-oriented architecture stays close to the intended MCU deployment model
 
-If you want to understand the current project state, start with the examples rather than older historical documentation.
+If you want to understand the current project state, start with the demos rather than older historical documentation.
 
 ## License
 

@@ -5,8 +5,8 @@
     //"rust-analyzer.cargo.noDefaultFeatures": true,
     "rust-analyzer.linkedProjects": [
         "lib/Cargo.toml",
-        "examples/rasberry_pico_w/Cargo.toml",
-        "examples/tokio_hello_world/Cargo.toml"
+        "demos/rasberry_pico_w/Cargo.toml",
+        "demos/tokio_hello_world/Cargo.toml"
     ],
     // "rust-analyzer.cargo.features": [
     //     "embassy_impl",

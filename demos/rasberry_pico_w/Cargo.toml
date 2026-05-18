@@ -1,5 +1,6 @@
 
 [package]
+publish = false
 name = "rasberry_pico_w"
 version = "0.1.0"
 edition = "2024"

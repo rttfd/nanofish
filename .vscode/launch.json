@@ -5,7 +5,7 @@
       "name": "Debug RP2040 (probe-rs)",
       "type": "probe-rs-debug",
       "request": "launch",
-      "cwd": "${workspaceFolder}/examples/rasberry_pico_w",
+      "cwd": "${workspaceFolder}/demos/rasberry_pico_w",
       "chip": "RP2040",
       "wireProtocol": "Swd",
       "flashingConfig": {

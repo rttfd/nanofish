@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "tokio_hello_world"
 version = "0.1.0"
 edition = "2024"

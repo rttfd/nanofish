@@ -70,10 +70,10 @@ ______________________________________________________________________
 
 The example is a self-contained workspace (it has its own `[workspace]` entry
 in `Cargo.toml`), so all `cargo` commands must be run from the
-`examples/tokio_hello_world/` directory.
+`demos/tokio_hello_world/` directory.
 
 ```sh
-cd examples/tokio_hello_world
+cd demos/tokio_hello_world
 ```
 
 ### Build only

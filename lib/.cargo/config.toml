@@ -7,8 +7,8 @@ check-host = "check --features std"
 run-host-example = "run --example hello_world --features std"
 
 # Examples
-run_rasberry_pico_w = "--config ./examples/rasberry_pico_w/.cargo/config.toml run --package rasberry_pico_w --target thumbv6m-none-eabi"
-build_rasberry_pico_w = "--config ./examples/rasberry_pico_w/.cargo/config.toml build --package rasberry_pico_w --target thumbv6m-none-eabi"
+run_rasberry_pico_w = "--config ./demos/rasberry_pico_w/.cargo/config.toml run --package rasberry_pico_w --target thumbv6m-none-eabi"
+build_rasberry_pico_w = "--config ./demos/rasberry_pico_w/.cargo/config.toml build --package rasberry_pico_w --target thumbv6m-none-eabi"
 
 [env]
 DEFMT_LOG = "debug"

@@ -109,10 +109,10 @@ ______________________________________________________________________
 ## Wi-Fi setup
 
 All `cargo` commands for this example should be run from the
-`examples/rasberry_pico_w/` directory.
+`demos/rasberry_pico_w/` directory.
 
 ```sh
-cd examples/rasberry_pico_w
+cd demos/rasberry_pico_w
 ```
 
 Create a local `.env` file in that directory:
@@ -238,7 +238,7 @@ ______________________________________________________________________
 
 ### `WIFI_SSID` or `WIFI_PASSWORD` seems empty
 
-Make sure the `.env` file exists in `examples/rasberry_pico_w/` and rebuild.
+Make sure the `.env` file exists in `demos/rasberry_pico_w/` and rebuild.
 
 ### `cargo run` cannot talk to the board
 
