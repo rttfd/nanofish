@@ -1,6 +1,6 @@
 #![allow(dead_code)]
-use crate::abstarct_socket::find_sequence::FindSequence;
 use crate::abstarct_socket::socket::SocketReadWith;
+use crate::find_sequence::FindSequence;
 use prefix_arena::{PrefixArena, StagingBuffer};
 
 /// Error returned by the stream-reading helper methods in this module.

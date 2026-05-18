@@ -1,7 +1,4 @@
 #![doc = include_str!("./README.md")]
-/// Utility to find value sequences in a stream.
-pub mod find_sequence;
-
 /// Socket pool implementation for managing multiple socket connections.
 pub mod socket;
 

@@ -22,20 +22,6 @@ The crate defines transport-agnostic traits and ships adapter modules for Embass
 
 The design keeps the abstraction close to native TCP semantics instead of masking platform behavior behind a large custom API.
 
-## Stream Utilities
-
-`stream_search::StreamSearch` adds parser-oriented helpers on top of `SocketReadWith`:
-
-- `seek_until*`: collect bytes into a `prefix_arena::PrefixArena` buffer until a boundary is found.
-- `skip*`: consume bytes without storing them.
-
-Errors are represented by `StreamReadError<T>`:
-
-- `SocketReadError(T)` for underlying transport failures.
-- `ReadBufferOverflow` when the arena-backed output buffer is exhausted.
-
-`find_sequence::FindSequence` supports sequence detection across chunk boundaries and is used by `StreamSearch` sequence-based operations.
-
 ## Implementations
 
 - `embassy_impl`: adapters for `embassy_net::tcp::TcpSocket`, `TcpReader`, and `TcpWriter`, plus `TcpSocketPool` for queued multi-socket acceptance.

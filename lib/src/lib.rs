@@ -38,6 +38,8 @@ mod defmt_test_logger {
 /// providing a common interface for socket operations.
 pub mod abstarct_socket;
 
+/// Utility to find value sequences in a stream.
+mod find_sequence;
 /// HTTP header types and helpers.
 mod header;
 /// Read stream extension trait and helper error types.
