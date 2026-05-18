@@ -1,4 +1,4 @@
-use crate::socket::WriteWith;
+use crate::abstarct_socket::socket::WriteWith;
 use tokio::io::AsyncWriteExt;
 
 use crate::tokio_impl::tokio_socket_wrapper::{

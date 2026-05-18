@@ -1,5 +1,5 @@
-use crate::find_sequence::FindSequence;
-use crate::socket::SocketReadWith;
+use crate::abstarct_socket::find_sequence::FindSequence;
+use crate::abstarct_socket::socket::SocketReadWith;
 use prefix_arena::{PrefixArena, StagingBuffer};
 
 /// Error returned by the stream-reading helper methods in this module.
@@ -235,10 +235,10 @@ pub trait StreamSearch: SocketReadWith {
 impl<T: SocketReadWith + ?Sized> StreamSearch for T {}
 
 /// Re-export the mock stream for testing purposes.
-#[cfg(test)]
+#[cfg(all(test, not(feature = "embassy_impl")))]
 pub mod tests {
     use super::*;
-    use crate::mocks::mock_read_stream::*;
+    use crate::abstarct_socket::mocks::mock_read_stream::*;
     use embedded_io_async::Read;
     use prefix_arena::PrefixArena;
 

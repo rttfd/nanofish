@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 use tokio::net::{TcpSocket, TcpStream};
 
-use crate::socket::{
+use crate::abstarct_socket::socket::{
     SocketClose, SocketEndpoint, SocketErrorKind, SocketErrorType, SocketInfo, SocketRead, SocketReadReady,
     SocketReadWith, SocketWaitReadReady, SocketWaitWriteReady, SocketWrite, SocketWriteReady, SocketWriteWith,
 };
@@ -243,10 +243,10 @@ impl SocketInfo for TokioSocketWrapper {
         }
     }
 
-    fn state(&self) -> crate::socket::State {
+    fn state(&self) -> crate::abstarct_socket::socket::State {
         match &self.state {
-            TokioSocketState::Stream(_) => crate::socket::State::Established,
-            TokioSocketState::Socket(_) => crate::socket::State::Closed,
+            TokioSocketState::Stream(_) => crate::abstarct_socket::socket::State::Established,
+            TokioSocketState::Socket(_) => crate::abstarct_socket::socket::State::Closed,
         }
     }
 }

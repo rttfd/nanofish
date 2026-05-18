@@ -34,6 +34,9 @@ mod defmt_test_logger {
     defmt::timestamp!("{=u8}", 0);
 }
 
+/// This module contains the implementation of the abstract socket traits and utilities,
+/// providing a common interface for socket operations.
+pub mod abstarct_socket;
 /// HTTP header types and helpers.
 mod header;
 
@@ -60,7 +63,7 @@ pub mod server;
 /// Common utilities and types for socket management.
 mod worker_memory;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "embassy_impl")))]
 mod mocks;
 
 /// This module contains the implementation of WebSocket traits and utilities, providing support for WebSocket communication in the library.
@@ -87,5 +90,5 @@ pub mod http_handler {
 
     pub use crate::header::{HttpHeader, headers, mime_types};
 
-    pub use abstarct_socket::socket::SocketEndpoint;
+    pub use crate::abstarct_socket::socket::SocketEndpoint;
 }

@@ -1,5 +1,5 @@
-pub use crate::mocks::error::MockStreamError;
-use crate::socket::{SocketReadWith, SocketWriteWith};
+pub use crate::abstarct_socket::mocks::error::MockStreamError;
+use crate::abstarct_socket::socket::{SocketReadWith, SocketWriteWith};
 use embedded_io_async::{ErrorType, Read, Write};
 use ringbuf::{StaticRb, traits::*};
 extern crate std;

@@ -9,10 +9,12 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
-    use abstarct_socket::socket::{
+    use nanooctopus::abstarct_socket::socket::{
         AbstarctSocketConnector, AbstractSocketListener, SocketClose, SocketInfo, SocketReadWith, State,
     };
-    use abstarct_socket::tokio_impl::socket::{TokioSocketReadHalfWrapper, TokioTcpListener, TokioTcpSocketConnector};
+    use nanooctopus::abstarct_socket::tokio_impl::socket::{
+        TokioSocketReadHalfWrapper, TokioTcpListener, TokioTcpSocketConnector,
+    };
 
     #[tokio::test]
     async fn test_stream_read_with_preserves_unconsumed_bytes() {
@@ -130,8 +132,8 @@ mod tests {
 
     mod tokio_listener {
         use super::*;
-        use abstarct_socket::socket::AbstractSocketListener;
-        use abstarct_socket::tokio_impl::socket::TokioTcpListener;
+        use nanooctopus::abstarct_socket::socket::AbstractSocketListener;
+        use nanooctopus::abstarct_socket::tokio_impl::socket::TokioTcpListener;
         use tokio::net::TcpStream;
 
         #[tokio::test]

@@ -19,29 +19,29 @@ authors = ["rttf <contact@rttf.dev>"]
 
 [features]
 default = []
-std = ["abstarct_socket/std", "embedded-io-async/std"]
+std = ["embedded-io-async/std"]
 ws = ["dep:sha1", "dep:binascii", "dep:modular-bitfield"]
 defmt = [
     "dep:defmt",
     "embassy-net/defmt",
-    "abstarct_socket/defmt",
     "defmt-or-log/defmt",
     "embedded-io-async/defmt-03",
     "heapless/defmt-03",
 ]
-log = ["dep:log", "defmt-or-log/log", "abstarct_socket/log"]
+log = ["dep:log", "defmt-or-log/log"]
 
 embassy_impl = [
+    "dep:pin-project",
     "dep:embassy-net",
     "dep:embassy-time",
     "dep:embassy-sync",
     "embassy-net/dns",
     "embassy-net/medium-ethernet",
     "embassy-net/tcp",
-    "abstarct_socket/embassy_impl",
 ]
-proto-ipv6 = ["abstarct_socket/proto-ipv6", "embassy-net?/proto-ipv6"]
-tokio_impl = ["dep:tokio", "abstarct_socket/tokio_impl", "std"]
+mocks = ["dep:ringbuf", "dep:tokio", "std"]
+proto-ipv6 = ["embassy-net?/proto-ipv6"]
+tokio_impl = ["dep:tokio", "std"]
 
 
 [dependencies]
@@ -65,8 +65,13 @@ binascii = { version = "0.1.4", default-features = false, features = [
     "encode",
 ], optional = true }
 modular-bitfield = { version = "0.13.0", optional = true }
-abstarct_socket = { path = "./abstarct_socket", default-features = false }
 tokio = { version = "1.0", features = ["full"], optional = true }
+
+# The `ringbuf` dependency is used for the mock implementations of the socket traits, providing a simple
+# ring buffer for testing purposes.
+ringbuf = { version = "0.4.8", optional = true }
+
+pin-project = { version = "1.1", optional = true }
 
 #Bump allocator
 prefix-arena = "0.1"
@@ -74,11 +79,15 @@ prefix-arena = "0.1"
 # Futures and async utilities
 embassy-futures = "0.1"
 
+
 [dev-dependencies]
 futures-lite = "2.0"
 tokio = { version = "1.0", features = ["full"] }
 tokio-test = "0.4"
 env_logger = "0.11"
-abstarct_socket = { path = "./abstarct_socket", default-features = false, features = [
-    "mocks",
-] }
+ringbuf = "0.4.8"
+
+[[test]]
+name = "tokio_impl_tests"
+path = "tests/tokio_impl_tests.rs"
+required-features = ["tokio_impl"]

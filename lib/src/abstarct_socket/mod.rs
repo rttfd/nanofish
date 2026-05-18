@@ -1,6 +1,4 @@
-#![cfg_attr(not(any(feature = "std", test)), no_std)]
-#![doc = include_str!("../README.md")]
-#![warn(missing_docs)]
+#![doc = include_str!("./README.md")]
 
 /// Read stream extension trait and helper error types.
 pub mod stream_search;
@@ -11,16 +9,16 @@ pub mod find_sequence;
 /// Socket pool implementation for managing multiple socket connections.
 pub mod socket;
 
-/// Socket builder trait and related utilities for constructing socket instances.
-pub use socket::AbstractSocketListener;
-
 /// Implementations for various socket types.
 #[cfg(feature = "embassy_impl")]
 pub mod embassy_impl;
 
 /// Test mocks for read/write streams and related utilities.
-#[cfg(any(test, feature = "mocks"))]
+#[cfg(all(any(test, feature = "mocks"), not(feature = "embassy_impl")))]
 pub mod mocks;
 /// Tokio-specific adapters and wrappers for the socket traits.
 #[cfg(feature = "tokio_impl")]
 pub mod tokio_impl;
+
+/// Socket builder trait and related utilities for constructing socket instances.
+pub use socket::AbstractSocketListener;

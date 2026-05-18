@@ -1,9 +1,9 @@
-pub use crate::tokio_impl::tokio_socket_wrapper::{
+pub use crate::abstarct_socket::tokio_impl::tokio_socket_wrapper::{
     TokioSocketOwnedReadHalfWrapper, TokioSocketOwnedWriteHalfWrapper, TokioSocketReadHalfWrapper, TokioSocketWrapper,
     TokioSocketWriteHalfWrapper,
 };
 
-use crate::socket::{AbstarctSocketConnector, AbstractSocketListener, SocketEndpoint};
+use crate::abstarct_socket::socket::{AbstarctSocketConnector, AbstractSocketListener, SocketEndpoint};
 use defmt_or_log as log;
 use tokio::net::TcpListener;
 
@@ -71,6 +71,12 @@ impl TokioTcpSocketConnector {
     /// Create a new instance of TokioTcpSocketConnector.
     pub const fn new() -> Self {
         Self
+    }
+}
+
+impl Default for TokioTcpSocketConnector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

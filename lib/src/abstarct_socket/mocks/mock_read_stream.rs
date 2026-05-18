@@ -1,5 +1,5 @@
-pub use crate::mocks::error::MockReadError;
-pub use crate::socket::SocketReadWith;
+pub use crate::abstarct_socket::mocks::error::MockReadError;
+pub use crate::abstarct_socket::socket::SocketReadWith;
 
 /// A dummy read stream for testing purposes
 pub struct MockReadStream<'a> {

@@ -58,7 +58,7 @@ impl<'a, Item> FindSequence<'a, Item> {
 }
 
 /// Tests for FindSequence
-#[cfg(test)]
+#[cfg(all(test, not(feature = "embassy_impl")))]
 pub mod tests {
     use super::*;
 

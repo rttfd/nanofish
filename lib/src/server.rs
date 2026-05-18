@@ -4,24 +4,24 @@ use crate::{
     response::{HttpResponse, HttpResponseBuilder},
 };
 
+use crate::abstarct_socket::socket::*;
 use crate::error::Error;
 use crate::status_code::StatusCode;
-use abstarct_socket::socket::*;
 use core::time::Duration;
 use defmt_or_log as log;
 use prefix_arena::PrefixArena;
 
 /// Re-exports for easier access by users of the library
-pub use abstarct_socket::socket::{AbstractSocketListener, SocketEndpoint};
+pub use crate::abstarct_socket::socket::{AbstractSocketListener, SocketEndpoint};
 
 /// Re-exports of the memory buffer trait and related types for easier allocation of memory for HTTP request handling.
 pub use crate::worker_memory::*;
 
 // WebSocket related imports and constants
 #[cfg(feature = "ws")]
-use crate::web_socket::WebSocket;
+use crate::abstarct_socket::socket::SocketWrite;
 #[cfg(feature = "ws")]
-use abstarct_socket::socket::SocketWrite;
+use crate::web_socket::WebSocket;
 #[cfg(feature = "ws")]
 use sha1::{Digest, Sha1};
 #[cfg(feature = "ws")]
@@ -35,7 +35,9 @@ const HANDLER_TIMEOUT_SECS: u64 = 60;
 /// simultaneous client connections in a cooperative manner, leveraging the async capabilities of the embassy framework.
 #[cfg(feature = "embassy_impl")]
 pub mod socket_pool {
-    pub use abstarct_socket::embassy_impl::tcp_socket_pool::{TcpSocketPool, TcpSocketPoolRunner, TcpSocketPoolState};
+    pub use crate::abstarct_socket::embassy_impl::tcp_socket_pool::{
+        TcpSocketPool, TcpSocketPoolRunner, TcpSocketPoolState,
+    };
 }
 
 /// This module contains the tokio implementation of TCP socket pool, that manage multiple TCP socket connections efficiently.
@@ -43,7 +45,7 @@ pub mod socket_pool {
 /// simultaneous client connections in a cooperative manner, leveraging the async capabilities of the tokio framework.
 #[cfg(feature = "tokio_impl")]
 pub mod socket_listener {
-    pub use abstarct_socket::tokio_impl::socket::TokioTcpListener;
+    pub use crate::abstarct_socket::tokio_impl::socket::TokioTcpListener;
 }
 
 /// HTTP server timeout configuration

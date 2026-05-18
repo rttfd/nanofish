@@ -3,8 +3,8 @@ use crate::header::HttpHeader;
 use crate::method::HttpMethod;
 use heapless::Vec;
 
+use crate::abstarct_socket::socket::{SocketRead, SocketReadWith};
 use crate::http_header_parser::HttpHeaderParser;
-use abstarct_socket::socket::{SocketRead, SocketReadWith};
 use defmt_or_log as log;
 use prefix_arena::PrefixArena;
 
@@ -219,10 +219,10 @@ impl<'buf> WebSocketKeySearch<'buf> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "embassy_impl")))]
 mod tests {
     use super::*;
-    use abstarct_socket::mocks::mock_read_stream::MockReadStream;
+    use crate::abstarct_socket::mocks::mock_read_stream::MockReadStream;
 
     fn create_mock_stream<'buf>(data: &'buf mut [u8]) -> MockReadStream<'buf> {
         MockReadStream::new(data)
