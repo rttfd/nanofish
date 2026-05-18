@@ -4,9 +4,7 @@ use embassy_futures::select::*;
 use embassy_net::tcp::TcpSocket;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 
-use core::pin::Pin;
 use defmt_or_log as log;
-use pin_project::pin_project;
 
 type Mutex<T> = embassy_sync::mutex::Mutex<NoopRawMutex, T>;
 type MutexGuard<'a, T> = embassy_sync::mutex::MutexGuard<'a, NoopRawMutex, T>;
@@ -25,16 +23,12 @@ const SOCKET_IO_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_s
 
 /// A socket pool implementation for managing multiple TCP socket connections using embassy-net.
 pub struct TcpSocketPool<'pool, const SOCKETS: usize> {
-    state: Pin<&'pool TcpSocketPoolState<'pool, SOCKETS>>,
+    state: &'pool TcpSocketPoolState<'pool, SOCKETS>,
 }
 
 impl<'pool, const SOCKETS: usize> TcpSocketPool<'pool, SOCKETS> {
     /// Create a new TcpSocketPool with the given stack, buffer, and endpoint.
-    pub fn new(
-        state: Pin<&'pool mut TcpSocketPoolState<'pool, SOCKETS>>,
-    ) -> (Self, TcpSocketPoolRunner<'pool, SOCKETS>) {
-        let state = state.into_ref();
-
+    pub fn new(state: &'pool mut TcpSocketPoolState<'pool, SOCKETS>) -> (Self, TcpSocketPoolRunner<'pool, SOCKETS>) {
         (Self { state }, TcpSocketPoolRunner { state })
     }
 }
@@ -43,13 +37,19 @@ impl<'pool, const SOCKETS: usize> AbstractSocketListener for TcpSocketPool<'pool
     type Socket = PoolSocket<'pool>;
 
     async fn accept(&self) -> Self::Socket {
-        unsafe { core::mem::transmute::<_, Self::Socket>(PoolSocket::new(self.state.queue.receive().await)) }
+        let socket = unsafe {
+            core::mem::transmute::<SocketGuard<'static>, SocketGuard<'pool>>(self.state.queue.receive().await)
+        };
+        PoolSocket::new(socket)
     }
 
     async fn try_accept(&self) -> Option<Self::Socket> {
-        unsafe {
-            core::mem::transmute::<_, Option<Self::Socket>>(self.state.queue.try_receive().map(PoolSocket::new).ok())
-        }
+        self.state
+            .queue
+            .try_receive()
+            .map(|socket| unsafe { core::mem::transmute::<SocketGuard<'static>, SocketGuard<'pool>>(socket) })
+            .map(PoolSocket::new)
+            .ok()
     }
 
     fn local_endpoint(&self) -> SocketEndpoint {
@@ -59,7 +59,7 @@ impl<'pool, const SOCKETS: usize> AbstractSocketListener for TcpSocketPool<'pool
 
 /// Internal state of the TcpSocketPool, which manages the actual sockets and the accept loop.
 pub struct TcpSocketPoolRunner<'pool, const SOCKETS: usize> {
-    state: Pin<&'pool TcpSocketPoolState<'pool, SOCKETS>>,
+    state: &'pool TcpSocketPoolState<'pool, SOCKETS>,
 }
 
 impl<'pool, const SOCKETS: usize> TcpSocketPoolRunner<'pool, SOCKETS> {
@@ -70,9 +70,7 @@ impl<'pool, const SOCKETS: usize> TcpSocketPoolRunner<'pool, SOCKETS> {
 }
 
 /// The state of the TcpSocketPool, which contains the sockets, the queue for ready sockets, and the endpoint information.
-#[pin_project]
 pub struct TcpSocketPoolState<'stack, const SOCKETS: usize> {
-    #[pin]
     sockets: [Socket<'stack>; SOCKETS],
     queue: SocketQueue<'static, SOCKETS>,
     endpoint: SocketEndpoint,
@@ -120,18 +118,17 @@ impl<'stack, const SOCKETS: usize> TcpSocketPoolState<'stack, SOCKETS> {
     }
 
     #[inline]
-    async fn accept_all_loop(self: Pin<&TcpSocketPoolState<'stack, SOCKETS>>) -> ! {
+    async fn accept_all_loop(self: &'stack TcpSocketPoolState<'stack, SOCKETS>) -> ! {
         loop {
             select_array(core::array::from_fn::<_, SOCKETS, _>(|idx| self.accept_loop(idx))).await;
         }
     }
 
-    async fn accept_loop(self: Pin<&TcpSocketPoolState<'stack, SOCKETS>>, index: usize) -> ! {
+    async fn accept_loop(self: &'stack TcpSocketPoolState<'stack, SOCKETS>, index: usize) -> ! {
         use embassy_net::tcp::State;
-        let this = self.project_ref();
 
         let accept = async move |socket: &'_ mut embassy_net::tcp::TcpSocket<'_>| {
-            socket.accept(this.endpoint.port()).await.unwrap_or_else(|e| {
+            socket.accept(self.endpoint.port()).await.unwrap_or_else(|e| {
                 log::panic!(
                     "SocketPool: Error while accepting connection[{}]: {:?}",
                     index,
@@ -141,7 +138,7 @@ impl<'stack, const SOCKETS: usize> TcpSocketPoolState<'stack, SOCKETS> {
         };
 
         loop {
-            let mut socket = this.sockets[index].lock().await;
+            let mut socket = self.sockets[index].lock().await;
             log::info!(
                 "SocketPool:1: Socket[{}] released with state: {:?}",
                 index,
@@ -187,11 +184,15 @@ impl<'stack, const SOCKETS: usize> TcpSocketPoolState<'stack, SOCKETS> {
 
             // Push ready socket into the queue
             // SAFETY: The socket is guaranteed to be valid for whole lifetime of the TcpSocketPoolData, and the SocketGuard will ensure that it is not accessed concurrently.
-            let socket = unsafe { core::mem::transmute::<_, SocketGuard<'static>>(socket) };
-            this.queue.send(socket).await;
+            let socket = unsafe { socket_guard_to_queue(socket) };
+            self.queue.send(socket).await;
             log::info!("SocketPool:2: Socket[{}] enqueued", index);
         }
     }
+}
+
+unsafe fn socket_guard_to_queue(guard: SocketGuard<'_>) -> SocketGuard<'static> {
+    unsafe { core::mem::transmute::<SocketGuard<'_>, SocketGuard<'static>>(guard) }
 }
 
 /// Represents a socket that is managed by the TcpSocketPool.
@@ -309,6 +310,6 @@ impl SocketInfo for PoolSocket<'_> {
 
     #[inline]
     fn state(&self) -> State {
-        State::from(<TcpSocket<'_> as SocketInfo>::state(&self.0))
+        self.0.state().into()
     }
 }

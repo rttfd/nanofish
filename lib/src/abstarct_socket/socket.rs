@@ -171,7 +171,7 @@ pub trait SocketWaitReadReady: SocketErrorType {
     /// ## Returns
     /// - Returns Ok(()) if the socket is ready for reading.
     /// - Returns `Self::Error` if the socket is not readable anymore, which may occur if the connection
-    /// has been closed or if an error occurs while waiting for the socket to become ready.
+    ///   has been closed or if an error occurs while waiting for the socket to become ready.
     async fn wait_read_ready(&mut self) -> Result<(), Self::Error>;
 }
 
@@ -191,7 +191,7 @@ pub trait SocketWaitWriteReady: SocketErrorType {
     /// ## Returns
     /// - Returns Ok(()) if the socket is ready for writing.
     /// - Returns `Self::Error` if the socket is not writable anymore, which may occur if the connection
-    /// has been closed or if an error occurs while waiting for the socket to become ready
+    ///   has been closed or if an error occurs while waiting for the socket to become ready
     async fn wait_write_ready(&mut self) -> Result<(), Self::Error>;
 }
 
@@ -322,7 +322,7 @@ pub trait AbstarctSocketConnector {
     ///
     /// ### Returns
     /// - Returns a future that resolves to a `Result` containing either an instance of `Self::Socket`
-    /// representing the established connection or an error if the connection attempt fails.
+    ///   representing the established connection or an error if the connection attempt fails.
     async fn connect(&self, endpoint: SocketEndpoint) -> Result<Self::Socket, Self::Error>;
 }
 

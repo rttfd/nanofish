@@ -2,10 +2,10 @@
 use core::fmt::Debug;
 
 use crate::abstarct_socket::socket::SocketReadWith;
-use crate::abstarct_socket::stream_search::{StreamReadError, StreamSearch};
 use crate::error::Error;
 use crate::header::HttpHeader;
 use crate::method::HttpMethod;
+use crate::stream_search::{StreamReadError, StreamSearch};
 use prefix_arena::PrefixArena;
 
 const LINE_DELIMITTER: &[u8; 2] = b"\r\n";

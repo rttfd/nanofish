@@ -31,7 +31,6 @@ defmt = [
 log = ["dep:log", "defmt-or-log/log"]
 
 embassy_impl = [
-    "dep:pin-project",
     "dep:embassy-net",
     "dep:embassy-time",
     "dep:embassy-sync",
@@ -70,8 +69,6 @@ tokio = { version = "1.0", features = ["full"], optional = true }
 # The `ringbuf` dependency is used for the mock implementations of the socket traits, providing a simple
 # ring buffer for testing purposes.
 ringbuf = { version = "0.4.8", optional = true }
-
-pin-project = { version = "1.1", optional = true }
 
 #Bump allocator
 prefix-arena = "0.1"

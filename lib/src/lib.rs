@@ -37,8 +37,11 @@ mod defmt_test_logger {
 /// This module contains the implementation of the abstract socket traits and utilities,
 /// providing a common interface for socket operations.
 pub mod abstarct_socket;
+
 /// HTTP header types and helpers.
 mod header;
+/// Read stream extension trait and helper error types.
+mod stream_search;
 
 /// HTTP method enum and helpers.
 mod method;

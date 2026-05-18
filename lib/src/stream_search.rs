@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::abstarct_socket::find_sequence::FindSequence;
 use crate::abstarct_socket::socket::SocketReadWith;
 use prefix_arena::{PrefixArena, StagingBuffer};

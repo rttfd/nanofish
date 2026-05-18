@@ -1,8 +1,4 @@
 #![doc = include_str!("./README.md")]
-
-/// Read stream extension trait and helper error types.
-pub mod stream_search;
-
 /// Utility to find value sequences in a stream.
 pub mod find_sequence;
 

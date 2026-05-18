@@ -1,4 +1,4 @@
-use crate::abstarct_socket::stream_search::StreamReadError;
+use crate::stream_search::StreamReadError;
 
 /// Errors that can occur during HTTP operations
 ///
