@@ -1,4 +1,7 @@
-use crate::{HttpHeader, StatusCode};
+use crate::{
+    HttpHeader, StatusCode,
+    protocol::{CRLF, MAX_HEADERS},
+};
 use heapless::Vec;
 
 /// HTTP Response body that can handle both text and binary data using zero-copy references
@@ -63,7 +66,7 @@ pub struct HttpResponse<'a> {
     /// The HTTP status code (e.g., 200 for OK, 404 for Not Found)
     pub status_code: StatusCode,
     /// A collection of response headers with both names and values
-    pub headers: Vec<HttpHeader<'a>, 16>,
+    pub headers: Vec<HttpHeader<'a>, MAX_HEADERS>,
     /// The response body that can handle both text and binary data
     pub body: ResponseBody<'a>,
 }
@@ -121,7 +124,7 @@ impl HttpResponse<'_> {
             let _ = bytes.extend_from_slice(header.name.as_bytes());
             let _ = bytes.extend_from_slice(b": ");
             let _ = bytes.extend_from_slice(header.value.as_bytes());
-            let _ = bytes.extend_from_slice(b"\r\n");
+            let _ = bytes.extend_from_slice(CRLF);
         }
 
         // Content-Length header if body is present
@@ -129,11 +132,11 @@ impl HttpResponse<'_> {
         if !body_bytes.is_empty() {
             let _ = bytes.extend_from_slice(b"Content-Length: ");
             write_decimal_to_buffer(&mut bytes, body_bytes.len());
-            let _ = bytes.extend_from_slice(b"\r\n");
+            let _ = bytes.extend_from_slice(CRLF);
         }
 
         // End of headers
-        let _ = bytes.extend_from_slice(b"\r\n");
+        let _ = bytes.extend_from_slice(CRLF);
 
         // Body
         let _ = bytes.extend_from_slice(body_bytes);
@@ -156,7 +159,7 @@ fn write_status_line<const MAX_RESPONSE_SIZE: usize>(
     // Write " <reason>\r\n"
     let _ = bytes.push(b' ');
     let _ = bytes.extend_from_slice(status_code.text().as_bytes());
-    let _ = bytes.extend_from_slice(b"\r\n");
+    let _ = bytes.extend_from_slice(CRLF);
 }
 
 /// Write a decimal number to the buffer

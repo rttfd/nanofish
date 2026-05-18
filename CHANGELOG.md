@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Support for `Transfer-Encoding: chunked` responses. Chunked bodies are decoded in-place before parsing ([#29](https://github.com/rttfd/nanofish/issues/29)).
+- New `protocol` module with shared HTTP constants (`CRLF`, `DOUBLE_CRLF`, `MAX_HEADERS`, `HTTP_VERSION`, port defaults) and utilities (`find_double_crlf`, `find_crlf`, `find_header_value`).
 
 ### Fixed
 
@@ -19,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refactored codebase to eliminate magic numbers and duplicated constants (SOLID/DRY).
+- Consolidated `MAX_HEADERS` into a single definition in `protocol` module (was defined separately in `client.rs`, `request.rs`, and hardcoded in `response.rs`).
+- Replaced scattered `windows(4).position(...)` patterns with shared `protocol::find_double_crlf` and `protocol::find_crlf` utilities.
 - Bumped `defmt` from `1.0.1` to `1.1.0`.
 - Bumped `heapless` from `0.9.2` to `0.9.3`.
 
