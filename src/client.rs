@@ -220,6 +220,9 @@ impl<
             _ => return Err(Error::UnsupportedScheme(scheme)),
         };
 
+        // Decode chunked transfer-encoding in-place if present
+        let total_read = Self::dechunk(response_buffer, total_read)?;
+
         let response = Self::parse_http_response_zero_copy(&response_buffer[..total_read])?;
         Ok((response, total_read))
     }
@@ -820,6 +823,12 @@ impl<
             return false;
         }
 
+        // Check for chunked transfer encoding
+        if Self::has_chunked_transfer_encoding(data) {
+            // Chunked responses end with "0\r\n\r\n" (final chunk)
+            return data.windows(5).any(|w| w == b"0\r\n\r\n");
+        }
+
         // Check for Content-Length header to determine if we have the full body
         if let Some(content_length_pos) = response_str.find("Content-Length:") {
             let content_length_end = response_str[content_length_pos..]
@@ -837,6 +846,100 @@ impl<
         }
 
         true
+    }
+
+    /// Check if the response uses chunked transfer encoding
+    fn has_chunked_transfer_encoding(data: &[u8]) -> bool {
+        // Find end of headers
+        let headers_end = match data.windows(4).position(|w| w == b"\r\n\r\n") {
+            Some(pos) => pos + 4,
+            None => return false,
+        };
+
+        // Only look at headers portion
+        let header_bytes = &data[..headers_end];
+        if let Ok(headers_str) = core::str::from_utf8(header_bytes) {
+            // Case-insensitive search for Transfer-Encoding: chunked
+            for line in headers_str.split("\r\n") {
+                if let Some(colon_pos) = line.find(':') {
+                    let name = line[..colon_pos].trim();
+                    let value = line[colon_pos + 1..].trim();
+                    if name.eq_ignore_ascii_case("Transfer-Encoding")
+                        && value.eq_ignore_ascii_case("chunked")
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Decode chunked transfer-encoding in-place if the response uses it.
+    /// Returns the new total length after decoding.
+    fn dechunk(buffer: &mut [u8], total_read: usize) -> Result<usize, Error> {
+        let data = &buffer[..total_read];
+
+        if !Self::has_chunked_transfer_encoding(data) {
+            return Ok(total_read);
+        }
+
+        // Find end of headers
+        let headers_end = data
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or(Error::InvalidResponse("Invalid HTTP response format"))?
+            + 4;
+
+        // Decode chunks in-place starting after headers
+        let mut read_pos = headers_end;
+        let mut write_pos = headers_end;
+
+        while read_pos < total_read {
+            // Find end of chunk size line
+            let chunk_line_end = match buffer[read_pos..total_read]
+                .windows(2)
+                .position(|w| w == b"\r\n")
+            {
+                Some(pos) => read_pos + pos,
+                None => break,
+            };
+
+            // Parse chunk size (hex)
+            let chunk_size_str = match core::str::from_utf8(&buffer[read_pos..chunk_line_end]) {
+                Ok(s) => s.trim(),
+                Err(_) => return Err(Error::InvalidResponse("Invalid chunk size encoding")),
+            };
+
+            // Chunk size may have extensions after a semicolon
+            let size_part = chunk_size_str.split(';').next().unwrap_or("0").trim();
+            let chunk_size = usize::from_str_radix(size_part, 16)
+                .map_err(|_| Error::InvalidResponse("Invalid chunk size"))?;
+
+            if chunk_size == 0 {
+                // Final chunk
+                break;
+            }
+
+            // Move past chunk size line (\r\n)
+            let chunk_data_start = chunk_line_end + 2;
+            let chunk_data_end = chunk_data_start + chunk_size;
+
+            if chunk_data_end > total_read {
+                return Err(Error::InvalidResponse("Incomplete chunked body"));
+            }
+
+            // Copy chunk data in-place (memmove semantics)
+            if write_pos != chunk_data_start {
+                buffer.copy_within(chunk_data_start..chunk_data_end, write_pos);
+            }
+            write_pos += chunk_size;
+
+            // Skip past chunk data and trailing \r\n
+            read_pos = chunk_data_end + 2;
+        }
+
+        Ok(write_pos)
     }
 }
 
@@ -950,5 +1053,57 @@ mod tests {
 
         assert_eq!(response.status_code, StatusCode::Ok);
         assert!(matches!(response.body, ResponseBody::Text("hello")));
+    }
+
+    #[test]
+    fn test_is_response_complete_chunked() {
+        let incomplete = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
+        assert!(!DefaultHttpClient::is_response_complete(incomplete));
+
+        let complete =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        assert!(DefaultHttpClient::is_response_complete(complete));
+    }
+
+    #[test]
+    fn test_dechunk_single_chunk() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        let mut buf = [0u8; 256];
+        buf[..raw.len()].copy_from_slice(raw);
+
+        let new_len =
+            DefaultHttpClient::dechunk(&mut buf, raw.len()).expect("should decode chunked");
+
+        let response = DefaultHttpClient::parse_http_response_zero_copy(&buf[..new_len])
+            .expect("should parse dechunked response");
+
+        assert_eq!(response.status_code, StatusCode::Ok);
+        assert_eq!(response.body.as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn test_dechunk_multiple_chunks() {
+        // Mimics the weather API response from issue #29
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\nb\r\n{\"temp\":23}\r\n0\r\n\r\n";
+        let mut buf = [0u8; 256];
+        buf[..raw.len()].copy_from_slice(raw);
+
+        let new_len =
+            DefaultHttpClient::dechunk(&mut buf, raw.len()).expect("should decode chunked");
+
+        let response = DefaultHttpClient::parse_http_response_zero_copy(&buf[..new_len])
+            .expect("should parse dechunked response");
+
+        assert_eq!(response.body.as_str(), Some("{\"temp\":23}"));
+    }
+
+    #[test]
+    fn test_dechunk_noop_when_not_chunked() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        let mut buf = [0u8; 128];
+        buf[..raw.len()].copy_from_slice(raw);
+
+        let new_len = DefaultHttpClient::dechunk(&mut buf, raw.len()).expect("should pass through");
+        assert_eq!(new_len, raw.len());
     }
 }

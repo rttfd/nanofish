@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-05-18
+
+### Added
+
+- Support for `Transfer-Encoding: chunked` responses. Chunked bodies are decoded in-place before parsing ([#29](https://github.com/rttfd/nanofish/issues/29)).
+
+### Fixed
+
+- Removed unsafe dangling pointer usage from README examples ([#28](https://github.com/rttfd/nanofish/issues/28)).
+
+### Changed
+
+- Bumped `defmt` from `1.0.1` to `1.1.0`.
+- Bumped `heapless` from `0.9.2` to `0.9.3`.
+
 ## [0.11.3] - 2026-04-22
 
 ### Fixed
