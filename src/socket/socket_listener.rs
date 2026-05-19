@@ -4,7 +4,7 @@ use crate::socket::SocketEndpoint;
 /// A trait representing a socket listener, which provides methods for constructing socket instances and retrieving
 /// socket endpoint information. This trait is designed to be implemented by various socket listener types, allowing
 /// for a consistent interface for constructing socket instances across different platforms and implementations. The
-/// `SocketListener` trait includes an associated type `Socket` that represents the type of socket produced
+/// `SocketListener` trait includes an associated type `AcceptedSocket` that represents the type of socket produced
 /// by the listener, and methods for accepting incoming connections and retrieving the socket endpoint.
 /// Implementers of the `SocketListener` trait must provide an implementation for the `accept` method, which
 /// constructs a new socket instance based on the listener's configuration, and the `endpoint` method, which returns
@@ -16,23 +16,23 @@ pub trait SocketListener {
     /// The associated type representing the socket produced by the listener.
     /// The produced socket has a lifetime parameter that is tied to the listener, ensuring that the socket cannot
     /// outlive the listener that created it.
-    type Socket;
+    type AcceptedSocket;
 
     /// Accept an incoming connection and construct a new socket instance based on the listener's configuration.
     /// This method should block until a new connection is accepted.
     ///
     /// ### Returns
-    /// - Returns an instance of `Self::Socket` representing the accepted connection if successful.
+    /// - Returns an instance of `Self::AcceptedSocket` representing the accepted connection if successful.
     ///
     /// Note: this method should not panic on errors.
-    async fn accept(&self) -> Self::Socket;
+    async fn accept(&self) -> Self::AcceptedSocket;
 
     /// Attempt to accept an incoming connection without blocking. This method should return immediately, indicating
     /// whether a new connection was accepted or if no connections are currently pending.
     /// ### Returns
-    /// - Returns `Some(Self::Socket)` if a new connection was accepted successfully.
+    /// - Returns `Some(Self::AcceptedSocket)` if a new connection was accepted successfully.
     /// - Returns `None` if no connections are currently pending or if an error occurs while attempting to accept a connection.
-    async fn try_accept(&self) -> Option<Self::Socket>;
+    async fn try_accept(&self) -> Option<Self::AcceptedSocket>;
 
     /// Get the local endpoint that the listener is configured to listen on. This method should return the socket endpoint
     /// that the listener is bound to, which can be used by clients to connect to the listener.
@@ -48,15 +48,15 @@ pub trait SocketListener {
 }
 
 impl<T: ?Sized + SocketListener> SocketListener for &T {
-    type Socket = T::Socket;
+    type AcceptedSocket = T::AcceptedSocket;
 
     #[inline]
-    async fn accept(&self) -> Self::Socket {
+    async fn accept(&self) -> Self::AcceptedSocket {
         T::accept(self).await
     }
 
     #[inline]
-    async fn try_accept(&self) -> Option<Self::Socket> {
+    async fn try_accept(&self) -> Option<Self::AcceptedSocket> {
         T::try_accept(self).await
     }
 

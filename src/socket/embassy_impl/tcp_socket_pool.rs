@@ -34,16 +34,16 @@ impl<'pool, const SOCKETS: usize> TcpSocketPool<'pool, SOCKETS> {
 }
 
 impl<'pool, const SOCKETS: usize> SocketListener for TcpSocketPool<'pool, SOCKETS> {
-    type Socket = PoolSocket<'pool>;
+    type AcceptedSocket = PoolSocket<'pool>;
 
-    async fn accept(&self) -> Self::Socket {
+    async fn accept(&self) -> Self::AcceptedSocket {
         let socket = unsafe {
             core::mem::transmute::<SocketGuard<'static>, SocketGuard<'pool>>(self.state.queue.receive().await)
         };
         PoolSocket::new(socket)
     }
 
-    async fn try_accept(&self) -> Option<Self::Socket> {
+    async fn try_accept(&self) -> Option<Self::AcceptedSocket> {
         self.state
             .queue
             .try_receive()

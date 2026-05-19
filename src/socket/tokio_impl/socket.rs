@@ -37,9 +37,9 @@ impl<'stack> TokioTcpListener<'stack> {
 }
 
 impl<'stack> SocketListener for TokioTcpListener<'stack> {
-    type Socket = TokioSocketWrapper;
+    type AcceptedSocket = TokioSocketWrapper;
 
-    async fn accept(&self) -> Self::Socket {
+    async fn accept(&self) -> Self::AcceptedSocket {
         self.listener
             .accept()
             .await
@@ -48,7 +48,7 @@ impl<'stack> SocketListener for TokioTcpListener<'stack> {
             .unwrap()
     }
 
-    async fn try_accept(&self) -> Option<Self::Socket> {
+    async fn try_accept(&self) -> Option<Self::AcceptedSocket> {
         core::future::poll_fn(|cx| {
             if let core::task::Poll::Ready(Ok((socket, _))) = self.listener.poll_accept(cx) {
                 core::task::Poll::Ready(Some(TokioSocketWrapper::new_stream(socket)))
