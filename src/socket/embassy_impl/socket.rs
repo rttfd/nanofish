@@ -6,6 +6,10 @@ use crate::socket::{
 use embassy_net::tcp::{TcpReader, TcpSocket, TcpWriter};
 use embedded_io_async::ReadReady;
 
+use core::future::poll_fn;
+use core::pin::pin;
+use core::task::Poll;
+
 // Embassy-net based ReadStream implementation for TcpReader
 impl<'stack> SocketReadWith for TcpSocket<'stack> {
     #[inline]
@@ -131,13 +135,9 @@ impl SocketClose for TcpSocket<'_> {
 
 impl SocketWaitReadReady for TcpSocket<'_> {
     async fn wait_read_ready(&mut self) -> Result<(), Self::Error> {
-        use core::future::poll_fn;
-        use core::pin::pin;
-        use core::task::Poll;
-
         poll_fn(|cx| -> Poll<Result<(), Self::Error>> {
-            let wait_read_ready = pin!(TcpSocket::wait_read_ready(self));
-            if let Poll::Ready(()) = wait_read_ready.poll(cx) {
+            let poll_res = { pin!(TcpSocket::wait_read_ready(self)).poll(cx) };
+            if let Poll::Ready(()) = poll_res {
                 Poll::Ready(Ok(()))
             } else {
                 if !self.may_recv() {
@@ -153,12 +153,9 @@ impl SocketWaitReadReady for TcpSocket<'_> {
 
 impl SocketWaitReadReady for TcpReader<'_> {
     async fn wait_read_ready(&mut self) -> Result<(), Self::Error> {
-        use core::future::poll_fn;
-        use core::pin::pin;
-        use core::task::Poll;
-
         poll_fn(|cx| -> Poll<Result<(), Self::Error>> {
-            if let Poll::Ready(()) = pin!(TcpReader::wait_read_ready(self)).poll(cx) {
+            let poll_res = { pin!(TcpReader::wait_read_ready(self)).poll(cx) };
+            if let Poll::Ready(()) = poll_res {
                 Poll::Ready(Ok(()))
             } else {
                 if !self.read_ready().unwrap() {
@@ -174,12 +171,9 @@ impl SocketWaitReadReady for TcpReader<'_> {
 
 impl SocketWaitWriteReady for TcpSocket<'_> {
     async fn wait_write_ready(&mut self) -> Result<(), Self::Error> {
-        use core::future::poll_fn;
-        use core::pin::pin;
-        use core::task::Poll;
-
         poll_fn(|cx| -> Poll<Result<(), Self::Error>> {
-            if let Poll::Ready(()) = pin!(TcpSocket::wait_write_ready(self)).poll(cx) {
+            let poll_res = { pin!(TcpSocket::wait_write_ready(self)).poll(cx) };
+            if let Poll::Ready(()) = poll_res {
                 Poll::Ready(Ok(()))
             } else {
                 if let Poll::Ready(Err(e)) = pin!(TcpSocket::flush(self)).poll(cx) {
@@ -195,12 +189,9 @@ impl SocketWaitWriteReady for TcpSocket<'_> {
 
 impl SocketWaitWriteReady for TcpWriter<'_> {
     async fn wait_write_ready(&mut self) -> Result<(), Self::Error> {
-        use core::future::poll_fn;
-        use core::pin::pin;
-        use core::task::Poll;
-
         poll_fn(|cx| -> Poll<Result<(), Self::Error>> {
-            if let Poll::Ready(()) = pin!(TcpWriter::wait_write_ready(self)).poll(cx) {
+            let poll_res = { pin!(TcpWriter::wait_write_ready(self)).poll(cx) };
+            if let Poll::Ready(()) = poll_res {
                 Poll::Ready(Ok(()))
             } else {
                 if let Poll::Ready(Err(e)) = pin!(TcpWriter::flush(self)).poll(cx) {
