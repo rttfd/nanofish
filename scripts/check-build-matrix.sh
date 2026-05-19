@@ -2,6 +2,7 @@
 set -euo pipefail
 
 readonly FEATURE_SETS=(
+  ""
   "tokio_impl"
   "tokio_impl,ws"
   "tokio_impl,log"
