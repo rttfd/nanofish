@@ -12,9 +12,7 @@ mod tests {
     use nanooctopus::socket::tokio_impl::socket::{
         TokioSocketReadHalfWrapper, TokioTcpListener, TokioTcpSocketConnector,
     };
-    use nanooctopus::socket::{
-        AbstractSocketListener, SocketClose, SocketConnector, SocketInfo, SocketReadWith, State,
-    };
+    use nanooctopus::socket::{SocketClose, SocketConnector, SocketInfo, SocketListener, SocketReadWith, State};
 
     #[tokio::test]
     async fn test_stream_read_with_preserves_unconsumed_bytes() {
@@ -132,7 +130,7 @@ mod tests {
 
     mod tokio_listener {
         use super::*;
-        use nanooctopus::socket::AbstractSocketListener;
+        use nanooctopus::socket::SocketListener;
         use nanooctopus::socket::tokio_impl::socket::TokioTcpListener;
         use tokio::net::TcpStream;
 

@@ -4,15 +4,15 @@ use crate::socket::SocketEndpoint;
 /// A trait representing a socket listener, which provides methods for constructing socket instances and retrieving
 /// socket endpoint information. This trait is designed to be implemented by various socket listener types, allowing
 /// for a consistent interface for constructing socket instances across different platforms and implementations. The
-/// `AbstractSocketListener` trait includes an associated type `Socket` that represents the type of socket produced
+/// `SocketListener` trait includes an associated type `Socket` that represents the type of socket produced
 /// by the listener, and methods for accepting incoming connections and retrieving the socket endpoint.
-/// Implementers of the `AbstractSocketListener` trait must provide an implementation for the `accept` method, which
+/// Implementers of the `SocketListener` trait must provide an implementation for the `accept` method, which
 /// constructs a new socket instance based on the listener's configuration, and the `endpoint` method, which returns
 /// the socket endpoint that the listener is configured to listen on.
-/// The `AbstractSocketListener` trait is designed to be flexible and extensible, allowing for different types of
+/// The `SocketListener` trait is designed to be flexible and extensible, allowing for different types of
 /// socket listeners to be implemented while still adhering to a common interface for constructing socket instances
 /// and retrieving endpoint information.
-pub trait AbstractSocketListener {
+pub trait SocketListener {
     /// The associated type representing the socket produced by the listener.
     /// The produced socket has a lifetime parameter that is tied to the listener, ensuring that the socket cannot
     /// outlive the listener that created it.
@@ -47,7 +47,7 @@ pub trait AbstractSocketListener {
     fn local_endpoint(&self) -> SocketEndpoint;
 }
 
-impl<T: ?Sized + AbstractSocketListener> AbstractSocketListener for &T {
+impl<T: ?Sized + SocketListener> SocketListener for &T {
     type Socket = T::Socket;
 
     #[inline]

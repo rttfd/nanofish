@@ -33,7 +33,7 @@ impl<'pool, const SOCKETS: usize> TcpSocketPool<'pool, SOCKETS> {
     }
 }
 
-impl<'pool, const SOCKETS: usize> AbstractSocketListener for TcpSocketPool<'pool, SOCKETS> {
+impl<'pool, const SOCKETS: usize> SocketListener for TcpSocketPool<'pool, SOCKETS> {
     type Socket = PoolSocket<'pool>;
 
     async fn accept(&self) -> Self::Socket {
@@ -196,7 +196,7 @@ unsafe fn socket_guard_to_queue(guard: SocketGuard<'_>) -> SocketGuard<'static> 
 }
 
 /// Represents a socket that is managed by the TcpSocketPool.
-/// This type is used as the associated Socket type in the AbstractSocketListener implementation for
+/// This type is used as the associated Socket type in the SocketListener implementation for
 /// TcpSocketPool, and it provides access to the underlying TcpSocket through the SocketGuard.
 pub struct PoolSocket<'pool>(SocketGuard<'pool>);
 

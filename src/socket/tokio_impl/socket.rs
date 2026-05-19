@@ -3,7 +3,7 @@ pub use crate::socket::tokio_impl::tokio_socket_wrapper::{
     TokioSocketWriteHalfWrapper,
 };
 
-use crate::socket::{AbstractSocketListener, SocketConnector, SocketEndpoint};
+use crate::socket::{SocketConnector, SocketEndpoint, SocketListener};
 use defmt_or_log as log;
 use tokio::net::TcpListener;
 
@@ -36,7 +36,7 @@ impl<'stack> TokioTcpListener<'stack> {
     }
 }
 
-impl<'stack> AbstractSocketListener for TokioTcpListener<'stack> {
+impl<'stack> SocketListener for TokioTcpListener<'stack> {
     type Socket = TokioSocketWrapper;
 
     async fn accept(&self) -> Self::Socket {

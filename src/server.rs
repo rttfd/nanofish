@@ -12,7 +12,7 @@ use defmt_or_log as log;
 use prefix_arena::PrefixArena;
 
 /// Re-exports for easier access by users of the library
-pub use crate::socket::{AbstractSocketListener, SocketEndpoint};
+pub use crate::socket::{SocketEndpoint, SocketListener};
 
 /// Re-exports of the memory buffer trait and related types for easier allocation of memory for HTTP request handling.
 pub use crate::worker_memory::*;
@@ -86,7 +86,7 @@ pub struct HttpServer<SocketBuilder> {
     auto_close_connection: bool,
 }
 
-impl<SocketBuilder: AbstractSocketListener> HttpServer<SocketBuilder> {
+impl<SocketBuilder: SocketListener> HttpServer<SocketBuilder> {
     /// Create a new HTTP server with default timeouts
     #[must_use]
     pub fn new(socket_builder: SocketBuilder, timeouts: ServerTimeouts) -> Self {
@@ -112,7 +112,7 @@ impl<SocketBuilder: AbstractSocketListener> HttpServer<SocketBuilder> {
     pub async fn serve<H>(&self, mut worker_memory: impl HttpMemoryBuffer, mut handler: H, context_id: usize) -> !
     where
         H: HttpHandler,
-        <SocketBuilder as AbstractSocketListener>::Socket: AbstractSocket + SocketReadWith,
+        <SocketBuilder as SocketListener>::Socket: AbstractSocket + SocketReadWith,
     {
         log::info!("WebServer[{}]: HTTP server started", context_id);
 
