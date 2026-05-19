@@ -7,7 +7,7 @@ The crate defines transport-agnostic traits and ships adapter modules for Embass
 ## What This Crate Covers
 
 - Unified socket metadata via `SocketInfo` (`local_endpoint`, `remote_endpoint`, `state`).
-- Connection lifecycle via `SocketClose`, `AbstractSocketListener`, and `AbstarctSocketConnector`.
+- Connection lifecycle via `SocketClose`, `AbstractSocketListener`, and `AbstractSocketConnector`.
 - Async stream I/O via re-exported `embedded_io_async` traits (`SocketRead`, `SocketWrite`, `SocketReadReady`, `SocketWriteReady`).
 - Readiness waiting via `SocketWaitReadReady` and `SocketWaitWriteReady`.
 - Optional closure-based zero-copy style hooks via `SocketReadWith` and `SocketWriteWith`.
@@ -18,7 +18,7 @@ The crate defines transport-agnostic traits and ships adapter modules for Embass
 - `AbstractSocket`: `SocketStream + SocketInfo + SocketClose`.
 - `ExtendedSocket`: `AbstractSocket + SocketReadWith + SocketWriteWith`.
 - `AbstractSocketListener`: async accept interface producing implementation-specific sockets.
-- `AbstarctSocketConnector`: async outbound connection interface.
+- `AbstractSocketConnector`: async outbound connection interface.
 
 The design keeps the abstraction close to native TCP semantics instead of masking platform behavior behind a large custom API.
 

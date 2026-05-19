@@ -13,7 +13,7 @@ mod tests {
         TokioSocketReadHalfWrapper, TokioTcpListener, TokioTcpSocketConnector,
     };
     use nanooctopus::socket::{
-        AbstarctSocketConnector, AbstractSocketListener, SocketClose, SocketInfo, SocketReadWith, State,
+        AbstractSocketConnector, AbstractSocketListener, SocketClose, SocketInfo, SocketReadWith, State,
     };
 
     #[tokio::test]

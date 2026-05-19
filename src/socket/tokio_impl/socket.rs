@@ -3,7 +3,7 @@ pub use crate::socket::tokio_impl::tokio_socket_wrapper::{
     TokioSocketWriteHalfWrapper,
 };
 
-use crate::socket::{AbstarctSocketConnector, AbstractSocketListener, SocketEndpoint};
+use crate::socket::{AbstractSocketConnector, AbstractSocketListener, SocketEndpoint};
 use defmt_or_log as log;
 use tokio::net::TcpListener;
 
@@ -80,7 +80,7 @@ impl Default for TokioTcpSocketConnector {
     }
 }
 
-impl AbstarctSocketConnector for TokioTcpSocketConnector {
+impl AbstractSocketConnector for TokioTcpSocketConnector {
     type Error = std::io::Error;
     type Socket = TokioSocketWrapper;
 
