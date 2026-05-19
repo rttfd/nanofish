@@ -220,8 +220,8 @@ impl<
 /// socket operations across different platforms and implementations. Implementers of the `Socket` trait must also
 /// implement the `SocketInfo`, `SocketClose`, `SocketRead`, `SocketReadReady`, `SocketWrite`, `SocketWriteReady`,
 /// `SocketReadWith`, and `SocketWriteWith` traits.
-pub trait AbstractSocket: SocketStream + SocketInfo + SocketClose {}
-impl<T: ?Sized + SocketStream + SocketInfo + SocketClose> AbstractSocket for T {}
+pub trait Socket: SocketStream + SocketInfo + SocketClose {}
+impl<T: ?Sized + SocketStream + SocketInfo + SocketClose> Socket for T {}
 
 /// A trait that encompasses all socket-related functionality, including information retrieval, graceful shutdown,
 /// and asynchronous read/write operations with custom buffer management.
@@ -229,5 +229,5 @@ impl<T: ?Sized + SocketStream + SocketInfo + SocketClose> AbstractSocket for T {
 /// socket operations across different platforms and implementations. Implementers of the `Socket` trait must also
 /// implement the `SocketInfo`, `SocketClose`, `SocketRead`, `SocketReadReady`, `SocketWrite`, `SocketWriteReady`,
 /// `SocketReadWith`, and `SocketWriteWith` traits.
-pub trait ExtendedSocket: AbstractSocket + SocketReadWith + SocketWriteWith {}
-impl<T: ?Sized + AbstractSocket + SocketReadWith + SocketWriteWith> ExtendedSocket for T {}
+pub trait ExtendedSocket: Socket + SocketReadWith + SocketWriteWith {}
+impl<T: ?Sized + Socket + SocketReadWith + SocketWriteWith> ExtendedSocket for T {}

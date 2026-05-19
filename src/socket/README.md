@@ -15,8 +15,8 @@ The crate defines transport-agnostic traits and ships adapter modules for Embass
 ## Core Trait Model
 
 - `SocketStream`: combines read/write + readiness traits.
-- `AbstractSocket`: `SocketStream + SocketInfo + SocketClose`.
-- `ExtendedSocket`: `AbstractSocket + SocketReadWith + SocketWriteWith`.
+- `Socket`: `SocketStream + SocketInfo + SocketClose`.
+- `ExtendedSocket`: `Socket + SocketReadWith + SocketWriteWith`.
 - `SocketListener`: async accept interface producing implementation-specific sockets.
 - `SocketConnector`: async outbound connection interface.
 

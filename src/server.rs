@@ -112,7 +112,7 @@ impl<SocketBuilder: SocketListener> HttpServer<SocketBuilder> {
     pub async fn serve<H>(&self, mut worker_memory: impl HttpMemoryBuffer, mut handler: H, context_id: usize) -> !
     where
         H: HttpHandler,
-        <SocketBuilder as SocketListener>::AcceptedSocket: AbstractSocket + SocketReadWith,
+        <SocketBuilder as SocketListener>::AcceptedSocket: Socket + SocketReadWith,
     {
         log::info!("WebServer[{}]: HTTP server started", context_id);
 
