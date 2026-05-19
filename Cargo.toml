@@ -9,12 +9,6 @@ license = "MIT"
 keywords = ["no_std", "embedded", "async", "http_server", "websockets"]
 authors = ["kdimonych <k.dimonych@gmail.com>"]
 
-[package.metadata.upstream]
-name = "nanofish"
-repository = "https://github.com/rttfd/nanofish"
-author = "rttf contact@rttf.dev"
-note = "Originally forked from upstream and later substantially reworked."
-
 [features]
 default = []
 std = ["embedded-io-async/std"]
