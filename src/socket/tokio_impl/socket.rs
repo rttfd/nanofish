@@ -81,10 +81,10 @@ impl Default for TokioTcpSocketConnector {
 }
 
 impl SocketConnector for TokioTcpSocketConnector {
-    type Error = std::io::Error;
-    type Socket = TokioSocketWrapper;
+    type ConnectError = std::io::Error;
+    type ConnectedSocket = TokioSocketWrapper;
 
-    async fn connect(&self, endpoint: SocketEndpoint) -> Result<Self::Socket, Self::Error> {
+    async fn connect(&self, endpoint: SocketEndpoint) -> Result<Self::ConnectedSocket, Self::ConnectError> {
         let stream = tokio::net::TcpStream::connect(endpoint).await?;
         Ok(TokioSocketWrapper::new_stream(stream))
     }
