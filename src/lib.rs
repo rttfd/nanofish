@@ -1,4 +1,4 @@
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(any(feature = "std", test, feature = "mocks", feature = "tokio_impl")), no_std)]
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 

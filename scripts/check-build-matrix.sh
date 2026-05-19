@@ -23,14 +23,19 @@ simple_run(){
 
   local -a extra_args=("$@")
 
+  # If work_dir is not current directory, print it out for clarity
+  if [ "$work_dir" != "." ]; then
+    echo "Command: (cd \"$work_dir\" && cargo $cargo_subcommand $@)"
+  else
+    echo "Command: cargo $cargo_subcommand $@"
+  fi
+
   if ((${#extra_args[@]} == 0)); then
-    echo "Command: cd $work_dir && cargo $cargo_subcommand"
     (
       cd "$work_dir"
       cargo "$cargo_subcommand"
     )
   else
-    echo "Command: cd $work_dir && cargo $cargo_subcommand ${extra_args[*]}"
     (
       cd "$work_dir"
       cargo "$cargo_subcommand" "${extra_args[@]}"
@@ -46,24 +51,14 @@ run_for_all_features() {
   local -a extra_args=("$@")
 
   for feature_set in "${FEATURE_SETS[@]}"; do
-    printf '\n==> %s [%s]\n' "$cargo_subcommand" "$feature_set"
-    if ((${#extra_args[@]} == 0)); then
-      # Trace command line for better visibility when running with `all`.
-      echo "Command: cd $work_dir && cargo $cargo_subcommand --no-default-features --features $feature_set"
-      # Run inside a subshell so cd never affects the parent shell's $PWD,
-      # even if the cargo command fails.
-      (
-        cd "$work_dir"
-        cargo "$cargo_subcommand" --no-default-features --features "$feature_set"
-      )
-    else
-      # Trace command line for better visibility when running with `all`.
-      echo "Command: cd $work_dir && cargo $cargo_subcommand --no-default-features --features $feature_set ${extra_args[*]}"
-      (
-        cd "$work_dir"
-        cargo "$cargo_subcommand" --no-default-features --features "$feature_set" "${extra_args[@]}"
-      )
-    fi
+  # If feature is not empty string, add --features flag
+  if [ -n "$feature_set" ]; then
+    echo "Running with features: $feature_set"
+    simple_run "$work_dir" "$cargo_subcommand" --no-default-features --features "$feature_set" "$@"
+  else
+    echo "Running with no features"
+    simple_run "$work_dir" "$cargo_subcommand" --no-default-features "$@"
+  fi
   done
 }
 
