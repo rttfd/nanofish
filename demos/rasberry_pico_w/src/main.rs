@@ -176,7 +176,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Create the TCP socket pool, which will manage incoming TCP connections for the server. The socket pool will use the
     // provided state to accept and manage sockets.
-    let (socket_pool, runner) = server::socket_pool::TcpSocketPool::new(core::pin::Pin::new(socket_pool_state));
+    let (socket_pool, runner) = server::socket_pool::TcpSocketPool::new(socket_pool_state);
 
     // Spawn the socket pool runner task. This task will continuously run in the background, accepting incoming TCP connections
     // and managing the socket pool.

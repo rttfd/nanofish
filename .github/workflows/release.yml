@@ -17,7 +17,7 @@ jobs:
       version: ${{ steps.get-version.outputs.version }}
       tag-version: ${{ steps.get-tag.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: 📋 Get version from Cargo.toml
         id: get-version
         run: |
@@ -44,13 +44,13 @@ jobs:
     needs: check-version
     steps:
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: 🛠️ Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.89
+          toolchain: stable
       - name: 💾 Cache dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -68,7 +68,7 @@ jobs:
       already-published: ${{ steps.check-published.outputs.already-published }}
       crate-name: ${{ steps.get-crate-name.outputs.crate-name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: 📋 Get crate name
         id: get-crate-name
         run: |
@@ -101,13 +101,13 @@ jobs:
     if: needs.check-crates-published.outputs.already-published == 'false'
     steps:
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: 🛠️ Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: 1.87
+          toolchain: stable
       - name: 💾 Cache dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -139,7 +139,7 @@ jobs:
     outputs:
       release-exists: ${{ steps.check-release.outputs.release-exists }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: 🔍 Check if GitHub release exists
         id: check-release
         env:
@@ -169,7 +169,7 @@ jobs:
     needs: [check-version, check-release, publish, skip-publish]
     if: always() && needs.check-release.outputs.release-exists == 'false' && (needs.publish.result == 'success' || needs.skip-publish.result == 'success')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: 📝 Generate changelog

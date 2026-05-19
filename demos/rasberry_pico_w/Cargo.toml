@@ -7,7 +7,7 @@ edition = "2024"
 
 [dependencies]
 # HTTP server
-nanooctopus = { path = "../../lib", default-features = false, features = [
+nanooctopus = { path = "../..", default-features = false, features = [
   "ws",
   "embassy_impl",
   "defmt",

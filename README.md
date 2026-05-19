@@ -53,21 +53,21 @@ The crate does **not** currently document or position itself as an HTTP client l
 
 ```toml
 [dependencies]
-nanooctopus = { version = "0.9.1", default-features = false, features = ["embassy_impl"] }
+nanooctopus = { version = "0.1.0", default-features = false, features = ["embassy_impl"] }
 ```
 
 ### Embedded / Embassy with WebSockets and `defmt`
 
 ```toml
 [dependencies]
-nanooctopus = { version = "0.9.1", default-features = false, features = ["embassy_impl", "ws", "defmt"] }
+nanooctopus = { version = "0.1.0", default-features = false, features = ["embassy_impl", "ws", "defmt"] }
 ```
 
 ### Desktop / Host Testing with Tokio
 
 ```toml
 [dependencies]
-nanooctopus = { version = "0.9.1", features = ["tokio_impl", "log"] }
+nanooctopus = { version = "0.1.0", features = ["tokio_impl", "log"] }
 ```
 
 ## Feature Flags
