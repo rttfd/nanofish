@@ -42,6 +42,7 @@ impl<const SIZE: usize> HttpMemoryBuffer for HttpWorkerMemory<SIZE> {
 pub struct HttpWorkerMemory<'buf, const SIZE: usize> {
     buffer: &'buf mut [MaybeUninit<u8>; SIZE],
 }
+
 #[cfg(feature = "embassy_impl")]
 impl<'buf, const SIZE: usize> HttpWorkerMemory<'buf, SIZE> {
     /// Create a new HttpWorkerMemory instance with an uninitialized buffer
@@ -49,6 +50,7 @@ impl<'buf, const SIZE: usize> HttpWorkerMemory<'buf, SIZE> {
         Self { buffer }
     }
 }
+
 #[cfg(feature = "embassy_impl")]
 impl<'buf, const SIZE: usize> HttpMemoryBuffer for HttpWorkerMemory<'buf, SIZE> {
     fn get_buffer(&mut self) -> &mut [MaybeUninit<u8>] {

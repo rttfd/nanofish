@@ -2,7 +2,7 @@
 [<img alt="crates.io" src="https://img.shields.io/crates/v/nanooctopus.svg?style=for-the-badge&color=ff8b94&logo=rust" height="20">](https://crates.io/crates/nanooctopus)
 [<img alt="docs.rs" src="https://img.shields.io/badge/docs.rs-nanooctopus-bedc9c?style=for-the-badge&labelColor=555555&logo=docs.rs" height="20">](https://docs.rs/nanooctopus)
 
-![Nanooctopus](nanooctopus.jpg)
+![Nanooctopus](https://raw.githubusercontent.com/kdimonych/nanooctopus/refs/heads/main/nanooctopus.jpg)
 
 # Nanooctopus
 
@@ -53,21 +53,21 @@ The crate does **not** currently document or position itself as an HTTP client l
 
 ```toml
 [dependencies]
-nanooctopus = { version = "0.1.0", default-features = false, features = ["embassy_impl"] }
+nanooctopus = { version = "0.1.1", default-features = false, features = ["embassy_impl"] }
 ```
 
 ### Embedded / Embassy with WebSockets and `defmt`
 
 ```toml
 [dependencies]
-nanooctopus = { version = "0.1.0", default-features = false, features = ["embassy_impl", "ws", "defmt"] }
+nanooctopus = { version = "0.1.1", default-features = false, features = ["embassy_impl", "ws", "defmt"] }
 ```
 
 ### Desktop / Host Testing with Tokio
 
 ```toml
 [dependencies]
-nanooctopus = { version = "0.1.0", features = ["tokio_impl", "log"] }
+nanooctopus = { version = "0.1.1", features = ["tokio_impl", "log"] }
 ```
 
 ## Feature Flags
@@ -90,6 +90,8 @@ At a high level, Nanooctopus is split into three layers:
 
 The server depends on socket traits rather than directly on Embassy or Tokio types.
 This is what makes the crate portable across embedded and desktop runtimes.
+
+[Socket backend details](src/socket/README.md)
 
 ### 2. HTTP server core
 
@@ -124,48 +126,58 @@ Typical pattern:
 
 The Tokio example is the fastest way to understand the current API.
 
-```rust,ignore
-use nanooctopus::{http_handler, server};
+```rust,no_run
+use nanooctopus::*;
 
 struct HelloWorldHandler;
 
+#[cfg(feature = "tokio_impl")]
 impl http_handler::HttpHandler for HelloWorldHandler {
     async fn handle_request(
         &mut self,
-        _allocator: &mut http_handler::HttpAllocator<'_>,
-        _request: &http_handler::HttpRequest<'_>,
+        _allocator: &mut http_handler::HttpAllocator<'_>, // unused in this simple handler
+        request: &http_handler::HttpRequest<'_>,
         http_socket: &mut impl http_handler::HttpSocketWrite,
-        _context_id: usize,
+        context_id: usize,
     ) -> Result<http_handler::HttpResponse, http_handler::Error> {
+        // Stream the response directly to the socket: status → headers → body.
         http_handler::HttpResponseBuilder::new(http_socket)
             .with_status(http_handler::StatusCode::Ok)
             .await?
             .with_header("Content-Type", "text/plain")
             .await?
-            .with_body_from_str("Hello, World!")
+            .with_body_from_slice(b"Hello, World!")
             .await
     }
 }
 
 #[tokio::main(flavor = "local")]
 async fn main() {
-    let listener = server::socket_listener::TokioTcpListener::new(
-        server::SocketEndpoint::new([127, 0, 0, 1].into(), 8080),
-    )
-    .await;
+    // `spawn_local` keeps everything on the current thread, matching the
+    // single-threaded (`flavor = "local"`) Tokio runtime used here.
+    #[cfg(feature = "tokio_impl")]
+    tokio::task::spawn_local(async move {
+        // Bind the TCP listener to localhost:8080.
+        let listener =
+            server::socket_listener::TokioTcpListener::new(server::SocketEndpoint::new([127, 0, 0, 1].into(), 8080))
+                .await;
 
-    let server = server::HttpServer::new(listener, server::ServerTimeouts::default());
+        let server = server::HttpServer::new(listener, server::ServerTimeouts::default());
 
-    server
-        .serve(server::HttpWorkerMemory::<1024>::new(), HelloWorldHandler, 1)
-        .await;
+        // 1024-byte scratch buffer for parsing incoming HTTP headers.
+        // A single worker (context_id = 1) handles requests sequentially.
+        server
+            .serve(server::HttpWorkerMemory::<1024>::new(), HelloWorldHandler, 1)
+            .await
+    })
+    .await
+    .unwrap();
 }
 ```
 
 This example exists in:
 
-- [`demos/tokio_hello_world`](demos/tokio_hello_world/README.md)
-- <a href="https://github.com/kdimonych/nanooctopus/tree/0.1.0/demos/tokio_hello_world">
+- <a href="https://github.com/kdimonych/nanooctopus/tree/0.1.1/demos/tokio_hello_world">
   demos/tokio_hello_world
   <img alt="GitHub" src="https://github.githubassets.com/favicons/favicon.svg" height="14">
 
@@ -183,8 +195,7 @@ The Raspberry Pico W example shows the intended embedded deployment model:
 
 The example is in:
 
-- [`demos/rasberry_pico_w`](demos/rasberry_pico_w/README.md)
-- <a href="https://github.com/kdimonych/nanooctopus/tree/0.1.0/demos/rasberry_pico_w">
+- <a href="https://github.com/kdimonych/nanooctopus/tree/0.1.1/demos/rasberry_pico_w">
   demos/rasberry_pico_w
   <img alt="GitHub" src="https://github.githubassets.com/favicons/favicon.svg" height="14">
 

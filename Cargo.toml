@@ -1,6 +1,6 @@
 [package]
 name = "nanooctopus"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "🐙 A lightweight, `no_std` HTTP server for embedded systems built on top of Embassy networking."
 documentation = "https://docs.rs/nanooctopus"
@@ -63,7 +63,7 @@ tokio = { version = "1.0", features = ["full"], optional = true }
 ringbuf = { version = "0.5", optional = true }
 
 #Bump allocator
-prefix-arena = "0.1"
+prefix-arena = "0.2.0"
 
 # Futures and async utilities
 embassy-futures = "0.1"
