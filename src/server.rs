@@ -149,15 +149,10 @@ impl<
                 }
                 Err(e) => {
                     error!("Error handling request: {:?}", e);
-                    // Send a 500 error response
-                    let mut headers = Vec::new();
-                    let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
-                    let fallback = HttpResponse {
-                        status_code: StatusCode::InternalServerError,
-                        headers,
-                        body: ResponseBody::Text("Internal Server Error"),
-                    };
-                    let error_bytes = fallback.build_bytes::<MAX_RESPONSE_SIZE>();
+                    let error_bytes = Self::text_error_response(
+                        StatusCode::InternalServerError,
+                        "Internal Server Error",
+                    );
                     let _ = socket.write_all(&error_bytes).await;
                     let _ = socket.flush().await;
                 }
@@ -214,8 +209,20 @@ impl<
             .ok()
     }
 
+    /// Build a plain-text error response.
+    fn text_error_response(status: StatusCode, body: &str) -> Vec<u8, MAX_RESPONSE_SIZE> {
+        let mut headers = Vec::new();
+        let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
+        let resp = HttpResponse {
+            status_code: status,
+            headers,
+            body: ResponseBody::Text(body),
+        };
+        resp.build_bytes::<MAX_RESPONSE_SIZE>()
+    }
+
     async fn handle_connection<H>(
-        &mut self,
+        &self,
         buffer: &[u8],
         handler: &H,
     ) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error>
@@ -235,25 +242,17 @@ impl<
             Ok(Ok(response)) => response,
             Ok(Err(e)) => {
                 warn!("Handler error: {:?}", e);
-                let mut headers = Vec::new();
-                let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
-                let error_response = HttpResponse {
-                    status_code: StatusCode::InternalServerError,
-                    headers,
-                    body: ResponseBody::Text("Internal Server Error"),
-                };
-                return Ok(error_response.build_bytes::<MAX_RESPONSE_SIZE>());
+                return Ok(Self::text_error_response(
+                    StatusCode::InternalServerError,
+                    "Internal Server Error",
+                ));
             }
             Err(_) => {
                 warn!("Request handling timed out");
-                let mut headers = Vec::new();
-                let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
-                let timeout_response = HttpResponse {
-                    status_code: StatusCode::BadRequest,
-                    headers,
-                    body: ResponseBody::Text("Request Timeout"),
-                };
-                return Ok(timeout_response.build_bytes::<MAX_RESPONSE_SIZE>());
+                return Ok(Self::text_error_response(
+                    StatusCode::RequestTimeout,
+                    "Request Timeout",
+                ));
             }
         };
 
