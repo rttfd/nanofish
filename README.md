@@ -38,18 +38,18 @@ nanofish = "0.11.5"
 ### With TLS/HTTPS Support
 ```toml
 [dependencies]
-nanofish = { version = "0.11.4", features = ["tls"] }
+nanofish = { version = "0.11.5", features = ["tls"] }
 ```
 
 ### With Logging
 ```toml
 # Using defmt (common in embedded/probe-based workflows)
 [dependencies]
-nanofish = { version = "0.11.4", features = ["defmt"] }
+nanofish = { version = "0.11.5", features = ["defmt"] }
 
 # Using the log crate (common in std or defmt-incompatible environments)
 [dependencies]
-nanofish = { version = "0.11.4", features = ["log"] }
+nanofish = { version = "0.11.5", features = ["log"] }
 ```
 
 > **Note:** The `defmt` and `log` features are **mutually exclusive**. Enabling both will produce a compile-time error. If neither is enabled, all logging calls are compiled away to no-ops.
@@ -99,7 +99,7 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
     let client = DefaultHttpClient::new(stack);
     let mut response_buffer = [0u8; 8192];
     let headers = [
-        HttpHeader::user_agent("Nanofish/0.11.4"),
+        HttpHeader::user_agent("Nanofish/0.11.5"),
         HttpHeader::content_type(mime_types::JSON),
         HttpHeader::authorization("Bearer token123"),
     ];
