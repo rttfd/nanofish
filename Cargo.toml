@@ -1,6 +1,6 @@
 [package]
 name = "nanofish"
-version = "0.11.4"
+version = "0.11.5"
 edition = "2024"
 rust-version = "1.91"
 description = "🐟 A lightweight, `no_std` HTTP client and server for embedded systems built on top of Embassy networking."
@@ -21,7 +21,7 @@ defmt = { version = "1.1.0", optional = true }
 embassy-net = { version = "0.9.1", features = [
     "dns",
     "medium-ethernet",
-    "proto-ipv6",
+    "proto-ipv4",
     "tcp",
 ] }
 embassy-time = "0.5.1"
