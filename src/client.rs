@@ -7,8 +7,9 @@ use crate::{
     method::HttpMethod,
     options::HttpClientOptions,
     protocol::{
-        self, CHUNKED, CHUNKED_END_MARKER, CRLF_LEN, DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT,
-        DOUBLE_CRLF_LEN, HTTP_VERSION_LINE_SUFFIX, MAX_HEADERS, MAX_URL_PARTS, TRANSFER_ENCODING,
+        self, CHUNKED, CHUNKED_END_MARKER, CONNECTION_CLOSE_END, CRLF_LEN, CRLF_STR,
+        DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DOUBLE_CRLF_LEN, HEADER_SEPARATOR,
+        HTTP_VERSION_LINE_SUFFIX, MAX_HEADERS, MAX_URL_PARTS, TRANSFER_ENCODING,
     },
     response::{HttpResponse, ResponseBody},
     status_code::StatusCode,
@@ -23,7 +24,7 @@ use embassy_time::Instant;
 use embassy_time::Timer;
 use embedded_io_async::Write as EmbeddedWrite;
 #[cfg(feature = "tls")]
-use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext};
+use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
 use heapless::Vec;
 #[cfg(feature = "tls")]
 use rand_chacha::ChaCha8Rng;
@@ -249,8 +250,6 @@ impl<
         body: Option<&[u8]>,
         response_buffer: &mut [u8],
     ) -> Result<usize, Error> {
-        use embedded_tls::UnsecureProvider;
-
         let (host, port) = host_port;
         let mut rx_buffer = [0; TCP_RX];
         let mut tx_buffer = [0; TCP_TX];
@@ -691,7 +690,7 @@ impl<
             &response_str[status_line_end + CRLF_LEN..headers_end - DOUBLE_CRLF_LEN];
         let mut headers = Vec::<HttpHeader<'_>, MAX_HEADERS>::new();
 
-        for header_line in headers_section.split("\r\n") {
+        for header_line in headers_section.split(CRLF_STR) {
             if let Some(colon_pos) = header_line.find(':') {
                 let name = header_line[..colon_pos].trim();
                 let value = header_line[colon_pos + 1..].trim();
@@ -787,15 +786,15 @@ impl<
         try_push!(http_request.push_str(HTTP_VERSION_LINE_SUFFIX));
         try_push!(http_request.push_str("Host: "));
         try_push!(http_request.push_str(host));
-        try_push!(http_request.push_str("\r\n"));
+        try_push!(http_request.push_str(CRLF_STR));
 
         let mut content_length_present = false;
 
         for header in headers {
             try_push!(http_request.push_str(header.name));
-            try_push!(http_request.push_str(": "));
+            try_push!(http_request.push_str(HEADER_SEPARATOR));
             try_push!(http_request.push_str(header.value));
-            try_push!(http_request.push_str("\r\n"));
+            try_push!(http_request.push_str(CRLF_STR));
 
             if header.name.eq_ignore_ascii_case(CONTENT_LENGTH) {
                 content_length_present = true;
@@ -804,7 +803,8 @@ impl<
 
         // Add Content-Length header if body is present and not already specified
         if !content_length_present && body.is_some() {
-            try_push!(http_request.push_str("Content-Length: "));
+            try_push!(http_request.push_str(CONTENT_LENGTH));
+            try_push!(http_request.push_str(HEADER_SEPARATOR));
             let mut len_str = heapless::String::<8>::new();
             if core::fmt::write(
                 &mut len_str,
@@ -815,10 +815,10 @@ impl<
                 return Err(Error::InvalidResponse("Failed to write content length"));
             }
             try_push!(http_request.push_str(&len_str));
-            try_push!(http_request.push_str("\r\n"));
+            try_push!(http_request.push_str(CRLF_STR));
         }
 
-        try_push!(http_request.push_str("Connection: close\r\n\r\n"));
+        try_push!(http_request.push_str(CONNECTION_CLOSE_END));
 
         Ok(http_request)
     }
