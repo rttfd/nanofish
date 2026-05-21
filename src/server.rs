@@ -1,7 +1,7 @@
 use crate::{
     error::Error,
     handler::HttpHandler,
-    header::HttpHeader,
+    header::{HttpHeader, mime_types},
     request::HttpRequest,
     response::{HttpResponse, ResponseBody},
     status_code::StatusCode,
@@ -143,8 +143,15 @@ impl<
                 Err(e) => {
                     error!("Error handling request: {:?}", e);
                     // Send a 500 error response
-                    let error_response = b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: 21\r\n\r\nInternal Server Error";
-                    let _ = socket.write_all(error_response).await;
+                    let mut headers = Vec::new();
+                    let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
+                    let fallback = HttpResponse {
+                        status_code: StatusCode::InternalServerError,
+                        headers,
+                        body: ResponseBody::Text("Internal Server Error"),
+                    };
+                    let error_bytes = fallback.build_bytes::<MAX_RESPONSE_SIZE>();
+                    let _ = socket.write_all(&error_bytes).await;
                     let _ = socket.flush().await;
                 }
             }
@@ -175,7 +182,7 @@ impl<
             Ok(Err(e)) => {
                 warn!("Handler error: {:?}", e);
                 let mut headers = Vec::new();
-                let _ = headers.push(HttpHeader::new("Content-Type", "text/plain"));
+                let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
                 let error_response = HttpResponse {
                     status_code: StatusCode::InternalServerError,
                     headers,
@@ -186,7 +193,7 @@ impl<
             Err(_) => {
                 warn!("Request handling timed out");
                 let mut headers = Vec::new();
-                let _ = headers.push(HttpHeader::new("Content-Type", "text/plain"));
+                let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
                 let timeout_response = HttpResponse {
                     status_code: StatusCode::BadRequest,
                     headers,

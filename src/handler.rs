@@ -1,6 +1,6 @@
 use crate::{
     error::Error,
-    header::HttpHeader,
+    header::{HttpHeader, mime_types},
     request::HttpRequest,
     response::{HttpResponse, ResponseBody},
     status_code::StatusCode,
@@ -23,7 +23,7 @@ impl HttpHandler for SimpleHandler {
         let mut headers = Vec::new();
         match request.path {
             "/" => {
-                let _ = headers.push(HttpHeader::new("Content-Type", "text/html"));
+                let _ = headers.push(HttpHeader::content_type(mime_types::HTML));
                 Ok(HttpResponse {
                     status_code: StatusCode::Ok,
                     headers,
@@ -31,7 +31,7 @@ impl HttpHandler for SimpleHandler {
                 })
             }
             "/health" => {
-                let _ = headers.push(HttpHeader::new("Content-Type", "application/json"));
+                let _ = headers.push(HttpHeader::content_type(mime_types::JSON));
                 Ok(HttpResponse {
                     status_code: StatusCode::Ok,
                     headers,
@@ -39,7 +39,7 @@ impl HttpHandler for SimpleHandler {
                 })
             }
             _ => {
-                let _ = headers.push(HttpHeader::new("Content-Type", "text/plain"));
+                let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
                 Ok(HttpResponse {
                     status_code: StatusCode::NotFound,
                     headers,
