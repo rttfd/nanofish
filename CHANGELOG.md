@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.5] - 2026-05-21
+
+### Changed
+
+- Replaced unnecessary `proto-ipv6` with `proto-ipv4` in `embassy-net` features (the crate only uses IPv4 DNS queries).
+- Replaced all hardcoded HTTP strings in production code with constants from `protocol.rs` and `header.rs` (`CONTENT_TYPE`, `CONTENT_LENGTH`, `HEADER_SEPARATOR`, `HTTP_VERSION_PREFIX`, `mime_types::*`).
+- Server 500 error response now uses `HttpResponse::build_bytes` instead of a raw byte literal.
+
 ## [0.11.4] - 2026-05-18
 
 ### Added
@@ -179,10 +187,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, and CONNECT methods.
 - Configurable client options (retries, timeouts, delays).
 
-[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.11.2...HEAD
+[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.11.5...HEAD
+[0.11.5]: https://github.com/rttfd/nanofish/compare/v0.11.4...v0.11.5
+[0.11.4]: https://github.com/rttfd/nanofish/compare/v0.11.3...v0.11.4
+[0.11.3]: https://github.com/rttfd/nanofish/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/rttfd/nanofish/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/rttfd/nanofish/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/rttfd/nanofish/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/rttfd/nanofish/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/rttfd/nanofish/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/rttfd/nanofish/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/rttfd/nanofish/compare/v0.7.0...v0.8.0
