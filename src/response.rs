@@ -24,7 +24,7 @@ impl ResponseBody<'_> {
         match self {
             ResponseBody::Text(s) => Some(s),
             ResponseBody::Binary(bytes) => core::str::from_utf8(bytes).ok(),
-            ResponseBody::Empty => Some(""),
+            ResponseBody::Empty => None,
         }
     }
 
@@ -218,7 +218,7 @@ mod tests {
         assert_eq!(bin.as_str(), Some("bin"));
         assert_eq!(bin.as_bytes(), b"bin");
         let empty = ResponseBody::Empty;
-        assert_eq!(empty.as_str(), Some(""));
+        assert_eq!(empty.as_str(), None);
         assert_eq!(empty.as_bytes(), b"");
     }
 
