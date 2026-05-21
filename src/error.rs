@@ -29,6 +29,8 @@ pub enum Error {
     HeaderError(&'static str),
     /// Invalid status code received from the server
     InvalidStatusCode,
+    /// Buffer overflow when building a request or response
+    BufferOverflow,
 }
 
 #[cfg(feature = "defmt")]
@@ -78,6 +80,7 @@ impl core::fmt::Display for Error {
             Error::UnsupportedScheme(scheme) => write!(f, "Unsupported scheme: {scheme}"),
             Error::HeaderError(msg) => write!(f, "Header error: {msg}"),
             Error::InvalidStatusCode => write!(f, "Invalid status code"),
+            Error::BufferOverflow => write!(f, "Buffer overflow"),
         }
     }
 }

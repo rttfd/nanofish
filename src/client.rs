@@ -58,7 +58,7 @@ pub type SmallHttpClient<'a> = HttpClient<
 macro_rules! try_push {
     ($expr:expr) => {
         if $expr.is_err() {
-            return Err(Error::InvalidResponse("Request buffer overflow"));
+            return Err(Error::BufferOverflow);
         }
     };
 }

@@ -149,12 +149,13 @@ impl<
                 }
                 Err(e) => {
                     error!("Error handling request: {:?}", e);
-                    let error_bytes = Self::text_error_response(
+                    if let Ok(error_bytes) = Self::text_error_response(
                         StatusCode::InternalServerError,
                         "Internal Server Error",
-                    );
-                    let _ = socket.write_all(&error_bytes).await;
-                    let _ = socket.flush().await;
+                    ) {
+                        let _ = socket.write_all(&error_bytes).await;
+                        let _ = socket.flush().await;
+                    }
                 }
             }
 
@@ -210,7 +211,10 @@ impl<
     }
 
     /// Build a plain-text error response.
-    fn text_error_response(status: StatusCode, body: &str) -> Vec<u8, MAX_RESPONSE_SIZE> {
+    fn text_error_response(
+        status: StatusCode,
+        body: &str,
+    ) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error> {
         let mut headers = Vec::new();
         let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
         let resp = HttpResponse {
@@ -242,21 +246,21 @@ impl<
             Ok(Ok(response)) => response,
             Ok(Err(e)) => {
                 warn!("Handler error: {:?}", e);
-                return Ok(Self::text_error_response(
+                return Self::text_error_response(
                     StatusCode::InternalServerError,
                     "Internal Server Error",
-                ));
+                );
             }
             Err(_) => {
                 warn!("Request handling timed out");
-                return Ok(Self::text_error_response(
+                return Self::text_error_response(
                     StatusCode::RequestTimeout,
                     "Request Timeout",
-                ));
+                );
             }
         };
 
-        Ok(response.build_bytes::<MAX_RESPONSE_SIZE>())
+        response.build_bytes::<MAX_RESPONSE_SIZE>()
     }
 }
 
