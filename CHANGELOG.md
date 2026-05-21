@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `Error::BufferOverflow` variant for request/response buffer overflow errors.
 - Server read loop: accumulates data across multiple TCP segments until headers and `Content-Length` body are fully received.
+- IPv4/IPv6 dual-stack DNS resolution: tries A (IPv4) first, falls back to AAAA (IPv6).
 
 ### Fixed
 
@@ -26,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Replaced unnecessary `proto-ipv6` with `proto-ipv4` in `embassy-net` features (the crate only uses IPv4 DNS queries).
+- Enabled both `proto-ipv4` and `proto-ipv6` in `embassy-net` features for dual-stack support.
+- Extracted `resolve_host` helper to deduplicate DNS resolution between HTTP and HTTPS paths.
 - Replaced all hardcoded HTTP strings in production code with constants from `protocol.rs` and `header.rs` (`CONTENT_TYPE`, `CONTENT_LENGTH`, `HEADER_SEPARATOR`, `HTTP_VERSION_PREFIX`, `mime_types::*`).
 - Server error responses extracted into `text_error_response` helper (DRY).
 - `handle_connection` changed from `&mut self` to `&self`.

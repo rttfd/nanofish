@@ -25,7 +25,7 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 - **Optional Logging** - Choose between `defmt` or `log` for diagnostics, or disable both for zero overhead
 - **Timeout & Retry Support** - Built-in handling for network issues
 - **Proxy Compatible** - Works behind reverse proxies (e.g. Traefik) that may strip or modify `Content-Length` headers
-- **DNS Resolution** - Automatic hostname resolution
+- **DNS Resolution** - Automatic hostname resolution with IPv4/IPv6 dual-stack support
 
 ## Installation & Feature Flags
 
