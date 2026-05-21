@@ -121,16 +121,20 @@ impl HttpResponse<'_> {
         write_status_line(&mut bytes, self.status_code);
 
         // Headers
+        let mut has_content_length = false;
         for header in &self.headers {
             let _ = bytes.extend_from_slice(header.name.as_bytes());
             let _ = bytes.extend_from_slice(HEADER_SEPARATOR.as_bytes());
             let _ = bytes.extend_from_slice(header.value.as_bytes());
             let _ = bytes.extend_from_slice(CRLF);
+            if header.name.eq_ignore_ascii_case(CONTENT_LENGTH) {
+                has_content_length = true;
+            }
         }
 
-        // Content-Length header if body is present
+        // Content-Length header if body is present and not already specified
         let body_bytes = self.body.as_bytes();
-        if !body_bytes.is_empty() {
+        if !has_content_length && !body_bytes.is_empty() {
             let _ = bytes.extend_from_slice(CONTENT_LENGTH.as_bytes());
             let _ = bytes.extend_from_slice(HEADER_SEPARATOR.as_bytes());
             write_decimal_to_buffer(&mut bytes, body_bytes.len());
