@@ -396,6 +396,9 @@ impl<
                     retries -= 1;
                     if retries > 0 {
                         Timer::after(self.options.retry_delay).await;
+                    } else {
+                        socket.close();
+                        return Err(Error::from(e));
                     }
                 }
             }
