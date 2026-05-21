@@ -96,7 +96,6 @@ pub enum StatusCode {
     Other(u16),
 }
 
-#[allow(dead_code)]
 impl StatusCode {
     /// Returns the numeric status code as u16.
     #[must_use]
