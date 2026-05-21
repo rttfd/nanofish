@@ -230,6 +230,22 @@ impl<
         Ok((response, total_read))
     }
 
+    /// Resolve a hostname to an IP address, trying IPv4 (A) first then IPv6 (AAAA).
+    async fn resolve_host(stack: Stack<'_>, host: &str) -> Result<embassy_net::IpAddress, Error> {
+        let dns_socket = DnsSocket::new(stack);
+
+        // Try A (IPv4) first — most common on embedded networks
+        if let Ok(addrs) = dns_socket.query(host, dns::DnsQueryType::A).await
+            && let Some(&addr) = addrs.first()
+        {
+            return Ok(addr);
+        }
+
+        // Fall back to AAAA (IPv6)
+        let addrs = dns_socket.query(host, dns::DnsQueryType::Aaaa).await?;
+        addrs.first().copied().ok_or(Error::IpAddressEmpty)
+    }
+
     /// Make HTTPS request over TLS with zero-copy response handling
     #[cfg(feature = "tls")]
     async fn make_https_request(
@@ -247,14 +263,7 @@ impl<
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(self.options.socket_timeout));
 
-        let dns_socket = DnsSocket::new(*self.stack);
-        let ip_addresses = dns_socket.query(host, dns::DnsQueryType::A).await?;
-
-        if ip_addresses.is_empty() {
-            return Err(Error::IpAddressEmpty);
-        }
-
-        let ip_addr = ip_addresses[0];
+        let ip_addr = Self::resolve_host(*self.stack, host).await?;
         let remote_endpoint = (ip_addr, port);
 
         socket
@@ -342,14 +351,7 @@ impl<
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(self.options.socket_timeout));
 
-        let dns_socket = DnsSocket::new(*self.stack);
-        let ip_addresses = dns_socket.query(host, dns::DnsQueryType::A).await?;
-
-        if ip_addresses.is_empty() {
-            return Err(Error::IpAddressEmpty);
-        }
-
-        let ip_addr = ip_addresses[0];
+        let ip_addr = Self::resolve_host(*self.stack, host).await?;
         let remote_endpoint = (ip_addr, port);
 
         socket

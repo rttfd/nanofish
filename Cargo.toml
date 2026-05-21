@@ -22,6 +22,7 @@ embassy-net = { version = "0.9.1", features = [
     "dns",
     "medium-ethernet",
     "proto-ipv4",
+    "proto-ipv6",
     "tcp",
 ] }
 embassy-time = "0.5.1"
