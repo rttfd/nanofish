@@ -806,7 +806,7 @@ impl<
             )
             .is_err()
             {
-                return Err(Error::InvalidResponse("Failed to write content length"));
+                return Err(Error::BufferOverflow);
             }
             try_push!(http_request.push_str(&len_str));
             try_push!(http_request.push_str(CRLF_STR));
