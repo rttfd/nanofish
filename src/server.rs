@@ -1,7 +1,8 @@
 use crate::{
     error::Error,
     handler::HttpHandler,
-    header::{HttpHeader, mime_types},
+    header::{HttpHeader, headers::CONTENT_LENGTH, mime_types},
+    protocol::{self, DOUBLE_CRLF_LEN},
     request::HttpRequest,
     response::{HttpResponse, ResponseBody},
     status_code::StatusCode,
@@ -109,29 +110,35 @@ impl<
                 continue;
             }
 
-            let n = match with_timeout(
+            // Reset socket timeout after accept so it doesn't race with read timeout
+            socket.set_timeout(None);
+
+            // Read loop: accumulate data until headers + body are complete
+            let mut total_read = 0;
+            let read_ok = match with_timeout(
                 Duration::from_secs(self.timeouts.read_timeout),
-                socket.read(&mut buf),
+                Self::read_request(&mut socket, &mut buf, &mut total_read),
             )
             .await
             {
-                Ok(Ok(0)) => {
-                    // Connection closed
-                    continue;
-                }
-                Ok(Ok(n)) => n,
+                Ok(Ok(())) => true,
                 Ok(Err(e)) => {
                     warn!("Read error: {:?}", e);
-                    continue;
+                    false
                 }
                 Err(_) => {
                     warn!("Socket read timeout");
-                    continue;
+                    false
                 }
             };
 
+            if !read_ok || total_read == 0 {
+                socket.close();
+                continue;
+            }
+
             // Parse the request
-            match self.handle_connection(&buf[..n], &handler).await {
+            match self.handle_connection(&buf[..total_read], &handler).await {
                 Ok(response_bytes) => {
                     if let Err(e) = socket.write_all(&response_bytes).await {
                         warn!("Failed to write response: {:?}", e);
@@ -158,6 +165,53 @@ impl<
 
             socket.close();
         }
+    }
+
+    /// Read a complete HTTP request from the socket.
+    ///
+    /// Accumulates data until headers are found (`\r\n\r\n`), then reads
+    /// any remaining body bytes indicated by `Content-Length`.
+    async fn read_request(
+        socket: &mut TcpSocket<'_>,
+        buf: &mut [u8],
+        total_read: &mut usize,
+    ) -> Result<(), embassy_net::tcp::Error> {
+        let mut header_end = None;
+
+        while *total_read < buf.len() {
+            let n = socket.read(&mut buf[*total_read..]).await?;
+            if n == 0 {
+                break;
+            }
+            *total_read += n;
+
+            // Look for end of headers if not yet found
+            if header_end.is_none() {
+                header_end = protocol::find_double_crlf(&buf[..*total_read]);
+            }
+
+            if let Some(hdr_end) = header_end {
+                let body_start = hdr_end + DOUBLE_CRLF_LEN;
+                // Try to determine Content-Length from the headers
+                if let Some(cl) = Self::parse_content_length(&buf[..hdr_end]) {
+                    if *total_read >= body_start + cl {
+                        break;
+                    }
+                } else {
+                    // No Content-Length — headers are complete, no body expected
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Extract `Content-Length` value from raw header bytes.
+    fn parse_content_length(header_bytes: &[u8]) -> Option<usize> {
+        let headers_str = core::str::from_utf8(header_bytes).ok()?;
+        protocol::find_header_value(headers_str, CONTENT_LENGTH)?
+            .parse()
+            .ok()
     }
 
     async fn handle_connection<H>(
