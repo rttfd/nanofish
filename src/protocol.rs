@@ -51,9 +51,6 @@ pub const CONNECTION_CLOSE_END: &str = "Connection: close\r\n\r\n";
 /// Maximum number of headers allowed in requests and responses
 pub const MAX_HEADERS: usize = 16;
 
-/// Maximum URL path segments
-pub const MAX_URL_PARTS: usize = 8;
-
 /// Find the position of the double CRLF sequence in raw bytes.
 /// Returns the byte index of the start of `\r\n\r\n`.
 #[must_use]

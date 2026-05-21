@@ -9,7 +9,7 @@ use crate::{
     protocol::{
         self, CHUNKED, CHUNKED_END_MARKER, CONNECTION_CLOSE_END, CRLF_LEN, CRLF_STR,
         DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DOUBLE_CRLF_LEN, HEADER_SEPARATOR,
-        HTTP_VERSION_LINE_SUFFIX, MAX_HEADERS, MAX_URL_PARTS, TRANSFER_ENCODING,
+        HTTP_VERSION_LINE_SUFFIX, MAX_HEADERS, TRANSFER_ENCODING,
     },
     response::{HttpResponse, ResponseBody},
     status_code::StatusCode,
@@ -189,18 +189,9 @@ impl<
             return Err(Error::InvalidUrl);
         };
 
-        let mut url_parts = heapless::Vec::<&str, MAX_URL_PARTS>::new();
-        for part in host_port.splitn(MAX_URL_PARTS, '/') {
-            if url_parts.push(part).is_err() {
-                break;
-            }
-        }
-        if url_parts.is_empty() {
-            return Err(Error::InvalidUrl);
-        }
-
-        let host = url_parts[0];
+        let host = host_port.split('/').next().ok_or(Error::InvalidUrl)?;
         let path = &host_port[host.len()..];
+        let path = if path.is_empty() { "/" } else { path };
 
         let default_port = if scheme == "https" {
             DEFAULT_HTTPS_PORT
