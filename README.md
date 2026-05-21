@@ -31,7 +31,7 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 ### Basic HTTP Support (Default)
 ```toml
 [dependencies]
-nanofish = "0.11.4"
+nanofish = "0.11.5"
 ```
 
 ### With TLS/HTTPS Support
