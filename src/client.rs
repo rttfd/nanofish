@@ -7,8 +7,9 @@ use crate::{
     method::HttpMethod,
     options::HttpClientOptions,
     protocol::{
-        self, CHUNKED, CHUNKED_END_MARKER, CRLF_LEN, DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT,
-        DOUBLE_CRLF_LEN, HTTP_VERSION_LINE_SUFFIX, MAX_HEADERS, MAX_URL_PARTS, TRANSFER_ENCODING,
+        self, CHUNKED, CHUNKED_END_MARKER, CONNECTION_CLOSE_END, CRLF_LEN, CRLF_STR,
+        DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DOUBLE_CRLF_LEN, HEADER_SEPARATOR,
+        HTTP_VERSION_LINE_SUFFIX, MAX_HEADERS, TRANSFER_ENCODING,
     },
     response::{HttpResponse, ResponseBody},
     status_code::StatusCode,
@@ -23,7 +24,7 @@ use embassy_time::Instant;
 use embassy_time::Timer;
 use embedded_io_async::Write as EmbeddedWrite;
 #[cfg(feature = "tls")]
-use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext};
+use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
 use heapless::Vec;
 #[cfg(feature = "tls")]
 use rand_chacha::ChaCha8Rng;
@@ -57,7 +58,7 @@ pub type SmallHttpClient<'a> = HttpClient<
 macro_rules! try_push {
     ($expr:expr) => {
         if $expr.is_err() {
-            return Err(Error::InvalidResponse("Request buffer overflow"));
+            return Err(Error::BufferOverflow);
         }
     };
 }
@@ -188,18 +189,9 @@ impl<
             return Err(Error::InvalidUrl);
         };
 
-        let mut url_parts = heapless::Vec::<&str, MAX_URL_PARTS>::new();
-        for part in host_port.splitn(MAX_URL_PARTS, '/') {
-            if url_parts.push(part).is_err() {
-                break;
-            }
-        }
-        if url_parts.is_empty() {
-            return Err(Error::InvalidUrl);
-        }
-
-        let host = url_parts[0];
+        let host = host_port.split('/').next().ok_or(Error::InvalidUrl)?;
         let path = &host_port[host.len()..];
+        let path = if path.is_empty() { "/" } else { path };
 
         let default_port = if scheme == "https" {
             DEFAULT_HTTPS_PORT
@@ -238,6 +230,22 @@ impl<
         Ok((response, total_read))
     }
 
+    /// Resolve a hostname to an IP address, trying IPv4 (A) first then IPv6 (AAAA).
+    async fn resolve_host(stack: Stack<'_>, host: &str) -> Result<embassy_net::IpAddress, Error> {
+        let dns_socket = DnsSocket::new(stack);
+
+        // Try A (IPv4) first — most common on embedded networks
+        if let Ok(addrs) = dns_socket.query(host, dns::DnsQueryType::A).await
+            && let Some(&addr) = addrs.first()
+        {
+            return Ok(addr);
+        }
+
+        // Fall back to AAAA (IPv6)
+        let addrs = dns_socket.query(host, dns::DnsQueryType::Aaaa).await?;
+        addrs.first().copied().ok_or(Error::IpAddressEmpty)
+    }
+
     /// Make HTTPS request over TLS with zero-copy response handling
     #[cfg(feature = "tls")]
     async fn make_https_request(
@@ -249,22 +257,13 @@ impl<
         body: Option<&[u8]>,
         response_buffer: &mut [u8],
     ) -> Result<usize, Error> {
-        use embedded_tls::UnsecureProvider;
-
         let (host, port) = host_port;
         let mut rx_buffer = [0; TCP_RX];
         let mut tx_buffer = [0; TCP_TX];
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(self.options.socket_timeout));
 
-        let dns_socket = DnsSocket::new(*self.stack);
-        let ip_addresses = dns_socket.query(host, dns::DnsQueryType::A).await?;
-
-        if ip_addresses.is_empty() {
-            return Err(Error::IpAddressEmpty);
-        }
-
-        let ip_addr = ip_addresses[0];
+        let ip_addr = Self::resolve_host(*self.stack, host).await?;
         let remote_endpoint = (ip_addr, port);
 
         socket
@@ -352,14 +351,7 @@ impl<
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(self.options.socket_timeout));
 
-        let dns_socket = DnsSocket::new(*self.stack);
-        let ip_addresses = dns_socket.query(host, dns::DnsQueryType::A).await?;
-
-        if ip_addresses.is_empty() {
-            return Err(Error::IpAddressEmpty);
-        }
-
-        let ip_addr = ip_addresses[0];
+        let ip_addr = Self::resolve_host(*self.stack, host).await?;
         let remote_endpoint = (ip_addr, port);
 
         socket
@@ -406,6 +398,9 @@ impl<
                     retries -= 1;
                     if retries > 0 {
                         Timer::after(self.options.retry_delay).await;
+                    } else {
+                        socket.close();
+                        return Err(Error::from(e));
                     }
                 }
             }
@@ -691,7 +686,7 @@ impl<
             &response_str[status_line_end + CRLF_LEN..headers_end - DOUBLE_CRLF_LEN];
         let mut headers = Vec::<HttpHeader<'_>, MAX_HEADERS>::new();
 
-        for header_line in headers_section.split("\r\n") {
+        for header_line in headers_section.split(CRLF_STR) {
             if let Some(colon_pos) = header_line.find(':') {
                 let name = header_line[..colon_pos].trim();
                 let value = header_line[colon_pos + 1..].trim();
@@ -787,15 +782,15 @@ impl<
         try_push!(http_request.push_str(HTTP_VERSION_LINE_SUFFIX));
         try_push!(http_request.push_str("Host: "));
         try_push!(http_request.push_str(host));
-        try_push!(http_request.push_str("\r\n"));
+        try_push!(http_request.push_str(CRLF_STR));
 
         let mut content_length_present = false;
 
         for header in headers {
             try_push!(http_request.push_str(header.name));
-            try_push!(http_request.push_str(": "));
+            try_push!(http_request.push_str(HEADER_SEPARATOR));
             try_push!(http_request.push_str(header.value));
-            try_push!(http_request.push_str("\r\n"));
+            try_push!(http_request.push_str(CRLF_STR));
 
             if header.name.eq_ignore_ascii_case(CONTENT_LENGTH) {
                 content_length_present = true;
@@ -804,7 +799,8 @@ impl<
 
         // Add Content-Length header if body is present and not already specified
         if !content_length_present && body.is_some() {
-            try_push!(http_request.push_str("Content-Length: "));
+            try_push!(http_request.push_str(CONTENT_LENGTH));
+            try_push!(http_request.push_str(HEADER_SEPARATOR));
             let mut len_str = heapless::String::<8>::new();
             if core::fmt::write(
                 &mut len_str,
@@ -812,13 +808,13 @@ impl<
             )
             .is_err()
             {
-                return Err(Error::InvalidResponse("Failed to write content length"));
+                return Err(Error::BufferOverflow);
             }
             try_push!(http_request.push_str(&len_str));
-            try_push!(http_request.push_str("\r\n"));
+            try_push!(http_request.push_str(CRLF_STR));
         }
 
-        try_push!(http_request.push_str("Connection: close\r\n\r\n"));
+        try_push!(http_request.push_str(CONNECTION_CLOSE_END));
 
         Ok(http_request)
     }
@@ -850,7 +846,8 @@ impl<
             return body_received >= content_length;
         }
 
-        true
+        // No Content-Length and not chunked: keep reading until connection closes (Ok(0))
+        false
     }
 
     /// Check if the response uses chunked transfer encoding
@@ -946,8 +943,17 @@ mod tests {
     use embassy_net::Stack;
 
     #[test]
-    fn test_is_response_complete_headers_only() {
+    fn test_is_response_complete_no_content_length() {
+        // Without Content-Length or chunked, response is never "complete" —
+        // the read loop must rely on connection close (Ok(0))
         let data = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n";
+        assert!(!DefaultHttpClient::is_response_complete(data));
+    }
+
+    #[test]
+    fn test_is_response_complete_content_length_zero() {
+        // Content-Length: 0 means empty body — complete once headers end
+        let data = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
         assert!(DefaultHttpClient::is_response_complete(data));
     }
 

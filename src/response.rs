@@ -1,6 +1,8 @@
 use crate::{
     HttpHeader, StatusCode,
-    protocol::{CRLF, MAX_HEADERS},
+    error::Error,
+    header::headers::{CONTENT_LENGTH, CONTENT_TYPE},
+    protocol::{CRLF, HEADER_SEPARATOR, HTTP_VERSION_PREFIX, MAX_HEADERS},
 };
 use heapless::Vec;
 
@@ -22,7 +24,7 @@ impl ResponseBody<'_> {
         match self {
             ResponseBody::Text(s) => Some(s),
             ResponseBody::Binary(bytes) => core::str::from_utf8(bytes).ok(),
-            ResponseBody::Empty => Some(""),
+            ResponseBody::Empty => None,
         }
     }
 
@@ -84,13 +86,13 @@ impl HttpResponse<'_> {
     /// Get the Content-Type header value
     #[must_use]
     pub fn content_type(&self) -> Option<&str> {
-        self.get_header("Content-Type")
+        self.get_header(CONTENT_TYPE)
     }
 
     /// Get the Content-Length header value as a number
     #[must_use]
     pub fn content_length(&self) -> Option<usize> {
-        self.get_header("Content-Length")?.parse().ok()
+        self.get_header(CONTENT_LENGTH)?.parse().ok()
     }
 
     /// Check if the response indicates success (2xx status codes)
@@ -112,64 +114,75 @@ impl HttpResponse<'_> {
     }
 
     /// Build HTTP response bytes from this `HttpResponse`
-    #[must_use]
-    pub fn build_bytes<const MAX_RESPONSE_SIZE: usize>(&self) -> Vec<u8, MAX_RESPONSE_SIZE> {
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferOverflow` if the response exceeds `MAX_RESPONSE_SIZE`.
+    pub fn build_bytes<const MAX_RESPONSE_SIZE: usize>(
+        &self,
+    ) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error> {
         let mut bytes = Vec::new();
 
         // Status line: HTTP/1.1 <code> <reason>\r\n
-        write_status_line(&mut bytes, self.status_code);
+        write_status_line(&mut bytes, self.status_code)?;
 
         // Headers
+        let mut has_content_length = false;
         for header in &self.headers {
-            let _ = bytes.extend_from_slice(header.name.as_bytes());
-            let _ = bytes.extend_from_slice(b": ");
-            let _ = bytes.extend_from_slice(header.value.as_bytes());
-            let _ = bytes.extend_from_slice(CRLF);
+            push_slice(&mut bytes, header.name.as_bytes())?;
+            push_slice(&mut bytes, HEADER_SEPARATOR.as_bytes())?;
+            push_slice(&mut bytes, header.value.as_bytes())?;
+            push_slice(&mut bytes, CRLF)?;
+            if header.name.eq_ignore_ascii_case(CONTENT_LENGTH) {
+                has_content_length = true;
+            }
         }
 
-        // Content-Length header if body is present
+        // Content-Length header if body is present and not already specified
         let body_bytes = self.body.as_bytes();
-        if !body_bytes.is_empty() {
-            let _ = bytes.extend_from_slice(b"Content-Length: ");
-            write_decimal_to_buffer(&mut bytes, body_bytes.len());
-            let _ = bytes.extend_from_slice(CRLF);
+        if !has_content_length && !body_bytes.is_empty() {
+            push_slice(&mut bytes, CONTENT_LENGTH.as_bytes())?;
+            push_slice(&mut bytes, HEADER_SEPARATOR.as_bytes())?;
+            write_decimal_to_buffer(&mut bytes, body_bytes.len())?;
+            push_slice(&mut bytes, CRLF)?;
         }
 
         // End of headers
-        let _ = bytes.extend_from_slice(CRLF);
+        push_slice(&mut bytes, CRLF)?;
 
         // Body
-        let _ = bytes.extend_from_slice(body_bytes);
+        push_slice(&mut bytes, body_bytes)?;
 
-        bytes
+        Ok(bytes)
     }
 }
 
+/// Push a byte slice into the buffer, returning `BufferOverflow` on failure.
+fn push_slice<const N: usize>(bytes: &mut Vec<u8, N>, data: &[u8]) -> Result<(), Error> {
+    bytes
+        .extend_from_slice(data)
+        .map_err(|_| Error::BufferOverflow)
+}
+
 /// Write HTTP status line to the given buffer
-fn write_status_line<const MAX_RESPONSE_SIZE: usize>(
-    bytes: &mut Vec<u8, MAX_RESPONSE_SIZE>,
+fn write_status_line<const N: usize>(
+    bytes: &mut Vec<u8, N>,
     status_code: StatusCode,
-) {
-    // Write "HTTP/1.1 "
-    let _ = bytes.extend_from_slice(b"HTTP/1.1 ");
-
-    // Write status code as decimal
-    write_decimal_to_buffer(bytes, status_code.as_u16() as usize);
-
-    // Write " <reason>\r\n"
-    let _ = bytes.push(b' ');
-    let _ = bytes.extend_from_slice(status_code.text().as_bytes());
-    let _ = bytes.extend_from_slice(CRLF);
+) -> Result<(), Error> {
+    push_slice(bytes, HTTP_VERSION_PREFIX)?;
+    write_decimal_to_buffer(bytes, status_code.as_u16() as usize)?;
+    bytes.push(b' ').map_err(|_| Error::BufferOverflow)?;
+    push_slice(bytes, status_code.text().as_bytes())?;
+    push_slice(bytes, CRLF)
 }
 
 /// Write a decimal number to the buffer
-fn write_decimal_to_buffer<const MAX_RESPONSE_SIZE: usize>(
-    bytes: &mut Vec<u8, MAX_RESPONSE_SIZE>,
+fn write_decimal_to_buffer<const N: usize>(
+    bytes: &mut Vec<u8, N>,
     mut num: usize,
-) {
+) -> Result<(), Error> {
     if num == 0 {
-        let _ = bytes.push(b'0');
-        return;
+        return bytes.push(b'0').map_err(|_| Error::BufferOverflow);
     }
 
     let mut digits = [0u8; 10];
@@ -184,10 +197,10 @@ fn write_decimal_to_buffer<const MAX_RESPONSE_SIZE: usize>(
         i += 1;
     }
 
-    // Write digits in reverse order
     for j in (0..i).rev() {
-        let _ = bytes.push(digits[j]);
+        bytes.push(digits[j]).map_err(|_| Error::BufferOverflow)?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -205,7 +218,7 @@ mod tests {
         assert_eq!(bin.as_str(), Some("bin"));
         assert_eq!(bin.as_bytes(), b"bin");
         let empty = ResponseBody::Empty;
-        assert_eq!(empty.as_str(), Some(""));
+        assert_eq!(empty.as_str(), None);
         assert_eq!(empty.as_bytes(), b"");
     }
 
@@ -252,7 +265,7 @@ mod tests {
             body: ResponseBody::Text("Hello World!"),
         };
 
-        let bytes = response.build_bytes::<4096>();
+        let bytes = response.build_bytes::<4096>().unwrap();
         let response_str = core::str::from_utf8(&bytes).unwrap();
 
         assert!(response_str.starts_with("HTTP/1.1 200 OK\r\n"));
@@ -269,7 +282,7 @@ mod tests {
             body: ResponseBody::Text("Not Found"),
         };
 
-        let bytes = response.build_bytes::<4096>();
+        let bytes = response.build_bytes::<4096>().unwrap();
         let response_str = core::str::from_utf8(&bytes).unwrap();
 
         assert!(response_str.starts_with("HTTP/1.1 404 Not Found\r\n"));
@@ -285,7 +298,7 @@ mod tests {
             body: ResponseBody::Empty,
         };
 
-        let bytes = response.build_bytes::<4096>();
+        let bytes = response.build_bytes::<4096>().unwrap();
         let response_str = core::str::from_utf8(&bytes).unwrap();
 
         assert!(response_str.starts_with("HTTP/1.1 204 No Content\r\n"));
@@ -302,7 +315,7 @@ mod tests {
             body: ResponseBody::Binary(binary_data),
         };
 
-        let bytes = response.build_bytes::<4096>();
+        let bytes = response.build_bytes::<4096>().unwrap();
 
         // Check that the response contains the binary data at the end
         assert!(bytes.ends_with(binary_data));
@@ -317,25 +330,25 @@ mod tests {
         let mut bytes: Vec<u8, 64> = Vec::new();
 
         // Test zero
-        write_decimal_to_buffer(&mut bytes, 0);
+        write_decimal_to_buffer(&mut bytes, 0).unwrap();
         assert_eq!(bytes, b"0");
 
         // Test single digit
         bytes.clear();
-        write_decimal_to_buffer(&mut bytes, 5);
+        write_decimal_to_buffer(&mut bytes, 5).unwrap();
         assert_eq!(bytes, b"5");
 
         // Test multi-digit numbers
         bytes.clear();
-        write_decimal_to_buffer(&mut bytes, 42);
+        write_decimal_to_buffer(&mut bytes, 42).unwrap();
         assert_eq!(bytes, b"42");
 
         bytes.clear();
-        write_decimal_to_buffer(&mut bytes, 123);
+        write_decimal_to_buffer(&mut bytes, 123).unwrap();
         assert_eq!(bytes, b"123");
 
         bytes.clear();
-        write_decimal_to_buffer(&mut bytes, 9999);
+        write_decimal_to_buffer(&mut bytes, 9999).unwrap();
         assert_eq!(bytes, b"9999");
     }
 
@@ -344,19 +357,19 @@ mod tests {
         let mut bytes: Vec<u8, 64> = Vec::new();
 
         // Test common status codes
-        write_status_line(&mut bytes, StatusCode::Ok);
+        write_status_line(&mut bytes, StatusCode::Ok).unwrap();
         assert_eq!(bytes, b"HTTP/1.1 200 OK\r\n");
 
         bytes.clear();
-        write_status_line(&mut bytes, StatusCode::NotFound);
+        write_status_line(&mut bytes, StatusCode::NotFound).unwrap();
         assert_eq!(bytes, b"HTTP/1.1 404 Not Found\r\n");
 
         bytes.clear();
-        write_status_line(&mut bytes, StatusCode::InternalServerError);
+        write_status_line(&mut bytes, StatusCode::InternalServerError).unwrap();
         assert_eq!(bytes, b"HTTP/1.1 500 Internal Server Error\r\n");
 
         bytes.clear();
-        write_status_line(&mut bytes, StatusCode::Created);
+        write_status_line(&mut bytes, StatusCode::Created).unwrap();
         assert_eq!(bytes, b"HTTP/1.1 201 Created\r\n");
     }
 
@@ -382,7 +395,7 @@ mod tests {
                 body: ResponseBody::Text(body_text),
             };
 
-            let bytes = response.build_bytes::<4096>();
+            let bytes = response.build_bytes::<4096>().unwrap();
             let response_str = core::str::from_utf8(&bytes).unwrap();
 
             if *expected_len > 0 {
