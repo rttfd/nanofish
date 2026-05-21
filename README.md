@@ -24,6 +24,7 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 - **Optional TLS Support** - HTTPS client support with embedded-tls when enabled (server is HTTP-only)
 - **Optional Logging** - Choose between `defmt` or `log` for diagnostics, or disable both for zero overhead
 - **Timeout & Retry Support** - Built-in handling for network issues
+- **Proxy Compatible** - Works behind reverse proxies (e.g. Traefik) that may strip or modify `Content-Length` headers
 - **DNS Resolution** - Automatic hostname resolution
 
 ## Installation & Feature Flags

@@ -9,11 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.11.5] - 2026-05-21
 
+### Added
+
+- `Error::BufferOverflow` variant for request/response buffer overflow errors.
+- Server read loop: accumulates data across multiple TCP segments until headers and `Content-Length` body are fully received.
+
+### Fixed
+
+- Client read loop now returns error on retry exhaustion instead of parsing partial/truncated data.
+- Empty URL path (e.g. `http://example.com`) now defaults to `"/"` instead of producing an invalid request line.
+- Handler timeout now returns `408 Request Timeout` instead of `400 Bad Request`.
+- Duplicate `Content-Length` header no longer emitted when caller already provides one in `build_bytes`.
+- `build_bytes` now returns `Result` and reports `BufferOverflow` instead of silently truncating.
+- `ResponseBody::Empty.as_str()` now returns `None` instead of `Some("")`.
+- Client handles missing or invalid `Content-Length` (e.g. Traefik stripping headers) by reading until connection close.
+
 ### Changed
 
 - Replaced unnecessary `proto-ipv6` with `proto-ipv4` in `embassy-net` features (the crate only uses IPv4 DNS queries).
 - Replaced all hardcoded HTTP strings in production code with constants from `protocol.rs` and `header.rs` (`CONTENT_TYPE`, `CONTENT_LENGTH`, `HEADER_SEPARATOR`, `HTTP_VERSION_PREFIX`, `mime_types::*`).
-- Server 500 error response now uses `HttpResponse::build_bytes` instead of a raw byte literal.
+- Server error responses extracted into `text_error_response` helper (DRY).
+- `handle_connection` changed from `&mut self` to `&self`.
+- `try_push!` macro now returns `Error::BufferOverflow` instead of `Error::InvalidResponse`.
+- Removed dead `url_parts` vec and `MAX_URL_PARTS` constant from URL parsing.
+- Socket timeout reset after accept to avoid racing with read timeout.
+- Removed blanket `#[allow(dead_code)]` on `StatusCode` impl.
 
 ## [0.11.4] - 2026-05-18
 
