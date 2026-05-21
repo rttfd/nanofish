@@ -1,6 +1,7 @@
 use crate::{
     HttpHeader, StatusCode,
-    protocol::{CRLF, MAX_HEADERS},
+    header::headers::{CONTENT_LENGTH, CONTENT_TYPE},
+    protocol::{CRLF, HEADER_SEPARATOR, HTTP_VERSION_PREFIX, MAX_HEADERS},
 };
 use heapless::Vec;
 
@@ -84,13 +85,13 @@ impl HttpResponse<'_> {
     /// Get the Content-Type header value
     #[must_use]
     pub fn content_type(&self) -> Option<&str> {
-        self.get_header("Content-Type")
+        self.get_header(CONTENT_TYPE)
     }
 
     /// Get the Content-Length header value as a number
     #[must_use]
     pub fn content_length(&self) -> Option<usize> {
-        self.get_header("Content-Length")?.parse().ok()
+        self.get_header(CONTENT_LENGTH)?.parse().ok()
     }
 
     /// Check if the response indicates success (2xx status codes)
@@ -122,7 +123,7 @@ impl HttpResponse<'_> {
         // Headers
         for header in &self.headers {
             let _ = bytes.extend_from_slice(header.name.as_bytes());
-            let _ = bytes.extend_from_slice(b": ");
+            let _ = bytes.extend_from_slice(HEADER_SEPARATOR.as_bytes());
             let _ = bytes.extend_from_slice(header.value.as_bytes());
             let _ = bytes.extend_from_slice(CRLF);
         }
@@ -130,7 +131,8 @@ impl HttpResponse<'_> {
         // Content-Length header if body is present
         let body_bytes = self.body.as_bytes();
         if !body_bytes.is_empty() {
-            let _ = bytes.extend_from_slice(b"Content-Length: ");
+            let _ = bytes.extend_from_slice(CONTENT_LENGTH.as_bytes());
+            let _ = bytes.extend_from_slice(HEADER_SEPARATOR.as_bytes());
             write_decimal_to_buffer(&mut bytes, body_bytes.len());
             let _ = bytes.extend_from_slice(CRLF);
         }
@@ -151,7 +153,7 @@ fn write_status_line<const MAX_RESPONSE_SIZE: usize>(
     status_code: StatusCode,
 ) {
     // Write "HTTP/1.1 "
-    let _ = bytes.extend_from_slice(b"HTTP/1.1 ");
+    let _ = bytes.extend_from_slice(HTTP_VERSION_PREFIX);
 
     // Write status code as decimal
     write_decimal_to_buffer(bytes, status_code.as_u16() as usize);
