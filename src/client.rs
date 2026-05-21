@@ -844,7 +844,8 @@ impl<
             return body_received >= content_length;
         }
 
-        true
+        // No Content-Length and not chunked: keep reading until connection closes (Ok(0))
+        false
     }
 
     /// Check if the response uses chunked transfer encoding
@@ -940,8 +941,17 @@ mod tests {
     use embassy_net::Stack;
 
     #[test]
-    fn test_is_response_complete_headers_only() {
+    fn test_is_response_complete_no_content_length() {
+        // Without Content-Length or chunked, response is never "complete" —
+        // the read loop must rely on connection close (Ok(0))
         let data = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n";
+        assert!(!DefaultHttpClient::is_response_complete(data));
+    }
+
+    #[test]
+    fn test_is_response_complete_content_length_zero() {
+        // Content-Length: 0 means empty body — complete once headers end
+        let data = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
         assert!(DefaultHttpClient::is_response_complete(data));
     }
 

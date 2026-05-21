@@ -253,10 +253,7 @@ impl<
             }
             Err(_) => {
                 warn!("Request handling timed out");
-                return Self::text_error_response(
-                    StatusCode::RequestTimeout,
-                    "Request Timeout",
-                );
+                return Self::text_error_response(StatusCode::RequestTimeout, "Request Timeout");
             }
         };
 
