@@ -27,9 +27,7 @@ use embedded_io_async::Write as EmbeddedWrite;
 use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
 use heapless::Vec;
 #[cfg(feature = "tls")]
-use rand_chacha::ChaCha8Rng;
-#[cfg(feature = "tls")]
-use rand_core::SeedableRng;
+use rand_core::{CryptoRng, RngCore};
 
 const REQUEST_SIZE: usize = 1024;
 const SMALL_BUFFER_SIZE: usize = 1024;
@@ -279,7 +277,8 @@ impl<
 
         let tls_config = TlsConfig::new().with_server_name(host);
         let mut tls = TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
-        let rng = ChaCha8Rng::from_seed(timeseed());
+        let seed = u32::from_be_bytes(timeseed()[0..4].try_into().unwrap());
+        let rng = XorShift32Rng::new(seed);
 
         tls.open(TlsContext::new(
             &tls_config,
@@ -936,6 +935,49 @@ fn timeseed() -> [u8; 32] {
     result[..8].copy_from_slice(&bytes);
     result
 }
+
+/// Simple `XORShift32` PRNG for TLS seeding.
+/// Good enough for embedded TLS where the seed itself is time-based.
+#[cfg(feature = "tls")]
+struct XorShift32Rng(u32);
+
+#[cfg(feature = "tls")]
+impl XorShift32Rng {
+    fn new(seed: u32) -> Self {
+        Self(seed)
+    }
+}
+
+#[cfg(feature = "tls")]
+impl RngCore for XorShift32Rng {
+    fn next_u32(&mut self) -> u32 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.0 = x;
+        x
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        (u64::from(self.next_u32()) << 32) | u64::from(self.next_u32())
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for chunk in dest.chunks_mut(4) {
+            let val = self.next_u32();
+            chunk.copy_from_slice(&val.to_le_bytes()[..chunk.len()]);
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "tls")]
+impl CryptoRng for XorShift32Rng {}
 
 #[cfg(test)]
 mod tests {
