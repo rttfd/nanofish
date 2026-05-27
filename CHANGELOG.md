@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.6] - TBD
+
+### Added
+
+- Strict clippy configuration following nulid pattern: forbids `unwrap`/`expect`/`panic`/`todo`/`unimplemented` in production code (tests allow these via `.clippy.toml`), enables pedantic and nursery lints at warn level.
+
+### Changed
+
+- Replaced `rand_chacha` dependency with tiny XORShift32 PRNG for TLS seeding (keeps `rand_core 0.6` required by embedded-tls, removes rand 0.10.x conflict).
+- Added `const` to all functions that can be made `const` (`ResponseBody::as_bytes`, `ResponseBody::is_empty`, `ResponseBody::len`, `StatusCode::as_u16`, `StatusCode::text`, `ServerTimeouts::new`, `HttpServer::with_timeouts`, `XorShift32Rng::new`).
+- Use `Self` instead of type names within impls (`StatusCode`, `Error`, `HttpMethod`, `ResponseBody`).
+- Simplified `if let/else` patterns to `map_or`/`map_or_else` for better code clarity.
+- Added `Eq` derives to enums with `PartialEq` (`HttpMethod`, `InvalidHttpMethod`).
+- Replace `unwrap()` with safe array indexing for `timeseed()` in TLS seeding.
+- Used `#[expect(clippy::future_not_send)]` instead of `#[allow(...)]` for embedded async functions (documents intent and alerts if futures become `Send`).
+
+### Fixed
+
+- All 197 clippy warnings (pedantic/nursery lints) fixed without `#[allow(...)]` directives (except expected `future_not_send` for embedded no_std).
+
 ## [0.11.5] - 2026-05-21
 
 ### Added
