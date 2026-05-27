@@ -171,7 +171,7 @@ impl<
     ///     Ok(())
     /// }
     /// ```
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     pub async fn request<'b>(
         &self,
         method: HttpMethod,
@@ -226,7 +226,7 @@ impl<
     }
 
     /// Resolve a hostname to an IP address, trying IPv4 (A) first then IPv6 (AAAA).
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     async fn resolve_host(stack: Stack<'_>, host: &str) -> Result<embassy_net::IpAddress, Error> {
         let dns_socket = DnsSocket::new(stack);
 
@@ -244,7 +244,7 @@ impl<
 
     /// Make HTTPS request over TLS with zero-copy response handling
     #[cfg(feature = "tls")]
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     async fn make_https_request(
         &self,
         method: HttpMethod,
@@ -340,7 +340,7 @@ impl<
     }
 
     /// Make HTTP request with zero-copy response handling
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     async fn make_http_request(
         &self,
         method: HttpMethod,
@@ -435,7 +435,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     pub async fn patch<'b>(
         &self,
         endpoint: &str,
@@ -466,7 +466,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     pub async fn head<'b>(
         &self,
         endpoint: &str,
@@ -490,7 +490,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     pub async fn options<'b>(
         &self,
         endpoint: &str,
@@ -520,7 +520,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     pub async fn trace<'b>(
         &self,
         endpoint: &str,
@@ -544,7 +544,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     pub async fn connect<'b>(
         &self,
         endpoint: &str,
@@ -574,7 +574,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     pub async fn get<'b>(
         &self,
         endpoint: &str,
@@ -599,7 +599,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     pub async fn post<'b>(
         &self,
         endpoint: &str,
@@ -631,7 +631,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     pub async fn put<'b>(
         &self,
         endpoint: &str,
@@ -662,7 +662,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     pub async fn delete<'b>(
         &self,
         endpoint: &str,

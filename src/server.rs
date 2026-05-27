@@ -90,7 +90,7 @@ impl<
     ///
     /// **Important**: This server only accepts plain HTTP connections.
     /// HTTPS/TLS is not supported by the server (only by the client).
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     pub async fn serve<H>(&mut self, stack: Stack<'_>, handler: H) -> !
     where
         H: HttpHandler,
@@ -168,7 +168,7 @@ impl<
     ///
     /// Accumulates data until headers are found (`\r\n\r\n`), then reads
     /// any remaining body bytes indicated by `Content-Length`.
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     async fn read_request(
         socket: &mut TcpSocket<'_>,
         buf: &mut [u8],
@@ -227,7 +227,7 @@ impl<
         resp.build_bytes::<MAX_RESPONSE_SIZE>()
     }
 
-    #[allow(clippy::future_not_send)]
+    #[expect(clippy::future_not_send)]
     async fn handle_connection<H>(
         &self,
         buffer: &[u8],
