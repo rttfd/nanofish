@@ -22,39 +22,39 @@ impl ResponseBody<'_> {
     #[must_use]
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            ResponseBody::Text(s) => Some(s),
-            ResponseBody::Binary(bytes) => core::str::from_utf8(bytes).ok(),
-            ResponseBody::Empty => None,
+            Self::Text(s) => Some(s),
+            Self::Binary(bytes) => core::str::from_utf8(bytes).ok(),
+            Self::Empty => None,
         }
     }
 
     /// Get the body as raw bytes
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
+    pub const fn as_bytes(&self) -> &[u8] {
         match self {
-            ResponseBody::Text(s) => s.as_bytes(),
-            ResponseBody::Binary(bytes) => bytes,
-            ResponseBody::Empty => &[],
+            Self::Text(s) => s.as_bytes(),
+            Self::Binary(bytes) => bytes,
+            Self::Empty => &[],
         }
     }
 
     /// Check if the body is empty
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         match self {
-            ResponseBody::Text(s) => s.is_empty(),
-            ResponseBody::Binary(bytes) => bytes.is_empty(),
-            ResponseBody::Empty => true,
+            Self::Text(s) => s.is_empty(),
+            Self::Binary(bytes) => bytes.is_empty(),
+            Self::Empty => true,
         }
     }
 
     /// Get the length of the body in bytes
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         match self {
-            ResponseBody::Text(s) => s.len(),
-            ResponseBody::Binary(bytes) => bytes.len(),
-            ResponseBody::Empty => 0,
+            Self::Text(s) => s.len(),
+            Self::Binary(bytes) => bytes.len(),
+            Self::Empty => 0,
         }
     }
 }
