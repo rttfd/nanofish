@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.11.6] - TBD
+## [0.11.6] - 2026-05-27
 
 ### Added
 
@@ -229,7 +229,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, and CONNECT methods.
 - Configurable client options (retries, timeouts, delays).
 
-[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.11.5...HEAD
+[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.11.6...HEAD
+[0.11.6]: https://github.com/rttfd/nanofish/compare/v0.11.5...v0.11.6
 [0.11.5]: https://github.com/rttfd/nanofish/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/rttfd/nanofish/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/rttfd/nanofish/compare/v0.11.2...v0.11.3
