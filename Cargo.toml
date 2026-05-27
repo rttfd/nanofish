@@ -34,3 +34,13 @@ rand_core = { version = "0.6", optional = true }
 
 [dev-dependencies]
 futures-lite = "2.6"
+
+[lints.clippy]
+panic = "forbid"
+unwrap_used = "forbid"
+expect_used = "forbid"
+todo = "forbid"
+unimplemented = "forbid"
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
