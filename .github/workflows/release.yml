@@ -16,7 +16,7 @@ jobs:
       version: ${{ steps.get-version.outputs.version }}
       tag-version: ${{ steps.get-tag.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Get version from Cargo.toml
         id: get-version
         run: |
@@ -43,7 +43,7 @@ jobs:
     needs: check-version
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -71,7 +71,7 @@ jobs:
       already-published: ${{ steps.check-published.outputs.already-published }}
       crate-name: ${{ steps.get-crate-name.outputs.crate-name }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Get crate name
         id: get-crate-name
         run: |
@@ -104,7 +104,7 @@ jobs:
     if: needs.check-crates-published.outputs.already-published == 'false'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -142,7 +142,7 @@ jobs:
     outputs:
       release-exists: ${{ steps.check-release.outputs.release-exists }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Check if GitHub release exists
         id: check-release
         env:
@@ -171,17 +171,20 @@ jobs:
     needs: [ check-version, check-release, publish, skip-publish ]
     if: always() && needs.check-release.outputs.release-exists == 'false' && (needs.publish.result == 'success' || needs.skip-publish.result == 'success')
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
       - name: Extract changelog for version
         id: changelog
         run: |
           VERSION="${{ needs.check-version.outputs.version }}"
           echo "Extracting changelog for version $VERSION from CHANGELOG.md..."
 
+          # Try to extract from CHANGELOG.md first
           CHANGELOG=$(awk '/^## \['"$VERSION"'\]/{found=1; next} /^## \[|^\[/{if(found) exit} found{print}' CHANGELOG.md)
 
+          # Fallback to git log if no CHANGELOG entry found
           if [ -z "$CHANGELOG" ]; then
             echo "No changelog entry found for version $VERSION in CHANGELOG.md, falling back to git log"
             PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${{ github.ref_name }}$" | head -1)
@@ -192,17 +195,22 @@ jobs:
             fi
           fi
 
+          # Save changelog to file
           echo "$CHANGELOG" > changelog.txt
-          echo "Generated changelog:"
+          echo "Generated changelog with $(echo "$CHANGELOG" | wc -l) entries"
           cat changelog.txt
 
       - name: Create Release
-        uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ needs.check-version.outputs.version }}
-          body_path: changelog.txt
-          draft: false
-          prerelease: ${{ contains(needs.check-version.outputs.version, '-') }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PRERELEASE_FLAG=""
+          if [[ "${{ needs.check-version.outputs.version }}" == *"-"* ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          gh release create "${{ github.ref_name }}" \
+            --title "Release ${{ needs.check-version.outputs.version }}" \
+            --notes-file changelog.txt \
+            $PRERELEASE_FLAG
