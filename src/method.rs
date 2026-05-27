@@ -2,7 +2,7 @@
 ///
 /// This enum represents the standard HTTP methods that can be used
 /// when making requests with the `HttpClient`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HttpMethod {
     /// The GET method requests a representation of the specified resource.
     /// Requests using GET should only retrieve data.
@@ -29,7 +29,7 @@ pub enum HttpMethod {
 }
 
 /// Error type for invalid HTTP methods
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidHttpMethod;
 
 impl core::fmt::Display for InvalidHttpMethod {
@@ -41,17 +41,17 @@ impl core::fmt::Display for InvalidHttpMethod {
 impl HttpMethod {
     #[must_use]
     /// Returns the string representation of the HTTP method.
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
-            HttpMethod::GET => "GET",
-            HttpMethod::POST => "POST",
-            HttpMethod::PUT => "PUT",
-            HttpMethod::DELETE => "DELETE",
-            HttpMethod::PATCH => "PATCH",
-            HttpMethod::CONNECT => "CONNECT",
-            HttpMethod::OPTIONS => "OPTIONS",
-            HttpMethod::TRACE => "TRACE",
-            HttpMethod::HEAD => "HEAD",
+            Self::GET => "GET",
+            Self::POST => "POST",
+            Self::PUT => "PUT",
+            Self::DELETE => "DELETE",
+            Self::PATCH => "PATCH",
+            Self::CONNECT => "CONNECT",
+            Self::OPTIONS => "OPTIONS",
+            Self::TRACE => "TRACE",
+            Self::HEAD => "HEAD",
         }
     }
 }
@@ -61,15 +61,15 @@ impl TryFrom<&str> for HttpMethod {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "GET" => Ok(HttpMethod::GET),
-            "POST" => Ok(HttpMethod::POST),
-            "PUT" => Ok(HttpMethod::PUT),
-            "DELETE" => Ok(HttpMethod::DELETE),
-            "PATCH" => Ok(HttpMethod::PATCH),
-            "HEAD" => Ok(HttpMethod::HEAD),
-            "OPTIONS" => Ok(HttpMethod::OPTIONS),
-            "TRACE" => Ok(HttpMethod::TRACE),
-            "CONNECT" => Ok(HttpMethod::CONNECT),
+            "GET" => Ok(Self::GET),
+            "POST" => Ok(Self::POST),
+            "PUT" => Ok(Self::PUT),
+            "DELETE" => Ok(Self::DELETE),
+            "PATCH" => Ok(Self::PATCH),
+            "HEAD" => Ok(Self::HEAD),
+            "OPTIONS" => Ok(Self::OPTIONS),
+            "TRACE" => Ok(Self::TRACE),
+            "CONNECT" => Ok(Self::CONNECT),
             _ => Err(InvalidHttpMethod),
         }
     }
@@ -80,15 +80,15 @@ impl TryFrom<&[u8]> for HttpMethod {
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         match value {
-            b"GET" => Ok(HttpMethod::GET),
-            b"POST" => Ok(HttpMethod::POST),
-            b"PUT" => Ok(HttpMethod::PUT),
-            b"DELETE" => Ok(HttpMethod::DELETE),
-            b"PATCH" => Ok(HttpMethod::PATCH),
-            b"HEAD" => Ok(HttpMethod::HEAD),
-            b"OPTIONS" => Ok(HttpMethod::OPTIONS),
-            b"TRACE" => Ok(HttpMethod::TRACE),
-            b"CONNECT" => Ok(HttpMethod::CONNECT),
+            b"GET" => Ok(Self::GET),
+            b"POST" => Ok(Self::POST),
+            b"PUT" => Ok(Self::PUT),
+            b"DELETE" => Ok(Self::DELETE),
+            b"PATCH" => Ok(Self::PATCH),
+            b"HEAD" => Ok(Self::HEAD),
+            b"OPTIONS" => Ok(Self::OPTIONS),
+            b"TRACE" => Ok(Self::TRACE),
+            b"CONNECT" => Ok(Self::CONNECT),
             _ => Err(InvalidHttpMethod),
         }
     }

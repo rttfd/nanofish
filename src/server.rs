@@ -40,7 +40,7 @@ impl Default for ServerTimeouts {
 impl ServerTimeouts {
     /// Create new server timeouts with custom values
     #[must_use]
-    pub fn new(accept_timeout: u64, read_timeout: u64, handler_timeout: u64) -> Self {
+    pub const fn new(accept_timeout: u64, read_timeout: u64, handler_timeout: u64) -> Self {
         Self {
             accept_timeout,
             read_timeout,
@@ -82,7 +82,7 @@ impl<
 
     /// Create a new HTTP server with custom timeouts
     #[must_use]
-    pub fn with_timeouts(port: u16, timeouts: ServerTimeouts) -> Self {
+    pub const fn with_timeouts(port: u16, timeouts: ServerTimeouts) -> Self {
         Self { port, timeouts }
     }
 
@@ -90,6 +90,7 @@ impl<
     ///
     /// **Important**: This server only accepts plain HTTP connections.
     /// HTTPS/TLS is not supported by the server (only by the client).
+    #[expect(clippy::future_not_send)]
     pub async fn serve<H>(&mut self, stack: Stack<'_>, handler: H) -> !
     where
         H: HttpHandler,
@@ -167,6 +168,7 @@ impl<
     ///
     /// Accumulates data until headers are found (`\r\n\r\n`), then reads
     /// any remaining body bytes indicated by `Content-Length`.
+    #[expect(clippy::future_not_send)]
     async fn read_request(
         socket: &mut TcpSocket<'_>,
         buf: &mut [u8],
@@ -225,6 +227,7 @@ impl<
         resp.build_bytes::<MAX_RESPONSE_SIZE>()
     }
 
+    #[expect(clippy::future_not_send)]
     async fn handle_connection<H>(
         &self,
         buffer: &[u8],

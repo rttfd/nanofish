@@ -42,45 +42,45 @@ impl defmt::Format for Error {
 
 impl From<embassy_net::dns::Error> for Error {
     fn from(err: embassy_net::dns::Error) -> Self {
-        Error::DnsError(err)
+        Self::DnsError(err)
     }
 }
 
 impl From<embassy_net::tcp::ConnectError> for Error {
     fn from(err: embassy_net::tcp::ConnectError) -> Self {
-        Error::ConnectionError(err)
+        Self::ConnectionError(err)
     }
 }
 
 impl From<embassy_net::tcp::Error> for Error {
     fn from(err: embassy_net::tcp::Error) -> Self {
-        Error::TcpError(err)
+        Self::TcpError(err)
     }
 }
 
 #[cfg(feature = "tls")]
 impl From<embedded_tls::TlsError> for Error {
     fn from(err: embedded_tls::TlsError) -> Self {
-        Error::TlsError(err)
+        Self::TlsError(err)
     }
 }
 
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Error::InvalidUrl => write!(f, "Invalid URL"),
-            Error::DnsError(_) => write!(f, "DNS resolution failed"),
-            Error::IpAddressEmpty => write!(f, "No IP addresses returned by DNS"),
-            Error::ConnectionError(_) => write!(f, "Failed to establish TCP connection"),
-            Error::TcpError(_) => write!(f, "TCP communication error"),
-            Error::NoResponse => write!(f, "No response received from server"),
-            Error::InvalidResponse(msg) => write!(f, "Invalid response: {msg}"),
+            Self::InvalidUrl => write!(f, "Invalid URL"),
+            Self::DnsError(_) => write!(f, "DNS resolution failed"),
+            Self::IpAddressEmpty => write!(f, "No IP addresses returned by DNS"),
+            Self::ConnectionError(_) => write!(f, "Failed to establish TCP connection"),
+            Self::TcpError(_) => write!(f, "TCP communication error"),
+            Self::NoResponse => write!(f, "No response received from server"),
+            Self::InvalidResponse(msg) => write!(f, "Invalid response: {msg}"),
             #[cfg(feature = "tls")]
-            Error::TlsError(_) => write!(f, "TLS error occurred"),
-            Error::UnsupportedScheme(scheme) => write!(f, "Unsupported scheme: {scheme}"),
-            Error::HeaderError(msg) => write!(f, "Header error: {msg}"),
-            Error::InvalidStatusCode => write!(f, "Invalid status code"),
-            Error::BufferOverflow => write!(f, "Buffer overflow"),
+            Self::TlsError(_) => write!(f, "TLS error occurred"),
+            Self::UnsupportedScheme(scheme) => write!(f, "Unsupported scheme: {scheme}"),
+            Self::HeaderError(msg) => write!(f, "Header error: {msg}"),
+            Self::InvalidStatusCode => write!(f, "Invalid status code"),
+            Self::BufferOverflow => write!(f, "Buffer overflow"),
         }
     }
 }

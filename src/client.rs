@@ -27,9 +27,7 @@ use embedded_io_async::Write as EmbeddedWrite;
 use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
 use heapless::Vec;
 #[cfg(feature = "tls")]
-use rand_chacha::ChaCha8Rng;
-#[cfg(feature = "tls")]
-use rand_core::SeedableRng;
+use rand_core::{CryptoRng, RngCore};
 
 const REQUEST_SIZE: usize = 1024;
 const SMALL_BUFFER_SIZE: usize = 1024;
@@ -114,7 +112,7 @@ impl<
 
     /// Create a new HTTP client with custom buffer sizes and custom options
     #[must_use]
-    pub fn with_options(stack: &'a Stack<'a>, options: HttpClientOptions) -> Self {
+    pub const fn with_options(stack: &'a Stack<'a>, options: HttpClientOptions) -> Self {
         Self { stack, options }
     }
 
@@ -173,6 +171,7 @@ impl<
     ///     Ok(())
     /// }
     /// ```
+    #[expect(clippy::future_not_send)]
     pub async fn request<'b>(
         &self,
         method: HttpMethod,
@@ -198,15 +197,11 @@ impl<
         } else {
             DEFAULT_HTTP_PORT
         };
-        let (host, port) = if let Some(colon_pos) = host.rfind(':') {
-            if let Ok(port) = host[colon_pos + 1..].parse::<u16>() {
-                (&host[..colon_pos], port)
-            } else {
-                (host, default_port)
-            }
-        } else {
-            (host, default_port)
-        };
+        let (host, port) = host.rfind(':').map_or((host, default_port), |colon_pos| {
+            host[colon_pos + 1..]
+                .parse::<u16>()
+                .map_or((host, default_port), |port| (&host[..colon_pos], port))
+        });
 
         let total_read = match scheme {
             #[cfg(feature = "tls")]
@@ -231,6 +226,7 @@ impl<
     }
 
     /// Resolve a hostname to an IP address, trying IPv4 (A) first then IPv6 (AAAA).
+    #[expect(clippy::future_not_send)]
     async fn resolve_host(stack: Stack<'_>, host: &str) -> Result<embassy_net::IpAddress, Error> {
         let dns_socket = DnsSocket::new(stack);
 
@@ -248,6 +244,7 @@ impl<
 
     /// Make HTTPS request over TLS with zero-copy response handling
     #[cfg(feature = "tls")]
+    #[expect(clippy::future_not_send)]
     async fn make_https_request(
         &self,
         method: HttpMethod,
@@ -279,7 +276,14 @@ impl<
 
         let tls_config = TlsConfig::new().with_server_name(host);
         let mut tls = TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
-        let rng = ChaCha8Rng::from_seed(timeseed());
+        let timeseed_bytes = timeseed();
+        let seed = u32::from_be_bytes([
+            timeseed_bytes[0],
+            timeseed_bytes[1],
+            timeseed_bytes[2],
+            timeseed_bytes[3],
+        ]);
+        let rng = XorShift32Rng::new(seed);
 
         tls.open(TlsContext::new(
             &tls_config,
@@ -336,6 +340,7 @@ impl<
     }
 
     /// Make HTTP request with zero-copy response handling
+    #[expect(clippy::future_not_send)]
     async fn make_http_request(
         &self,
         method: HttpMethod,
@@ -430,6 +435,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
+    #[expect(clippy::future_not_send)]
     pub async fn patch<'b>(
         &self,
         endpoint: &str,
@@ -460,6 +466,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
+    #[expect(clippy::future_not_send)]
     pub async fn head<'b>(
         &self,
         endpoint: &str,
@@ -483,6 +490,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
+    #[expect(clippy::future_not_send)]
     pub async fn options<'b>(
         &self,
         endpoint: &str,
@@ -512,6 +520,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
+    #[expect(clippy::future_not_send)]
     pub async fn trace<'b>(
         &self,
         endpoint: &str,
@@ -535,6 +544,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
+    #[expect(clippy::future_not_send)]
     pub async fn connect<'b>(
         &self,
         endpoint: &str,
@@ -564,6 +574,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
+    #[expect(clippy::future_not_send)]
     pub async fn get<'b>(
         &self,
         endpoint: &str,
@@ -588,6 +599,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
+    #[expect(clippy::future_not_send)]
     pub async fn post<'b>(
         &self,
         endpoint: &str,
@@ -619,6 +631,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
+    #[expect(clippy::future_not_send)]
     pub async fn put<'b>(
         &self,
         endpoint: &str,
@@ -649,6 +662,7 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`HttpClient::request`].
+    #[expect(clippy::future_not_send)]
     pub async fn delete<'b>(
         &self,
         endpoint: &str,
@@ -724,16 +738,16 @@ impl<
         }
 
         // Check content type to determine how to handle the body
-        if let Some(content_type) = Self::get_content_type(headers) {
-            if Self::is_text_content_type(content_type) {
-                Self::parse_as_text_or_binary(body_data)
-            } else {
-                ResponseBody::Binary(body_data)
-            }
-        } else {
-            // No content type header, try to guess based on UTF-8 validity
-            Self::parse_as_text_or_binary(body_data)
-        }
+        Self::get_content_type(headers).map_or_else(
+            || Self::parse_as_text_or_binary(body_data),
+            |content_type| {
+                if Self::is_text_content_type(content_type) {
+                    Self::parse_as_text_or_binary(body_data)
+                } else {
+                    ResponseBody::Binary(body_data)
+                }
+            },
+        )
     }
 
     /// Get content type from headers
@@ -754,15 +768,12 @@ impl<
 
     /// Try to parse as text, fall back to binary if not valid UTF-8
     fn parse_as_text_or_binary(body_data: &[u8]) -> ResponseBody<'_> {
-        if let Ok(text) = core::str::from_utf8(body_data) {
-            ResponseBody::Text(text)
-        } else {
-            Self::parse_as_binary(body_data)
-        }
+        core::str::from_utf8(body_data)
+            .map_or_else(|_| Self::parse_as_binary(body_data), ResponseBody::Text)
     }
 
     /// Parse data as binary (zero-copy)
-    fn parse_as_binary(body_data: &[u8]) -> ResponseBody<'_> {
+    const fn parse_as_binary(body_data: &[u8]) -> ResponseBody<'_> {
         ResponseBody::Binary(body_data)
     }
 
@@ -936,6 +947,49 @@ fn timeseed() -> [u8; 32] {
     result[..8].copy_from_slice(&bytes);
     result
 }
+
+/// Simple `XORShift32` PRNG for TLS seeding.
+/// Good enough for embedded TLS where the seed itself is time-based.
+#[cfg(feature = "tls")]
+struct XorShift32Rng(u32);
+
+#[cfg(feature = "tls")]
+impl XorShift32Rng {
+    const fn new(seed: u32) -> Self {
+        Self(seed)
+    }
+}
+
+#[cfg(feature = "tls")]
+impl RngCore for XorShift32Rng {
+    fn next_u32(&mut self) -> u32 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.0 = x;
+        x
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        (u64::from(self.next_u32()) << 32) | u64::from(self.next_u32())
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        for chunk in dest.chunks_mut(4) {
+            let val = self.next_u32();
+            chunk.copy_from_slice(&val.to_le_bytes()[..chunk.len()]);
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "tls")]
+impl CryptoRng for XorShift32Rng {}
 
 #[cfg(test)]
 mod tests {

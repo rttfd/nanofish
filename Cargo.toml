@@ -12,7 +12,7 @@ authors = ["rttf <contact@rttf.dev>"]
 
 [features]
 default = []
-tls = ["dep:embedded-tls", "dep:rand_core", "dep:rand_chacha"]
+tls = ["dep:embedded-tls", "dep:rand_core"]
 defmt = ["dep:defmt", "embassy-net/defmt"]
 log = ["dep:log", "embassy-net/log"]
 
@@ -30,8 +30,17 @@ embedded-io-async = "0.7.0"
 embedded-tls = { version = "0.18.0", default-features = false, optional = true }
 heapless = "0.9.3"
 log = { version = "0.4", optional = true }
-rand_chacha = { version = "0.3", default-features = false, optional = true }
-rand_core = { version = "0.6.4", optional = true }
+rand_core = { version = "0.6", optional = true }
 
 [dev-dependencies]
 futures-lite = "2.6"
+
+[lints.clippy]
+panic = "forbid"
+unwrap_used = "forbid"
+expect_used = "forbid"
+todo = "forbid"
+unimplemented = "forbid"
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
