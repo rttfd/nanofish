@@ -36,6 +36,8 @@ pub mod mime_types {
     pub const FORM: &str = "application/x-www-form-urlencoded";
     /// application/octet-stream
     pub const BINARY: &str = "application/octet-stream";
+    /// text/event-stream
+    pub const EVENT_STREAM: &str = "text/event-stream";
 }
 
 /// HTTP Header struct for representing a single header with owned strings
@@ -76,6 +78,18 @@ impl<'a> HttpHeader<'a> {
         Self::new(headers::USER_AGENT, value)
     }
 
+    /// Create a Cache-Control header
+    #[must_use]
+    pub const fn cache_control(value: &'a str) -> Self {
+        Self::new(headers::CACHE_CONTROL, value)
+    }
+
+    /// Create a Connection header
+    #[must_use]
+    pub const fn connection(value: &'a str) -> Self {
+        Self::new(headers::CONNECTION, value)
+    }
+
     /// Create an Accept header
     #[must_use]
     pub const fn accept(value: &'a str) -> Self {
@@ -86,6 +100,12 @@ impl<'a> HttpHeader<'a> {
     #[must_use]
     pub const fn api_key(value: &'a str) -> Self {
         Self::new(headers::X_API_KEY, value)
+    }
+
+    /// Create a Content-Type: text/event-stream header
+    #[must_use]
+    pub const fn event_stream() -> Self {
+        Self::new(headers::CONTENT_TYPE, mime_types::EVENT_STREAM)
     }
 }
 
@@ -101,5 +121,17 @@ mod tests {
         };
         assert_eq!(header.name, "Content-Type");
         assert_eq!(header.value, "application/json");
+
+        let cache = HttpHeader::cache_control("no-cache");
+        assert_eq!(cache.name, headers::CACHE_CONTROL);
+        assert_eq!(cache.value, "no-cache");
+
+        let connection = HttpHeader::connection("keep-alive");
+        assert_eq!(connection.name, headers::CONNECTION);
+        assert_eq!(connection.value, "keep-alive");
+
+        let event_stream = HttpHeader::event_stream();
+        assert_eq!(event_stream.name, headers::CONTENT_TYPE);
+        assert_eq!(event_stream.value, mime_types::EVENT_STREAM);
     }
 }

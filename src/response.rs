@@ -122,17 +122,43 @@ impl HttpResponse<'_> {
         &self,
     ) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error> {
         let mut bytes = Vec::new();
+        self.write_head_bytes::<MAX_RESPONSE_SIZE>(&mut bytes, true)?;
+        push_slice(&mut bytes, self.body.as_bytes())?;
 
+        Ok(bytes)
+    }
+
+    /// Build HTTP response bytes without the body.
+    ///
+    /// This is useful for streaming endpoints that need to send headers first
+    /// and then keep the connection open for later writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferOverflow` if the response exceeds `MAX_RESPONSE_SIZE`.
+    pub fn build_head_bytes<const MAX_RESPONSE_SIZE: usize>(
+        &self,
+    ) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error> {
+        let mut bytes = Vec::new();
+        self.write_head_bytes::<MAX_RESPONSE_SIZE>(&mut bytes, false)?;
+        Ok(bytes)
+    }
+
+    fn write_head_bytes<const MAX_RESPONSE_SIZE: usize>(
+        &self,
+        bytes: &mut Vec<u8, MAX_RESPONSE_SIZE>,
+        include_auto_content_length: bool,
+    ) -> Result<(), Error> {
         // Status line: HTTP/1.1 <code> <reason>\r\n
-        write_status_line(&mut bytes, self.status_code)?;
+        write_status_line(bytes, self.status_code)?;
 
         // Headers
         let mut has_content_length = false;
         for header in &self.headers {
-            push_slice(&mut bytes, header.name.as_bytes())?;
-            push_slice(&mut bytes, HEADER_SEPARATOR.as_bytes())?;
-            push_slice(&mut bytes, header.value.as_bytes())?;
-            push_slice(&mut bytes, CRLF)?;
+            push_slice(bytes, header.name.as_bytes())?;
+            push_slice(bytes, HEADER_SEPARATOR.as_bytes())?;
+            push_slice(bytes, header.value.as_bytes())?;
+            push_slice(bytes, CRLF)?;
             if header.name.eq_ignore_ascii_case(CONTENT_LENGTH) {
                 has_content_length = true;
             }
@@ -140,20 +166,16 @@ impl HttpResponse<'_> {
 
         // Content-Length header if body is present and not already specified
         let body_bytes = self.body.as_bytes();
-        if !has_content_length && !body_bytes.is_empty() {
-            push_slice(&mut bytes, CONTENT_LENGTH.as_bytes())?;
-            push_slice(&mut bytes, HEADER_SEPARATOR.as_bytes())?;
-            write_decimal_to_buffer(&mut bytes, body_bytes.len())?;
-            push_slice(&mut bytes, CRLF)?;
+        if include_auto_content_length && !has_content_length && !body_bytes.is_empty() {
+            push_slice(bytes, CONTENT_LENGTH.as_bytes())?;
+            push_slice(bytes, HEADER_SEPARATOR.as_bytes())?;
+            write_decimal_to_buffer(bytes, body_bytes.len())?;
+            push_slice(bytes, CRLF)?;
         }
 
         // End of headers
-        push_slice(&mut bytes, CRLF)?;
-
-        // Body
-        push_slice(&mut bytes, body_bytes)?;
-
-        Ok(bytes)
+        push_slice(bytes, CRLF)?;
+        Ok(())
     }
 }
 
@@ -323,6 +345,30 @@ mod tests {
         // Check that content-length is correct
         let response_str = core::str::from_utf8(&bytes[..bytes.len() - binary_data.len()]).unwrap();
         assert!(response_str.contains("Content-Length: 4\r\n"));
+    }
+
+    #[test]
+    fn test_build_head_bytes_omits_body_and_auto_content_length() {
+        let mut headers = Vec::new();
+        let _ = headers.push(HttpHeader::event_stream());
+        let _ = headers.push(HttpHeader::cache_control("no-cache"));
+        let _ = headers.push(HttpHeader::connection("keep-alive"));
+
+        let response = HttpResponse {
+            status_code: StatusCode::Ok,
+            headers,
+            body: ResponseBody::Text("event: ping\ndata: hello\n\n"),
+        };
+
+        let bytes = response.build_head_bytes::<4096>().unwrap();
+        let response_str = core::str::from_utf8(&bytes).unwrap();
+
+        assert!(response_str.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response_str.contains("Content-Type: text/event-stream\r\n"));
+        assert!(response_str.contains("Cache-Control: no-cache\r\n"));
+        assert!(response_str.contains("Connection: keep-alive\r\n"));
+        assert!(!response_str.contains("Content-Length"));
+        assert!(response_str.ends_with("\r\n\r\n"));
     }
 
     #[test]
