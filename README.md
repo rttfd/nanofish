@@ -21,6 +21,7 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 - **HTTP Server** - Built-in async server with customizable timeouts and request handling
 - **Smart Response Parsing** - Automatic text/binary detection based on Content-Type headers
 - **Easy Header Management** - Pre-defined constants and helper methods for common headers
+- **SSE-Friendly Headers** - `text/event-stream`, `Cache-Control`, and `Connection` helpers for streaming endpoints
 - **Optional TLS Support** - HTTPS client support with embedded-tls when enabled (server is HTTP-only)
 - **Optional Logging** - Choose between `defmt` or `log` for diagnostics, or disable both for zero overhead
 - **Timeout & Retry Support** - Built-in handling for network issues
@@ -32,24 +33,24 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 ### Basic HTTP Support (Default)
 ```toml
 [dependencies]
-nanofish = "0.11.6"
+nanofish = "0.11.7"
 ```
 
 ### With TLS/HTTPS Support
 ```toml
 [dependencies]
-nanofish = { version = "0.11.6", features = ["tls"] }
+nanofish = { version = "0.11.7", features = ["tls"] }
 ```
 
 ### With Logging
 ```toml
 # Using defmt (common in embedded/probe-based workflows)
 [dependencies]
-nanofish = { version = "0.11.6", features = ["defmt"] }
+nanofish = { version = "0.11.7", features = ["defmt"] }
 
 # Using the log crate (common in std or defmt-incompatible environments)
 [dependencies]
-nanofish = { version = "0.11.6", features = ["log"] }
+nanofish = { version = "0.11.7", features = ["log"] }
 ```
 
 > **Note:** The `defmt` and `log` features are **mutually exclusive**. Enabling both will produce a compile-time error. If neither is enabled, all logging calls are compiled away to no-ops.
@@ -99,7 +100,7 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
     let client = DefaultHttpClient::new(stack);
     let mut response_buffer = [0u8; 8192];
     let headers = [
-        HttpHeader::user_agent("Nanofish/0.11.6"),
+        HttpHeader::user_agent("Nanofish/0.11.7"),
         HttpHeader::content_type(mime_types::JSON),
         HttpHeader::authorization("Bearer token123"),
     ];
@@ -332,6 +333,8 @@ for url in urls {
 
 Nanofish includes a built-in HTTP server perfect for embedded systems and `IoT` devices. The server is async, lightweight, and has customizable timeouts.
 
+For streaming endpoints such as server-sent events, use the `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and `Connection: keep-alive` helpers, plus the response head builder when you need to send headers before the body stream starts.
+
 > **Important Note**: The server only supports plain HTTP connections, not HTTPS/TLS. While the Nanofish client supports both HTTP and HTTPS, the server implementation is HTTP-only. For secure connections in production, use a reverse proxy (like nginx) or load balancer that handles TLS termination.
 
 ### Basic Server Usage
@@ -344,7 +347,7 @@ use embassy_net::Stack;
 struct MyHandler;
 
 impl HttpHandler for MyHandler {
-    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, nanofish::Error> {
+    async fn handle_request(&self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, nanofish::Error> {
         match request.path {
             "/" => Ok(HttpResponse {
                 status_code: StatusCode::Ok,

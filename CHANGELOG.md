@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.7] - 2026-06-01
+
+### Added
+
+- SSE-friendly header helpers for `text/event-stream`, `Cache-Control`, and `Connection`.
+- `HttpResponse::build_head_bytes` for header-only responses, which makes streaming endpoints easier to wire up in embedded handlers.
+
+### Changed
+
+- Updated the README to call out the HTTP server path for embedded APIs such as Puck.
+
+
 ## [0.11.6] - 2026-05-27
 
 ### Added
@@ -229,7 +241,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, and CONNECT methods.
 - Configurable client options (retries, timeouts, delays).
 
-[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.11.6...HEAD
+[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.11.7...HEAD
+[0.11.7]: https://github.com/rttfd/nanofish/compare/v0.11.6...v0.11.7
 [0.11.6]: https://github.com/rttfd/nanofish/compare/v0.11.5...v0.11.6
 [0.11.5]: https://github.com/rttfd/nanofish/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/rttfd/nanofish/compare/v0.11.3...v0.11.4
