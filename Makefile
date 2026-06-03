@@ -27,6 +27,11 @@ RUST_VERSION := $(shell grep 'rust-version = ' Cargo.toml | head -1 | sed 's/.*r
 
 FEATURES ?=
 
+.PHONY: install-hooks
+install-hooks: ## Install git hooks (prevents direct push to main)
+	git config core.hooksPath .githooks
+	@echo "Git hooks installed from .githooks/"
+
 .PHONY: install-rust
 install-rust: ## Install Rust toolchain with required components
 	rustup toolchain install $(RUST_VERSION)
