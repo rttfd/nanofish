@@ -33,24 +33,24 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 ### Basic HTTP Support (Default)
 ```toml
 [dependencies]
-nanofish = "0.11.7"
+nanofish = "0.11.8"
 ```
 
 ### With TLS/HTTPS Support
 ```toml
 [dependencies]
-nanofish = { version = "0.11.7", features = ["tls"] }
+nanofish = { version = "0.11.8", features = ["tls"] }
 ```
 
 ### With Logging
 ```toml
 # Using defmt (common in embedded/probe-based workflows)
 [dependencies]
-nanofish = { version = "0.11.7", features = ["defmt"] }
+nanofish = { version = "0.11.8", features = ["defmt"] }
 
 # Using the log crate (common in std or defmt-incompatible environments)
 [dependencies]
-nanofish = { version = "0.11.7", features = ["log"] }
+nanofish = { version = "0.11.8", features = ["log"] }
 ```
 
 > **Note:** The `defmt` and `log` features are **mutually exclusive**. Enabling both will produce a compile-time error. If neither is enabled, all logging calls are compiled away to no-ops.
@@ -100,7 +100,7 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
     let client = DefaultHttpClient::new(stack);
     let mut response_buffer = [0u8; 8192];
     let headers = [
-        HttpHeader::user_agent("Nanofish/0.11.7"),
+        HttpHeader::user_agent("Nanofish/0.11.8"),
         HttpHeader::content_type(mime_types::JSON),
         HttpHeader::authorization("Bearer token123"),
     ];
@@ -376,6 +376,36 @@ async fn run_server(stack: Stack<'_>) -> Result<(), nanofish::Error> {
     server.serve(stack, handler).await;
 }
 ```
+
+### Response Convenience Constructors
+
+Nanofish provides associated functions on `HttpResponse` for the most common response patterns, so you don't have to manually build headers for every endpoint:
+
+```rust,ignore
+use nanofish::{HttpResponse, HttpHandler, HttpRequest};
+
+struct ApiHandler;
+
+impl HttpHandler for ApiHandler {
+    async fn handle_request(&self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, nanofish::Error> {
+        match request.path {
+            "/api/health" => HttpResponse::json(r#"{"status":"ok"}"#),
+            "/"           => HttpResponse::text("Hello from nanofish!"),
+            "/bad"        => HttpResponse::bad_request("missing parameter"),
+            _             => HttpResponse::not_found(),
+        }
+    }
+}
+```
+
+| Constructor | Status | Content-Type | Use case |
+|-------------|--------|--------------|----------|
+| `HttpResponse::json(body)` | 200 OK | `application/json` | API endpoints |
+| `HttpResponse::text(body)` | 200 OK | `text/plain` | Simple text responses |
+| `HttpResponse::not_found()` | 404 | `text/plain` | Missing resources |
+| `HttpResponse::bad_request(body)` | 400 | `text/plain` | Invalid input |
+
+All constructors return `Result<HttpResponse<'_>, Error>` and will fail with `Error::BufferOverflow` only if the headers vector (capacity `MAX_HEADERS = 16`) is exhausted.
 
 ### Server Memory Configuration
 

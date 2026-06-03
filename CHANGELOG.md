@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.8] - 2026-06-03
+
+### Added
+
+- Convenience constructors on `HttpResponse` for common response patterns:
+  - `HttpResponse::json(body)` — 200 OK with `Content-Type: application/json`
+  - `HttpResponse::text(body)` — 200 OK with `Content-Type: text/plain`
+  - `HttpResponse::not_found()` — 404 Not Found with `Content-Type: text/plain`
+  - `HttpResponse::bad_request(body)` — 400 Bad Request with `Content-Type: text/plain`
+
 ## [0.11.7] - 2026-06-01
 
 ### Added
