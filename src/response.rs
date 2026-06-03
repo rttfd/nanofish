@@ -2,6 +2,7 @@ use crate::{
     HttpHeader, StatusCode,
     error::Error,
     header::headers::{CONTENT_LENGTH, CONTENT_TYPE},
+    header::mime_types,
     protocol::{CRLF, HEADER_SEPARATOR, HTTP_VERSION_PREFIX, MAX_HEADERS},
 };
 use heapless::Vec;
@@ -73,7 +74,7 @@ pub struct HttpResponse<'a> {
     pub body: ResponseBody<'a>,
 }
 
-impl HttpResponse<'_> {
+impl<'a> HttpResponse<'a> {
     /// Get a header value by name (case-insensitive)
     #[must_use]
     pub fn get_header(&self, name: &str) -> Option<&str> {
@@ -111,6 +112,74 @@ impl HttpResponse<'_> {
     #[must_use]
     pub fn is_server_error(&self) -> bool {
         self.status_code.is_server_error()
+    }
+
+    /// Create a 200 OK JSON response.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferOverflow` if the headers buffer is full.
+    pub fn json(body: &'a str) -> Result<Self, Error> {
+        let mut headers = Vec::new();
+        headers
+            .push(HttpHeader::content_type(mime_types::JSON))
+            .map_err(|_| Error::BufferOverflow)?;
+        Ok(Self {
+            status_code: StatusCode::Ok,
+            headers,
+            body: ResponseBody::Text(body),
+        })
+    }
+
+    /// Create a 200 OK plain-text response.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferOverflow` if the headers buffer is full.
+    pub fn text(body: &'a str) -> Result<Self, Error> {
+        let mut headers = Vec::new();
+        headers
+            .push(HttpHeader::content_type(mime_types::TEXT))
+            .map_err(|_| Error::BufferOverflow)?;
+        Ok(Self {
+            status_code: StatusCode::Ok,
+            headers,
+            body: ResponseBody::Text(body),
+        })
+    }
+
+    /// Create a 404 Not Found plain-text response.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferOverflow` if the headers buffer is full.
+    pub fn not_found() -> Result<Self, Error> {
+        let mut headers = Vec::new();
+        headers
+            .push(HttpHeader::content_type(mime_types::TEXT))
+            .map_err(|_| Error::BufferOverflow)?;
+        Ok(Self {
+            status_code: StatusCode::NotFound,
+            headers,
+            body: ResponseBody::Text("Not Found"),
+        })
+    }
+
+    /// Create a 400 Bad Request plain-text response.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferOverflow` if the headers buffer is full.
+    pub fn bad_request(body: &'a str) -> Result<Self, Error> {
+        let mut headers = Vec::new();
+        headers
+            .push(HttpHeader::content_type(mime_types::TEXT))
+            .map_err(|_| Error::BufferOverflow)?;
+        Ok(Self {
+            status_code: StatusCode::BadRequest,
+            headers,
+            body: ResponseBody::Text(body),
+        })
     }
 
     /// Build HTTP response bytes from this `HttpResponse`
