@@ -1,0 +1,25 @@
+name: "Branch Naming"
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  check-branch-name:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check branch name
+        run: |
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
+          echo "Checking branch: $BRANCH"
+          if [[ "$BRANCH" =~ ^(feat|fix|chore|docs|refactor|test|release)/.+$ ]]; then
+            echo "Branch name is valid"
+          else
+            echo "Error: Branch name '$BRANCH' does not match required pattern"
+            echo "Expected format: <type>/<short-description>"
+            echo "Allowed types: feat, fix, chore, docs, refactor, test, release"
+            exit 1
+          fi

@@ -1,0 +1,17 @@
+#!/bin/sh
+# Pre-push hook: prevents direct pushes to main
+
+protected_branch="main"
+current_branch=$(git symbolic-ref --short HEAD)
+
+if [ "$current_branch" = "$protected_branch" ]; then
+    echo "Error: direct push to '$protected_branch' is not allowed."
+    echo "Create a feature branch and open a pull request instead."
+    echo ""
+    echo "  git checkout -b feat/your-change"
+    echo "  git push origin feat/your-change"
+    echo "  gh pr create --base main"
+    exit 1
+fi
+
+exit 0
