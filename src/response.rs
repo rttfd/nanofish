@@ -190,30 +190,29 @@ impl HttpResponse<'_> {
 /// // JSON success response
 /// let response = HttpResponseBuilder::new()
 ///     .status(StatusCode::Ok)
-///     .content_type(mime_types::JSON)
-///     .text(r#"{"status":"ok"}"#)
-///     .build()?;
+///     .json(r#"{"status":"ok"}"#)?;
 ///
 /// // JSON error response (RFC 7807 Problem Details)
 /// let response = HttpResponseBuilder::new()
 ///     .status(StatusCode::BadRequest)
-///     .content_type(mime_types::PROBLEM_JSON)
-///     .text(r#"{"type":"https://example.com/probs/invalid","title":"Invalid parameter"}"#)
-///     .header(headers::CACHE_CONTROL, "no-cache")
-///     .build()?;
+///     .problem_json(r#"{"type":"https://example.com/probs/invalid","title":"Invalid parameter"}"#)?;
+///
+/// // Plain text with custom Content-Type
+/// let response = HttpResponseBuilder::new()
+///     .status(StatusCode::NotFound)
+///     .content_type(mime_types::TEXT)?
+///     .text("Not Found");
 ///
 /// // Binary response
 /// let response = HttpResponseBuilder::new()
 ///     .status(StatusCode::Ok)
-///     .content_type(mime_types::BINARY)
-///     .binary(&[0x00, 0x01, 0x02])
-///     .build()?;
+///     .content_type(mime_types::BINARY)?
+///     .binary(&[0x00, 0x01, 0x02]);
 /// ```
 pub struct HttpResponseBuilder<'a> {
     status: StatusCode,
     headers: Vec<HttpHeader<'a>, MAX_HEADERS>,
     body: Option<ResponseBody<'a>>,
-    auto_content_type: bool,
 }
 
 impl<'a> HttpResponseBuilder<'a> {
@@ -224,7 +223,6 @@ impl<'a> HttpResponseBuilder<'a> {
             status: StatusCode::Ok,
             headers: Vec::new(),
             body: None,
-            auto_content_type: true,
         }
     }
 
@@ -235,7 +233,6 @@ impl<'a> HttpResponseBuilder<'a> {
             status,
             headers: Vec::new(),
             body: None,
-            auto_content_type: true,
         }
     }
 
@@ -281,18 +278,43 @@ impl<'a> HttpResponseBuilder<'a> {
         self.headers
             .push(HttpHeader::content_type(ct))
             .map_err(|_| Error::BufferOverflow)?;
-        self.auto_content_type = false;
         Ok(self)
     }
 
-    /// Set text body (auto-sets Content-Type: text/plain if not already set)
+    /// Set JSON body with `Content-Type: application/json`
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferOverflow` if headers buffer is full.
+    pub fn json(mut self, body: &'a str) -> Result<Self, Error> {
+        self.headers
+            .push(HttpHeader::content_type(mime_types::JSON))
+            .map_err(|_| Error::BufferOverflow)?;
+        self.body = Some(ResponseBody::Text(body));
+        Ok(self)
+    }
+
+    /// Set JSON body with `Content-Type: application/problem+json` (RFC 7807)
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferOverflow` if headers buffer is full.
+    pub fn problem_json(mut self, body: &'a str) -> Result<Self, Error> {
+        self.headers
+            .push(HttpHeader::content_type(mime_types::PROBLEM_JSON))
+            .map_err(|_| Error::BufferOverflow)?;
+        self.body = Some(ResponseBody::Text(body));
+        Ok(self)
+    }
+
+    /// Set text body
     #[must_use]
     pub const fn text(mut self, body: &'a str) -> Self {
         self.body = Some(ResponseBody::Text(body));
         self
     }
 
-    /// Set binary body (caller should set Content-Type via `content_type()`)
+    /// Set binary body
     #[must_use]
     pub const fn binary(mut self, body: &'a [u8]) -> Self {
         self.body = Some(ResponseBody::Binary(body));
@@ -307,28 +329,13 @@ impl<'a> HttpResponseBuilder<'a> {
     }
 
     /// Construct the final `HttpResponse`
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::BufferOverflow` if headers buffer is full.
-    #[allow(clippy::unnested_or_patterns)]
-    pub fn build(mut self) -> Result<HttpResponse<'a>, Error> {
-        // Auto-add Content-Type based on body type if not already set
-        if self.auto_content_type {
-            let ct = match &self.body {
-                Some(ResponseBody::Binary(_)) => mime_types::BINARY,
-                Some(ResponseBody::Text(_)) | Some(ResponseBody::Empty) | None => mime_types::TEXT,
-            };
-            self.headers
-                .push(HttpHeader::content_type(ct))
-                .map_err(|_| Error::BufferOverflow)?;
-        }
-
-        Ok(HttpResponse {
+    #[must_use]
+    pub fn build(self) -> HttpResponse<'a> {
+        HttpResponse {
             status_code: self.status,
             headers: self.headers,
             body: self.body.unwrap_or(ResponseBody::Empty),
-        })
+        }
     }
 }
 
@@ -615,31 +622,26 @@ mod tests {
 
     #[test]
     fn test_builder_default_ok_empty() {
-        let response = HttpResponseBuilder::new().build().unwrap();
+        let response = HttpResponseBuilder::new().build();
         assert_eq!(response.status_code, StatusCode::Ok);
         assert_eq!(response.body, ResponseBody::Empty);
-        assert_eq!(response.get_header("Content-Type"), Some("text/plain"));
     }
 
     #[test]
-    fn test_builder_text_success() {
+    fn test_builder_text() {
         let response = HttpResponseBuilder::new()
             .text(r#"{"status":"ok"}"#)
-            .build()
-            .unwrap();
+            .build();
         assert_eq!(response.status_code, StatusCode::Ok);
         assert_eq!(response.body, ResponseBody::Text(r#"{"status":"ok"}"#));
-        assert_eq!(response.get_header("Content-Type"), Some("text/plain"));
     }
 
     #[test]
-    fn test_builder_json_with_explicit_content_type() {
+    fn test_builder_json() {
         let response = HttpResponseBuilder::new()
-            .content_type(mime_types::JSON)
+            .json(r#"{"status":"ok"}"#)
             .unwrap()
-            .text(r#"{"status":"ok"}"#)
-            .build()
-            .unwrap();
+            .build();
         assert_eq!(response.status_code, StatusCode::Ok);
         assert_eq!(
             response.get_header("Content-Type"),
@@ -648,14 +650,14 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_rfc7807_problem_details() {
+    fn test_builder_problem_json() {
         let response = HttpResponseBuilder::new()
             .status(StatusCode::BadRequest)
-            .content_type(mime_types::PROBLEM_JSON)
+            .problem_json(
+                r#"{"type":"https://example.com/probs/invalid","title":"Invalid parameter"}"#,
+            )
             .unwrap()
-            .text(r#"{"type":"https://example.com/probs/invalid","title":"Invalid parameter"}"#)
-            .build()
-            .unwrap();
+            .build();
         assert_eq!(response.status_code, StatusCode::BadRequest);
         assert_eq!(
             response.get_header("Content-Type"),
@@ -664,12 +666,13 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_text() {
+    fn test_builder_text_with_content_type() {
         let response = HttpResponseBuilder::new()
             .status(StatusCode::NotFound)
+            .content_type(mime_types::TEXT)
+            .unwrap()
             .text("Not Found")
-            .build()
-            .unwrap();
+            .build();
         assert_eq!(response.status_code, StatusCode::NotFound);
         assert_eq!(response.body, ResponseBody::Text("Not Found"));
         assert_eq!(response.get_header("Content-Type"), Some("text/plain"));
@@ -682,8 +685,7 @@ mod tests {
             .content_type(mime_types::BINARY)
             .unwrap()
             .binary(data)
-            .build()
-            .unwrap();
+            .build();
         assert_eq!(response.status_code, StatusCode::Ok);
         assert_eq!(response.body, ResponseBody::Binary(data));
         assert_eq!(
@@ -700,8 +702,7 @@ mod tests {
             .header(headers::CACHE_CONTROL, "no-cache")
             .unwrap()
             .text("ok")
-            .build()
-            .unwrap();
+            .build();
         assert_eq!(response.get_header("X-Custom-Header"), Some("custom-value"));
         assert_eq!(response.get_header("Cache-Control"), Some("no-cache"));
     }
@@ -710,8 +711,7 @@ mod tests {
     fn test_builder_status_override() {
         let response = HttpResponseBuilder::with_status(StatusCode::Created)
             .text("Created")
-            .build()
-            .unwrap();
+            .build();
         assert_eq!(response.status_code, StatusCode::Created);
     }
 
@@ -720,8 +720,7 @@ mod tests {
         let response = HttpResponseBuilder::new()
             .status(StatusCode::NoContent)
             .empty_body()
-            .build()
-            .unwrap();
+            .build();
         assert_eq!(response.status_code, StatusCode::NoContent);
         assert_eq!(response.body, ResponseBody::Empty);
     }

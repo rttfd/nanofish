@@ -13,10 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `HttpResponseBuilder` with fluent API for flexible response construction:
   - Chainable methods: `status()`, `header()`, `headers()`, `content_type()`
-  - Smart body builders: `text()`, `binary()`, `empty_body()`
-  - Auto Content-Type detection based on body type (unless manually set)
-  - JSON is just text - use `.content_type(mime_types::JSON).text(body)`
-  - RFC 7807 Problem Details support via `mime_types::PROBLEM_JSON`
+  - Body methods: `text()`, `binary()`, `empty_body()`
+  - Shortcut methods: `json(body)` (sets `Content-Type: application/json` + text body), `problem_json(body)` (sets `Content-Type: application/problem+json` + text body for RFC 7807)
+  - `build()` returns `HttpResponse` (infallible — errors surface from `header`/`json`/etc calls)
 - `mime_types::PROBLEM_JSON` constant for RFC 7807 Problem Details for HTTP APIs
 
 ### Removed
@@ -36,24 +35,19 @@ HttpResponse::bad_request("missing parameter")    // ❌ hardcoded text/plain
 
 **After (builder):**
 ```rust,ignore
-// Success with JSON
-HttpResponseBuilder::new()
-    .content_type(mime_types::JSON)
-    .text(r#"{"status":"ok"}"#)
-    .build()?
+// JSON success
+HttpResponseBuilder::new().json(r#"{"status":"ok"}"#)?
 
-// RFC 7807 Problem Details (JSON error)
+// JSON error (RFC 7807)
 HttpResponseBuilder::new()
     .status(StatusCode::BadRequest)
-    .content_type(mime_types::PROBLEM_JSON)
-    .text(r#"{"type":"https://example.com/probs/invalid","title":"Invalid parameter"}"#)
-    .build()?
+    .problem_json(r#"{"type":"https://example.com/probs/invalid","title":"Invalid parameter"}"#)?
 
-// Simple text response (auto Content-Type: text/plain)
+// Text with custom Content-Type
 HttpResponseBuilder::new()
     .status(StatusCode::NotFound)
+    .content_type(mime_types::TEXT)?
     .text("Not Found")
-    .build()?
 ```
 
 ## [0.11.8] - YANKED (2026-06-03)
