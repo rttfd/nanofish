@@ -7,15 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.11.8] - 2026-06-03
+## [0.11.9] - TBD
 
 ### Added
 
-- Convenience constructors on `HttpResponse` for common response patterns:
-  - `HttpResponse::json(body)` — 200 OK with `Content-Type: application/json`
-  - `HttpResponse::text(body)` — 200 OK with `Content-Type: text/plain`
-  - `HttpResponse::not_found()` — 404 Not Found with `Content-Type: text/plain`
-  - `HttpResponse::bad_request(body)` — 400 Bad Request with `Content-Type: text/plain`
+- `HttpResponseBuilder` with fluent API for flexible response construction:
+  - `status(code)` — set HTTP status
+  - `header(name, value)` / `headers(&[hdr])` — add custom headers
+  - `content_type(ct)` — set Content-Type header
+  - `json(body)` — sets `Content-Type: application/json` + text body
+  - `problem_json(body)` — sets `Content-Type: application/problem+json` + text body (RFC 7807)
+  - `text(body)` / `binary(data)` / `empty_body()` — set body
+  - `build()` → `Result<HttpResponse>` — builds with header dedup (last value wins)
+- `mime_types::PROBLEM_JSON` constant for RFC 7807 Problem Details for HTTP APIs
+
+### Removed
+
+- ❌ **YANKED**: v0.11.8 convenience constructors (`json()`, `text()`, `not_found()`, `bad_request()`) - poorly designed, too opinionated
+  - `json()` was hardcoded to 200 OK (invalid for error responses)
+  - `bad_request()` was hardcoded to `text/plain` (invalid for RFC 7807 JSON errors)
+  - Not flexible enough for real-world API patterns
+
+### Migration Guide (from 0.11.8)
+
+**Before (removed):**
+```rust,ignore
+HttpResponse::json(r#"{"status":"ok"}"#)          // ❌ hardcoded 200
+HttpResponse::bad_request("missing parameter")    // ❌ hardcoded text/plain
+```
+
+**After (builder):**
+```rust,ignore
+// JSON success
+HttpResponseBuilder::new().json(r#"{"status":"ok"}"#)?.build()?
+
+// JSON error (RFC 7807)
+HttpResponseBuilder::new()
+    .status(StatusCode::BadRequest)
+    .problem_json(r#"{"type":"https://example.com/probs/invalid","title":"Invalid parameter"}"#)?
+    .build()?
+
+// Text with custom Content-Type
+HttpResponseBuilder::new()
+    .status(StatusCode::NotFound)
+    .content_type(mime_types::TEXT)?
+    .text("Not Found")
+    .build()?
+```
+
+## [0.11.8] - YANKED (2026-06-03)
+
+**Yanked due to poorly designed convenience constructors.** See v0.11.9 for replacement builder pattern.
 
 ## [0.11.7] - 2026-06-01
 

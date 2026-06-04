@@ -26,6 +26,8 @@ pub mod headers {
 pub mod mime_types {
     /// application/json
     pub const JSON: &str = "application/json";
+    /// application/problem+json (RFC 7807 Problem Details)
+    pub const PROBLEM_JSON: &str = "application/problem+json";
     /// application/xml
     pub const XML: &str = "application/xml";
     /// text/plain

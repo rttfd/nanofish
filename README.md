@@ -33,24 +33,24 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 ### Basic HTTP Support (Default)
 ```toml
 [dependencies]
-nanofish = "0.11.8"
+nanofish = "0.11.9"
 ```
 
 ### With TLS/HTTPS Support
 ```toml
 [dependencies]
-nanofish = { version = "0.11.8", features = ["tls"] }
+nanofish = { version = "0.11.9", features = ["tls"] }
 ```
 
 ### With Logging
 ```toml
 # Using defmt (common in embedded/probe-based workflows)
 [dependencies]
-nanofish = { version = "0.11.8", features = ["defmt"] }
+nanofish = { version = "0.11.9", features = ["defmt"] }
 
 # Using the log crate (common in std or defmt-incompatible environments)
 [dependencies]
-nanofish = { version = "0.11.8", features = ["log"] }
+nanofish = { version = "0.11.9", features = ["log"] }
 ```
 
 > **Note:** The `defmt` and `log` features are **mutually exclusive**. Enabling both will produce a compile-time error. If neither is enabled, all logging calls are compiled away to no-ops.
@@ -100,7 +100,7 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
     let client = DefaultHttpClient::new(stack);
     let mut response_buffer = [0u8; 8192];
     let headers = [
-        HttpHeader::user_agent("Nanofish/0.11.8"),
+        HttpHeader::user_agent("Nanofish/0.11.9"),
         HttpHeader::content_type(mime_types::JSON),
         HttpHeader::authorization("Bearer token123"),
     ];
@@ -377,35 +377,48 @@ async fn run_server(stack: Stack<'_>) -> Result<(), nanofish::Error> {
 }
 ```
 
-### Response Convenience Constructors
+### Response Builder
 
-Nanofish provides associated functions on `HttpResponse` for the most common response patterns, so you don't have to manually build headers for every endpoint:
+Use `HttpResponseBuilder` to construct responses with a fluent API:
 
 ```rust,ignore
-use nanofish::{HttpResponse, HttpHandler, HttpRequest};
+use nanofish::{HttpResponseBuilder, HttpHandler, HttpRequest, StatusCode, mime_types};
 
 struct ApiHandler;
 
 impl HttpHandler for ApiHandler {
     async fn handle_request(&self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, nanofish::Error> {
         match request.path {
-            "/api/health" => HttpResponse::json(r#"{"status":"ok"}"#),
-            "/"           => HttpResponse::text("Hello from nanofish!"),
-            "/bad"        => HttpResponse::bad_request("missing parameter"),
-            _             => HttpResponse::not_found(),
+            "/api/health" => HttpResponseBuilder::new().json(r#"{"status":"ok"}"#)?.build()?,
+            "/"           => HttpResponseBuilder::new()
+                                .content_type(mime_types::TEXT)?
+                                .text("Hello from nanofish!")
+                                .build()?,
+            "/bad"        => HttpResponseBuilder::new()
+                                .status(StatusCode::BadRequest)
+                                .problem_json(r#"{"type":"https://example.com/probs/invalid","title":"Invalid parameter"}"#)?
+                                .build()?,
+            _             => HttpResponseBuilder::new()
+                                .status(StatusCode::NotFound)
+                                .content_type(mime_types::TEXT)?
+                                .text("Not Found")
+                                .build()?,
         }
     }
 }
 ```
 
-| Constructor | Status | Content-Type | Use case |
-|-------------|--------|--------------|----------|
-| `HttpResponse::json(body)` | 200 OK | `application/json` | API endpoints |
-| `HttpResponse::text(body)` | 200 OK | `text/plain` | Simple text responses |
-| `HttpResponse::not_found()` | 404 | `text/plain` | Missing resources |
-| `HttpResponse::bad_request(body)` | 400 | `text/plain` | Invalid input |
-
-All constructors return `Result<HttpResponse<'_>, Error>` and will fail with `Error::BufferOverflow` only if the headers vector (capacity `MAX_HEADERS = 16`) is exhausted.
+| Method | Description |
+|--------|-------------|
+| `status(code)` | Set HTTP status |
+| `content_type(ct)` | Set Content-Type header |
+| `json(body)` | Content-Type: application/json + text body |
+| `problem_json(body)` | Content-Type: application/problem+json + text body (RFC 7807) |
+| `text(body)` | Set text body |
+| `binary(data)` | Set binary body |
+| `empty_body()` | Set empty body |
+| `header(name, value)` | Add custom header |
+| `build()` → `Result<HttpResponse>` | Build with header dedup (last wins) |
 
 ### Server Memory Configuration
 
