@@ -329,13 +329,35 @@ impl<'a> HttpResponseBuilder<'a> {
     }
 
     /// Construct the final `HttpResponse`
-    #[must_use]
-    pub fn build(self) -> HttpResponse<'a> {
-        HttpResponse {
+    ///
+    /// Deduplicates headers by name — the last set value wins.
+    ///
+    /// # Errors
+    ///
+    /// Currently always returns `Ok`, but returns `Result` for future-proofing.
+    pub fn build(self) -> Result<HttpResponse<'a>, Error> {
+        let mut headers = self.headers;
+        // Deduplicate: keep last occurrence of each header name
+        headers = headers.into_iter().rev().fold(
+            Vec::new(),
+            |mut acc: Vec<HttpHeader<'a>, MAX_HEADERS>, h| {
+                if !acc
+                    .iter()
+                    .any(|existing| existing.name.eq_ignore_ascii_case(h.name))
+                {
+                    let _ = acc.push(h);
+                }
+                acc
+            },
+        );
+        // Restore original order
+        headers.reverse();
+
+        Ok(HttpResponse {
             status_code: self.status,
-            headers: self.headers,
+            headers,
             body: self.body.unwrap_or(ResponseBody::Empty),
-        }
+        })
     }
 }
 
@@ -622,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_builder_default_ok_empty() {
-        let response = HttpResponseBuilder::new().build();
+        let response = HttpResponseBuilder::new().build().unwrap();
         assert_eq!(response.status_code, StatusCode::Ok);
         assert_eq!(response.body, ResponseBody::Empty);
     }
@@ -631,7 +653,8 @@ mod tests {
     fn test_builder_text() {
         let response = HttpResponseBuilder::new()
             .text(r#"{"status":"ok"}"#)
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(response.status_code, StatusCode::Ok);
         assert_eq!(response.body, ResponseBody::Text(r#"{"status":"ok"}"#));
     }
@@ -641,7 +664,8 @@ mod tests {
         let response = HttpResponseBuilder::new()
             .json(r#"{"status":"ok"}"#)
             .unwrap()
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(response.status_code, StatusCode::Ok);
         assert_eq!(
             response.get_header("Content-Type"),
@@ -657,7 +681,8 @@ mod tests {
                 r#"{"type":"https://example.com/probs/invalid","title":"Invalid parameter"}"#,
             )
             .unwrap()
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(response.status_code, StatusCode::BadRequest);
         assert_eq!(
             response.get_header("Content-Type"),
@@ -672,7 +697,8 @@ mod tests {
             .content_type(mime_types::TEXT)
             .unwrap()
             .text("Not Found")
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(response.status_code, StatusCode::NotFound);
         assert_eq!(response.body, ResponseBody::Text("Not Found"));
         assert_eq!(response.get_header("Content-Type"), Some("text/plain"));
@@ -685,7 +711,8 @@ mod tests {
             .content_type(mime_types::BINARY)
             .unwrap()
             .binary(data)
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(response.status_code, StatusCode::Ok);
         assert_eq!(response.body, ResponseBody::Binary(data));
         assert_eq!(
@@ -702,7 +729,8 @@ mod tests {
             .header(headers::CACHE_CONTROL, "no-cache")
             .unwrap()
             .text("ok")
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(response.get_header("X-Custom-Header"), Some("custom-value"));
         assert_eq!(response.get_header("Cache-Control"), Some("no-cache"));
     }
@@ -711,7 +739,8 @@ mod tests {
     fn test_builder_status_override() {
         let response = HttpResponseBuilder::with_status(StatusCode::Created)
             .text("Created")
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(response.status_code, StatusCode::Created);
     }
 
@@ -720,8 +749,32 @@ mod tests {
         let response = HttpResponseBuilder::new()
             .status(StatusCode::NoContent)
             .empty_body()
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(response.status_code, StatusCode::NoContent);
         assert_eq!(response.body, ResponseBody::Empty);
+    }
+
+    #[test]
+    fn test_builder_deduplicates_headers() {
+        let response = HttpResponseBuilder::new()
+            .content_type(mime_types::TEXT)
+            .unwrap()
+            .content_type(mime_types::JSON)
+            .unwrap()
+            .text("ok")
+            .build()
+            .unwrap();
+        assert_eq!(
+            response.get_header("Content-Type"),
+            Some("application/json")
+        );
+        // Only one Content-Type header
+        let ct_count = response
+            .headers
+            .iter()
+            .filter(|h| h.name.eq_ignore_ascii_case("Content-Type"))
+            .count();
+        assert_eq!(ct_count, 1);
     }
 }
