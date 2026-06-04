@@ -8,7 +8,7 @@ use crate::{
 use heapless::Vec;
 
 /// HTTP Response body that can handle both text and binary data using zero-copy references
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub enum ResponseBody<'a> {
     /// Text content (UTF-8 encoded) - borrowed from the response buffer
     Text(&'a str),
@@ -74,7 +74,7 @@ pub struct HttpResponse<'a> {
     pub body: ResponseBody<'a>,
 }
 
-impl<'a> HttpResponse<'a> {
+impl HttpResponse<'_> {
     /// Get a header value by name (case-insensitive)
     #[must_use]
     pub fn get_header(&self, name: &str) -> Option<&str> {
@@ -112,74 +112,6 @@ impl<'a> HttpResponse<'a> {
     #[must_use]
     pub fn is_server_error(&self) -> bool {
         self.status_code.is_server_error()
-    }
-
-    /// Create a 200 OK JSON response.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::BufferOverflow` if the headers buffer is full.
-    pub fn json(body: &'a str) -> Result<Self, Error> {
-        let mut headers = Vec::new();
-        headers
-            .push(HttpHeader::content_type(mime_types::JSON))
-            .map_err(|_| Error::BufferOverflow)?;
-        Ok(Self {
-            status_code: StatusCode::Ok,
-            headers,
-            body: ResponseBody::Text(body),
-        })
-    }
-
-    /// Create a 200 OK plain-text response.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::BufferOverflow` if the headers buffer is full.
-    pub fn text(body: &'a str) -> Result<Self, Error> {
-        let mut headers = Vec::new();
-        headers
-            .push(HttpHeader::content_type(mime_types::TEXT))
-            .map_err(|_| Error::BufferOverflow)?;
-        Ok(Self {
-            status_code: StatusCode::Ok,
-            headers,
-            body: ResponseBody::Text(body),
-        })
-    }
-
-    /// Create a 404 Not Found plain-text response.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::BufferOverflow` if the headers buffer is full.
-    pub fn not_found() -> Result<Self, Error> {
-        let mut headers = Vec::new();
-        headers
-            .push(HttpHeader::content_type(mime_types::TEXT))
-            .map_err(|_| Error::BufferOverflow)?;
-        Ok(Self {
-            status_code: StatusCode::NotFound,
-            headers,
-            body: ResponseBody::Text("Not Found"),
-        })
-    }
-
-    /// Create a 400 Bad Request plain-text response.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::BufferOverflow` if the headers buffer is full.
-    pub fn bad_request(body: &'a str) -> Result<Self, Error> {
-        let mut headers = Vec::new();
-        headers
-            .push(HttpHeader::content_type(mime_types::TEXT))
-            .map_err(|_| Error::BufferOverflow)?;
-        Ok(Self {
-            status_code: StatusCode::BadRequest,
-            headers,
-            body: ResponseBody::Text(body),
-        })
     }
 
     /// Build HTTP response bytes from this `HttpResponse`
@@ -248,6 +180,164 @@ impl<'a> HttpResponse<'a> {
     }
 }
 
+/// Builder for constructing HTTP responses with a fluent API
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use nanofish::{HttpResponse, HttpResponseBuilder, StatusCode, headers, mime_types};
+///
+/// // JSON success response
+/// let response = HttpResponseBuilder::new()
+///     .status(StatusCode::Ok)
+///     .content_type(mime_types::JSON)
+///     .text(r#"{"status":"ok"}"#)
+///     .build()?;
+///
+/// // JSON error response (RFC 7807 Problem Details)
+/// let response = HttpResponseBuilder::new()
+///     .status(StatusCode::BadRequest)
+///     .content_type(mime_types::PROBLEM_JSON)
+///     .text(r#"{"type":"https://example.com/probs/invalid","title":"Invalid parameter"}"#)
+///     .header(headers::CACHE_CONTROL, "no-cache")
+///     .build()?;
+///
+/// // Binary response
+/// let response = HttpResponseBuilder::new()
+///     .status(StatusCode::Ok)
+///     .content_type(mime_types::BINARY)
+///     .binary(&[0x00, 0x01, 0x02])
+///     .build()?;
+/// ```
+pub struct HttpResponseBuilder<'a> {
+    status: StatusCode,
+    headers: Vec<HttpHeader<'a>, MAX_HEADERS>,
+    body: Option<ResponseBody<'a>>,
+    auto_content_type: bool,
+}
+
+impl<'a> HttpResponseBuilder<'a> {
+    /// Create a new builder with default values (200 OK, no headers, empty body)
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            status: StatusCode::Ok,
+            headers: Vec::new(),
+            body: None,
+            auto_content_type: true,
+        }
+    }
+
+    /// Create a new builder with a specific status code
+    #[must_use]
+    pub const fn with_status(status: StatusCode) -> Self {
+        Self {
+            status,
+            headers: Vec::new(),
+            body: None,
+            auto_content_type: true,
+        }
+    }
+
+    /// Set the HTTP status code
+    #[must_use]
+    pub const fn status(mut self, status: StatusCode) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// Add a custom header
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferOverflow` if headers buffer is full.
+    pub fn header(mut self, name: &'a str, value: &'a str) -> Result<Self, Error> {
+        self.headers
+            .push(HttpHeader::new(name, value))
+            .map_err(|_| Error::BufferOverflow)?;
+        Ok(self)
+    }
+
+    /// Add multiple headers at once
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferOverflow` if headers buffer is full.
+    pub fn headers(mut self, headers: &[HttpHeader<'a>]) -> Result<Self, Error> {
+        for header in headers {
+            self.headers
+                .push(HttpHeader::new(header.name, header.value))
+                .map_err(|_| Error::BufferOverflow)?;
+        }
+        Ok(self)
+    }
+
+    /// Set Content-Type header
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferOverflow` if headers buffer is full.
+    pub fn content_type(mut self, ct: &'a str) -> Result<Self, Error> {
+        self.headers
+            .push(HttpHeader::content_type(ct))
+            .map_err(|_| Error::BufferOverflow)?;
+        self.auto_content_type = false;
+        Ok(self)
+    }
+
+    /// Set text body (auto-sets Content-Type: text/plain if not already set)
+    #[must_use]
+    pub const fn text(mut self, body: &'a str) -> Self {
+        self.body = Some(ResponseBody::Text(body));
+        self
+    }
+
+    /// Set binary body (caller should set Content-Type via `content_type()`)
+    #[must_use]
+    pub const fn binary(mut self, body: &'a [u8]) -> Self {
+        self.body = Some(ResponseBody::Binary(body));
+        self
+    }
+
+    /// Set empty body
+    #[must_use]
+    pub const fn empty_body(mut self) -> Self {
+        self.body = Some(ResponseBody::Empty);
+        self
+    }
+
+    /// Construct the final `HttpResponse`
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferOverflow` if headers buffer is full.
+    #[allow(clippy::unnested_or_patterns)]
+    pub fn build(mut self) -> Result<HttpResponse<'a>, Error> {
+        // Auto-add Content-Type based on body type if not already set
+        if self.auto_content_type {
+            let ct = match &self.body {
+                Some(ResponseBody::Binary(_)) => mime_types::BINARY,
+                Some(ResponseBody::Text(_)) | Some(ResponseBody::Empty) | None => mime_types::TEXT,
+            };
+            self.headers
+                .push(HttpHeader::content_type(ct))
+                .map_err(|_| Error::BufferOverflow)?;
+        }
+
+        Ok(HttpResponse {
+            status_code: self.status,
+            headers: self.headers,
+            body: self.body.unwrap_or(ResponseBody::Empty),
+        })
+    }
+}
+
+impl Default for HttpResponseBuilder<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Push a byte slice into the buffer, returning `BufferOverflow` on failure.
 fn push_slice<const N: usize>(bytes: &mut Vec<u8, N>, data: &[u8]) -> Result<(), Error> {
     bytes
@@ -297,7 +387,7 @@ fn write_decimal_to_buffer<const N: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::header::HttpHeader;
+    use crate::header::{HttpHeader, headers};
     use heapless::Vec;
 
     #[test]
@@ -521,5 +611,118 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_builder_default_ok_empty() {
+        let response = HttpResponseBuilder::new().build().unwrap();
+        assert_eq!(response.status_code, StatusCode::Ok);
+        assert_eq!(response.body, ResponseBody::Empty);
+        assert_eq!(response.get_header("Content-Type"), Some("text/plain"));
+    }
+
+    #[test]
+    fn test_builder_text_success() {
+        let response = HttpResponseBuilder::new()
+            .text(r#"{"status":"ok"}"#)
+            .build()
+            .unwrap();
+        assert_eq!(response.status_code, StatusCode::Ok);
+        assert_eq!(response.body, ResponseBody::Text(r#"{"status":"ok"}"#));
+        assert_eq!(response.get_header("Content-Type"), Some("text/plain"));
+    }
+
+    #[test]
+    fn test_builder_json_with_explicit_content_type() {
+        let response = HttpResponseBuilder::new()
+            .content_type(mime_types::JSON)
+            .unwrap()
+            .text(r#"{"status":"ok"}"#)
+            .build()
+            .unwrap();
+        assert_eq!(response.status_code, StatusCode::Ok);
+        assert_eq!(
+            response.get_header("Content-Type"),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn test_builder_rfc7807_problem_details() {
+        let response = HttpResponseBuilder::new()
+            .status(StatusCode::BadRequest)
+            .content_type(mime_types::PROBLEM_JSON)
+            .unwrap()
+            .text(r#"{"type":"https://example.com/probs/invalid","title":"Invalid parameter"}"#)
+            .build()
+            .unwrap();
+        assert_eq!(response.status_code, StatusCode::BadRequest);
+        assert_eq!(
+            response.get_header("Content-Type"),
+            Some("application/problem+json")
+        );
+    }
+
+    #[test]
+    fn test_builder_text() {
+        let response = HttpResponseBuilder::new()
+            .status(StatusCode::NotFound)
+            .text("Not Found")
+            .build()
+            .unwrap();
+        assert_eq!(response.status_code, StatusCode::NotFound);
+        assert_eq!(response.body, ResponseBody::Text("Not Found"));
+        assert_eq!(response.get_header("Content-Type"), Some("text/plain"));
+    }
+
+    #[test]
+    fn test_builder_binary() {
+        let data = &[0x00, 0x01, 0x02, 0x03];
+        let response = HttpResponseBuilder::new()
+            .content_type(mime_types::BINARY)
+            .unwrap()
+            .binary(data)
+            .build()
+            .unwrap();
+        assert_eq!(response.status_code, StatusCode::Ok);
+        assert_eq!(response.body, ResponseBody::Binary(data));
+        assert_eq!(
+            response.get_header("Content-Type"),
+            Some("application/octet-stream")
+        );
+    }
+
+    #[test]
+    fn test_builder_with_custom_headers() {
+        let response = HttpResponseBuilder::new()
+            .header("X-Custom-Header", "custom-value")
+            .unwrap()
+            .header(headers::CACHE_CONTROL, "no-cache")
+            .unwrap()
+            .text("ok")
+            .build()
+            .unwrap();
+        assert_eq!(response.get_header("X-Custom-Header"), Some("custom-value"));
+        assert_eq!(response.get_header("Cache-Control"), Some("no-cache"));
+    }
+
+    #[test]
+    fn test_builder_status_override() {
+        let response = HttpResponseBuilder::with_status(StatusCode::Created)
+            .text("Created")
+            .build()
+            .unwrap();
+        assert_eq!(response.status_code, StatusCode::Created);
+    }
+
+    #[test]
+    fn test_builder_empty_body() {
+        let response = HttpResponseBuilder::new()
+            .status(StatusCode::NoContent)
+            .empty_body()
+            .build()
+            .unwrap();
+        assert_eq!(response.status_code, StatusCode::NoContent);
+        assert_eq!(response.body, ResponseBody::Empty);
     }
 }

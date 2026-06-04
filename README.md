@@ -33,24 +33,24 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 ### Basic HTTP Support (Default)
 ```toml
 [dependencies]
-nanofish = "0.11.8"
+nanofish = "0.11.9"
 ```
 
 ### With TLS/HTTPS Support
 ```toml
 [dependencies]
-nanofish = { version = "0.11.8", features = ["tls"] }
+nanofish = { version = "0.11.9", features = ["tls"] }
 ```
 
 ### With Logging
 ```toml
 # Using defmt (common in embedded/probe-based workflows)
 [dependencies]
-nanofish = { version = "0.11.8", features = ["defmt"] }
+nanofish = { version = "0.11.9", features = ["defmt"] }
 
 # Using the log crate (common in std or defmt-incompatible environments)
 [dependencies]
-nanofish = { version = "0.11.8", features = ["log"] }
+nanofish = { version = "0.11.9", features = ["log"] }
 ```
 
 > **Note:** The `defmt` and `log` features are **mutually exclusive**. Enabling both will produce a compile-time error. If neither is enabled, all logging calls are compiled away to no-ops.
@@ -100,7 +100,7 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
     let client = DefaultHttpClient::new(stack);
     let mut response_buffer = [0u8; 8192];
     let headers = [
-        HttpHeader::user_agent("Nanofish/0.11.8"),
+        HttpHeader::user_agent("Nanofish/0.11.9"),
         HttpHeader::content_type(mime_types::JSON),
         HttpHeader::authorization("Bearer token123"),
     ];
