@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.11.9] - TBD
+## [0.11.9] - 2026-06-04
 
 ### Added
 
@@ -293,7 +293,9 @@ HttpResponseBuilder::new()
 - Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, and CONNECT methods.
 - Configurable client options (retries, timeouts, delays).
 
-[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.11.7...HEAD
+[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.11.9...HEAD
+[0.11.9]: https://github.com/rttfd/nanofish/compare/v0.11.8...v0.11.9
+[0.11.8]: https://github.com/rttfd/nanofish/compare/v0.11.7...v0.11.8
 [0.11.7]: https://github.com/rttfd/nanofish/compare/v0.11.6...v0.11.7
 [0.11.6]: https://github.com/rttfd/nanofish/compare/v0.11.5...v0.11.6
 [0.11.5]: https://github.com/rttfd/nanofish/compare/v0.11.4...v0.11.5
