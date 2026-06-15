@@ -91,7 +91,7 @@ impl<
     /// **Important**: This server only accepts plain HTTP connections.
     /// HTTPS/TLS is not supported by the server (only by the client).
     #[expect(clippy::future_not_send)]
-    pub async fn serve<H>(&mut self, stack: Stack<'_>, handler: H) -> !
+    pub async fn serve<H>(&mut self, stack: Stack<'_>, mut handler: H) -> !
     where
         H: HttpHandler,
     {
@@ -139,7 +139,10 @@ impl<
             }
 
             // Parse the request
-            match self.handle_connection(&buf[..total_read], &handler).await {
+            match self
+                .handle_connection(&buf[..total_read], &mut handler)
+                .await
+            {
                 Ok(response_bytes) => {
                     if let Err(e) = socket.write_all(&response_bytes).await {
                         warn!("Failed to write response: {:?}", e);
@@ -227,11 +230,10 @@ impl<
         resp.build_bytes::<MAX_RESPONSE_SIZE>()
     }
 
-    #[expect(clippy::future_not_send)]
     async fn handle_connection<H>(
         &self,
         buffer: &[u8],
-        handler: &H,
+        handler: &mut H,
     ) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error>
     where
         H: HttpHandler,

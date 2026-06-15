@@ -11,7 +11,10 @@ use heapless::Vec;
 #[allow(async_fn_in_trait)]
 pub trait HttpHandler {
     /// Handle an incoming HTTP request and return a response
-    async fn handle_request(&self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, Error>;
+    async fn handle_request(
+        &mut self,
+        request: &HttpRequest<'_>,
+    ) -> Result<HttpResponse<'_>, Error>;
 }
 
 /// A simple handler that serves basic endpoints for testing
@@ -19,7 +22,10 @@ pub trait HttpHandler {
 pub struct SimpleHandler;
 
 impl HttpHandler for SimpleHandler {
-    async fn handle_request(&self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, Error> {
+    async fn handle_request(
+        &mut self,
+        request: &HttpRequest<'_>,
+    ) -> Result<HttpResponse<'_>, Error> {
         let mut headers = Vec::new();
         match request.path {
             "/" => {
@@ -59,7 +65,7 @@ mod tests {
     #[test]
     fn test_simple_handler() {
         // Test root path
-        let handler = SimpleHandler;
+        let mut handler = SimpleHandler;
         let request = HttpRequest {
             method: HttpMethod::GET,
             path: "/",
@@ -76,7 +82,7 @@ mod tests {
         );
 
         // Test health endpoint
-        let handler = SimpleHandler;
+        let mut handler = SimpleHandler;
         let request = HttpRequest {
             method: HttpMethod::GET,
             path: "/health",
@@ -90,7 +96,7 @@ mod tests {
         assert_eq!(response.body.as_str(), Some("{\"status\":\"ok\"}"));
 
         // Test 404 path
-        let handler = SimpleHandler;
+        let mut handler = SimpleHandler;
         let request = HttpRequest {
             method: HttpMethod::GET,
             path: "/nonexistent",
