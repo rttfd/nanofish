@@ -33,24 +33,24 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 ### Basic HTTP Support (Default)
 ```toml
 [dependencies]
-nanofish = "0.11.9"
+nanofish = "0.12.0"
 ```
 
 ### With TLS/HTTPS Support
 ```toml
 [dependencies]
-nanofish = { version = "0.11.9", features = ["tls"] }
+nanofish = { version = "0.12.0", features = ["tls"] }
 ```
 
 ### With Logging
 ```toml
 # Using defmt (common in embedded/probe-based workflows)
 [dependencies]
-nanofish = { version = "0.11.9", features = ["defmt"] }
+nanofish = { version = "0.12.0", features = ["defmt"] }
 
 # Using the log crate (common in std or defmt-incompatible environments)
 [dependencies]
-nanofish = { version = "0.11.9", features = ["log"] }
+nanofish = { version = "0.12.0", features = ["log"] }
 ```
 
 > **Note:** The `defmt` and `log` features are **mutually exclusive**. Enabling both will produce a compile-time error. If neither is enabled, all logging calls are compiled away to no-ops.
@@ -100,7 +100,7 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
     let client = DefaultHttpClient::new(stack);
     let mut response_buffer = [0u8; 8192];
     let headers = [
-        HttpHeader::user_agent("Nanofish/0.11.9"),
+        HttpHeader::user_agent("Nanofish/0.12.0"),
         HttpHeader::content_type(mime_types::JSON),
         HttpHeader::authorization("Bearer token123"),
     ];
@@ -347,7 +347,7 @@ use embassy_net::Stack;
 struct MyHandler;
 
 impl HttpHandler for MyHandler {
-    async fn handle_request(&self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, nanofish::Error> {
+    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, nanofish::Error> {
         match request.path {
             "/" => Ok(HttpResponse {
                 status_code: StatusCode::Ok,
@@ -387,7 +387,7 @@ use nanofish::{HttpResponseBuilder, HttpHandler, HttpRequest, StatusCode, mime_t
 struct ApiHandler;
 
 impl HttpHandler for ApiHandler {
-    async fn handle_request(&self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, nanofish::Error> {
+    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, nanofish::Error> {
         match request.path {
             "/api/health" => HttpResponseBuilder::new().json(r#"{"status":"ok"}"#)?.build()?,
             "/"           => HttpResponseBuilder::new()
@@ -419,6 +419,53 @@ impl HttpHandler for ApiHandler {
 | `empty_body()` | Set empty body |
 | `header(name, value)` | Add custom header |
 | `build()` → `Result<HttpResponse>` | Build with header dedup (last wins) |
+
+### Dynamic Responses
+
+```rust,ignore
+use nanofish::{HttpHandler, HttpRequest, HttpResponse, ResponseBody, StatusCode, HttpHeader};
+use heapless::String;
+use core::fmt::Write;
+
+struct DynamicHandler {
+    buffer: String<128>,
+    counter: u32,
+}
+
+impl DynamicHandler {
+    fn new() -> Self {
+        Self { buffer: String::new(), counter: 0 }
+    }
+}
+
+impl HttpHandler for DynamicHandler {
+    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, nanofish::Error> {
+        match request.path {
+            "/api/counter" => {
+                self.counter += 1;
+                self.buffer.clear();
+                let _ = write!(self.buffer, "{{\"count\":{}}}", self.counter);
+
+                let mut headers = heapless::Vec::new();
+                let _ = headers.push(HttpHeader::content_type(nanofish::mime_types::JSON));
+
+                Ok(HttpResponse {
+                    status_code: StatusCode::Ok,
+                    headers,
+                    body: ResponseBody::Text(&self.buffer),
+                })
+            }
+            _ => {
+                Ok(HttpResponse {
+                    status_code: StatusCode::NotFound,
+                    headers: heapless::Vec::new(),
+                    body: ResponseBody::Empty,
+                })
+            }
+        }
+    }
+}
+```
 
 ### Server Memory Configuration
 
