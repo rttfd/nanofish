@@ -25,6 +25,8 @@ use heapless::{String, Vec};
 const DEFAULT_REQUEST_SIZE: usize = 1024;
 const DEFAULT_SERVER_REQUEST_SIZE: usize = 4096;
 const DEFAULT_SERVER_RESPONSE_SIZE: usize = 4096;
+const SMALL_SERVER_REQUEST_SIZE: usize = 1024;
+const SMALL_SERVER_RESPONSE_SIZE: usize = 1024;
 
 macro_rules! try_push {
     ($expr:expr) => {
@@ -188,6 +190,72 @@ impl Default for HttpIoClient<DEFAULT_REQUEST_SIZE> {
         Self::new()
     }
 }
+
+/// Type alias for `HttpIoClient` with the default request buffer size.
+pub type DefaultHttpIoClient = HttpIoClient<DEFAULT_REQUEST_SIZE>;
+
+/// Type alias for `HttpIoClient` with a smaller request buffer size.
+pub type SmallHttpIoClient = HttpIoClient<SMALL_SERVER_REQUEST_SIZE>;
+
+/// Transport-generic HTTP server for already-accepted streams.
+///
+/// This is the non-Embassy counterpart to the Embassy-backed server. It handles
+/// one request/response cycle per call and leaves accept loops, timeouts, and
+/// connection lifecycle to the caller.
+pub struct HttpIoServer<
+    const REQ_SIZE: usize = DEFAULT_SERVER_REQUEST_SIZE,
+    const MAX_RESPONSE_SIZE: usize = DEFAULT_SERVER_RESPONSE_SIZE,
+>;
+
+impl HttpIoServer<DEFAULT_SERVER_REQUEST_SIZE, DEFAULT_SERVER_RESPONSE_SIZE> {
+    /// Create a new transport-generic server with default buffer sizes.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl<const REQ_SIZE: usize, const MAX_RESPONSE_SIZE: usize>
+    HttpIoServer<REQ_SIZE, MAX_RESPONSE_SIZE>
+{
+    /// Create a new transport-generic server with custom buffer sizes.
+    #[must_use]
+    pub const fn with_buffer_sizes() -> Self {
+        Self
+    }
+
+    /// Handle one request/response cycle over an already-accepted stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if stream IO fails, request parsing fails, handler execution
+    /// fails, or response serialization exceeds the configured response buffer.
+    pub async fn handle_connection<S, H>(
+        &self,
+        stream: &mut S,
+        handler: &mut H,
+    ) -> Result<(), Error>
+    where
+        S: Read + Write,
+        H: HttpHandler,
+    {
+        handle_http_connection_with_sizes::<S, H, REQ_SIZE, MAX_RESPONSE_SIZE>(stream, handler)
+            .await
+    }
+}
+
+impl Default for HttpIoServer<DEFAULT_SERVER_REQUEST_SIZE, DEFAULT_SERVER_RESPONSE_SIZE> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Type alias for `HttpIoServer` with default request and response buffer sizes.
+pub type DefaultHttpIoServer =
+    HttpIoServer<DEFAULT_SERVER_REQUEST_SIZE, DEFAULT_SERVER_RESPONSE_SIZE>;
+
+/// Type alias for `HttpIoServer` with smaller request and response buffer sizes.
+pub type SmallHttpIoServer = HttpIoServer<SMALL_SERVER_REQUEST_SIZE, SMALL_SERVER_RESPONSE_SIZE>;
 
 /// Handle a single HTTP server connection over a generic async stream.
 ///
@@ -664,6 +732,21 @@ mod tests {
         let response = core::str::from_utf8(&stream.output).unwrap();
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(response.contains("{\"status\":\"ok\"}"));
+    }
+
+    #[test]
+    fn test_io_server_handle_connection() {
+        let request = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(request);
+        let mut handler = SimpleHandler;
+        let server = HttpIoServer::<128, 512>::with_buffer_sizes();
+
+        futures_lite::future::block_on(server.handle_connection(&mut stream, &mut handler))
+            .unwrap();
+
+        let response = core::str::from_utf8(&stream.output).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("Hello from nanofish HTTP server"));
     }
 
     #[test]

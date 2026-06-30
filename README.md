@@ -99,7 +99,7 @@ Network → YOUR Buffer (direct) → Zero-Copy References → User Code (no copi
 
 ## Generic IO Client Without Embassy
 
-With `default-features = false`, use `HttpIoClient` over any already-connected `embedded-io-async` stream. Your platform owns DNS, TCP/TLS connection setup, timeouts, and accept loops.
+With `default-features = false`, use `HttpIoClient` over any already-connected `embedded-io-async` stream. This is the non-Embassy client implementation that lives alongside the default Embassy-backed `DefaultHttpClient`. Your platform owns DNS, TCP/TLS connection setup, timeouts, and accept loops.
 
 ```rust,ignore
 use nanofish::{HttpIoClient, HttpIoRequest, HttpMethod};
@@ -378,17 +378,18 @@ For streaming endpoints such as server-sent events, use the `Content-Type: text/
 
 ### Generic IO Server Without Embassy
 
-With `default-features = false`, use `handle_http_connection()` to serve one request/response cycle over any `embedded-io-async` stream. Your platform owns listening, accepting, timeouts, and connection lifecycle.
+With `default-features = false`, use `HttpIoServer` or `handle_http_connection()` to serve one request/response cycle over any `embedded-io-async` stream. This is the non-Embassy server implementation that lives alongside the default Embassy-backed `DefaultHttpServer`. Your platform owns listening, accepting, timeouts, and connection lifecycle.
 
 ```rust,ignore
-use nanofish::{handle_http_connection, SimpleHandler};
+use nanofish::{DefaultHttpIoServer, SimpleHandler};
 
 async fn serve_one_without_embassy<S>(stream: &mut S) -> Result<(), nanofish::Error>
 where
     S: embedded_io_async::Read + embedded_io_async::Write,
 {
     let mut handler = SimpleHandler;
-    handle_http_connection(stream, &mut handler).await
+    let server = DefaultHttpIoServer::new();
+    server.handle_connection(stream, &mut handler).await
 }
 ```
 

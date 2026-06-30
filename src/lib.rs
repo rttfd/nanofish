@@ -39,7 +39,9 @@ pub use error::Error;
 pub use handler::{HttpHandler, SimpleHandler};
 pub use header::{HttpHeader, headers, mime_types};
 pub use io::{
-    HttpIoClient, HttpIoRequest, handle_http_connection, handle_http_connection_with_sizes,
+    DefaultHttpIoClient, DefaultHttpIoServer, HttpIoClient, HttpIoRequest, HttpIoServer,
+    SmallHttpIoClient, SmallHttpIoServer, handle_http_connection,
+    handle_http_connection_with_sizes,
 };
 pub use method::HttpMethod;
 pub use options::{HttpClientOptions, TimeoutDuration};
