@@ -6,7 +6,7 @@
 
 # Nanofish
 
-A lightweight, `no_std` HTTP client and server for embedded systems built on Embassy networking with zero-copy response handling.
+A lightweight, `no_std` HTTP client and server for embedded systems with optional Embassy networking and zero-copy response handling.
 
 Nanofish is designed for embedded systems with limited memory. It provides a simple HTTP client and server that works without heap allocation, making it suitable for microcontrollers and `IoT` devices. The library uses zero-copy response handling where response data is borrowed directly from user-provided buffers, keeping memory usage predictable and efficient.
 
@@ -16,7 +16,7 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 - **User-Controlled Memory** - You provide the buffer and control exactly how much memory is used
 - **Configurable Buffer Sizes** - Compile-time buffer size configuration using const generics for optimal memory usage
 - **No Standard Library** - Full `no_std` compatibility with no heap allocations
-- **Embassy Integration** - Built on Embassy's async networking
+- **Optional Embassy Integration** - Default async client/server integration built on Embassy networking; core HTTP types build without Embassy via `default-features = false`
 - **Complete HTTP Support** - All standard HTTP methods (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, CONNECT)
 - **HTTP Server** - Built-in async server with customizable timeouts and request handling
 - **Smart Response Parsing** - Automatic text/binary detection based on Content-Type headers
@@ -33,29 +33,38 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 ### Basic HTTP Support (Default)
 ```toml
 [dependencies]
-nanofish = "0.12"
+nanofish = "0.13"
 ```
 
 ### With TLS/HTTPS Support
 ```toml
 [dependencies]
-nanofish = { version = "0.12", features = ["tls"] }
+nanofish = { version = "0.13", features = ["tls"] }
 ```
 
 ### With Logging
 ```toml
 # Using defmt (common in embedded/probe-based workflows)
 [dependencies]
-nanofish = { version = "0.12", features = ["defmt"] }
+nanofish = { version = "0.13", features = ["defmt"] }
 
 # Using the log crate (common in std or defmt-incompatible environments)
 [dependencies]
-nanofish = { version = "0.12", features = ["log"] }
+nanofish = { version = "0.13", features = ["log"] }
 ```
 
 > **Note:** The `defmt` and `log` features are **mutually exclusive**. Enabling both will produce a compile-time error. If neither is enabled, all logging calls are compiled away to no-ops.
 
+### Core HTTP Types Only (No Embassy)
+```toml
+[dependencies]
+nanofish = { version = "0.13", default-features = false }
+```
+
+This builds the transport-neutral HTTP types, parsing, response builders, handlers, headers, methods, status codes, and options without pulling in `embassy-net` or `embassy-time`.
+
 ### Available Features
+- **`embassy`** - Enables the Embassy-backed async client and server integration. Enabled by default for compatibility.
 - **`tls`** - Enables HTTPS/TLS support via `embedded-tls`
   - When disabled (default): Only HTTP requests are supported
   - When enabled: Full HTTPS support with TLS 1.2/1.3
@@ -100,7 +109,7 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
     let client = DefaultHttpClient::new(stack);
     let mut response_buffer = [0u8; 8192];
     let headers = [
-        HttpHeader::user_agent("Nanofish/0.12"),
+        HttpHeader::user_agent("Nanofish/0.13"),
         HttpHeader::content_type(mime_types::JSON),
         HttpHeader::authorization("Bearer token123"),
     ];

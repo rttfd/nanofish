@@ -1,9 +1,9 @@
 [package]
 name = "nanofish"
-version = "0.12.1"
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.91"
-description = "🐟 A lightweight, `no_std` HTTP client and server for embedded systems built on top of Embassy networking."
+description = "🐟 A lightweight, `no_std` HTTP client and server for embedded systems with optional Embassy networking."
 documentation = "https://docs.rs/nanofish"
 repository = "https://github.com/rttfd/nanofish"
 license = "MIT"

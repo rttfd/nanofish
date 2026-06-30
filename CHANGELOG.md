@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-06-30
+
+### Added
+
+- Added a default `embassy` feature, making `embassy-net` and `embassy-time` optional dependencies.
+- Added `TimeoutDuration`, a transport-neutral duration type for `HttpClientOptions`.
+- Added CI coverage for `--no-default-features` and `--no-default-features --features tls`.
+
+### Changed
+
+- **BREAKING**: `HttpClientOptions` now uses `TimeoutDuration` instead of `embassy_time::Duration`.
+- **BREAKING**: Transport error variants no longer expose Embassy error types directly; `DnsError`, `ConnectionError`, and `TcpError` are now transport-neutral variants.
+- Embassy-backed client and server modules are now gated behind the `embassy` feature, which remains enabled by default for compatibility.
+
 ## [0.12.1] - 2026-06-30
 
 ### Added
@@ -319,7 +333,9 @@ HttpResponseBuilder::new()
 - Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, and CONNECT methods.
 - Configurable client options (retries, timeouts, delays).
 
-[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/rttfd/nanofish/compare/v0.12.1...v0.13.0
+[0.12.1]: https://github.com/rttfd/nanofish/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/rttfd/nanofish/compare/v0.11.9...v0.12.0
 [0.11.9]: https://github.com/rttfd/nanofish/compare/v0.11.8...v0.11.9
 [0.11.8]: https://github.com/rttfd/nanofish/compare/v0.11.7...v0.11.8
