@@ -17,6 +17,8 @@ pub mod error;
 pub mod handler;
 /// HTTP header types and helpers.
 pub mod header;
+/// Transport-generic client and server helpers.
+pub mod io;
 /// HTTP method enum and helpers.
 pub mod method;
 /// HTTP client configuration options.
@@ -36,6 +38,7 @@ pub use client::{DefaultHttpClient, HttpClient, SmallHttpClient};
 pub use error::Error;
 pub use handler::{HttpHandler, SimpleHandler};
 pub use header::{HttpHeader, headers, mime_types};
+pub use io::{HttpIoClient, HttpIoRequest, handle_http_connection};
 pub use method::HttpMethod;
 pub use options::{HttpClientOptions, TimeoutDuration};
 pub use request::{HttpRequest, QueryPair, QueryPairs, QueryValues, percent_decode};
