@@ -55,6 +55,10 @@ endif
 
 .PHONY: clippy-all
 clippy-all: ## Run clippy on all feature combinations
+	@echo "Running clippy with no default features"; \
+	cargo +$(RUST_VERSION) clippy --no-default-features -- -D warnings -W clippy::pedantic
+	@echo "Running clippy with no default features and tls"; \
+	cargo +$(RUST_VERSION) clippy --no-default-features --features "tls" -- -D warnings -W clippy::pedantic
 	@for features in "" "tls" "log" "defmt" "tls,log" "tls,defmt"; do \
 		echo "Running clippy with features: $$features"; \
 		cargo +$(RUST_VERSION) clippy --features "$$features" -- -D warnings -W clippy::pedantic; \
@@ -70,6 +74,10 @@ endif
 
 .PHONY: test-all
 test-all: ## Run tests on all feature combinations
+	@echo "Running tests with no default features"; \
+	cargo +$(RUST_VERSION) test --no-default-features
+	@echo "Running tests with no default features and tls"; \
+	cargo +$(RUST_VERSION) test --no-default-features --features "tls"
 	@for features in "" "tls" "log" "defmt" "tls,log" "tls,defmt"; do \
 		echo "Running tests with features: $$features"; \
 		cargo +$(RUST_VERSION) test --features "$$features"; \
