@@ -10,8 +10,7 @@ pub(crate) mod fmt;
 /// HTTP protocol constants and shared utilities.
 pub mod protocol;
 
-/// HTTP client implementation and request logic.
-#[cfg(feature = "embassy")]
+/// HTTP client ports and adapters.
 pub mod client;
 /// Error types for HTTP operations.
 pub mod error;
@@ -19,8 +18,6 @@ pub mod error;
 pub mod handler;
 /// HTTP header types and helpers.
 pub mod header;
-/// Transport-generic client and server helpers.
-pub mod io;
 /// HTTP method enum and helpers.
 pub mod method;
 /// HTTP client configuration options.
@@ -29,28 +26,27 @@ pub mod options;
 pub mod request;
 /// HTTP response types and body handling.
 pub mod response;
-/// HTTP server implementation.
-#[cfg(feature = "embassy")]
+/// HTTP server ports and adapters.
 pub mod server;
 /// Predefined HTTP status codes as per RFC 2616.
 pub mod status_code;
 
 #[cfg(feature = "embassy")]
 pub use client::{DefaultHttpClient, HttpClient, SmallHttpClient};
+pub use client::{DefaultHttpIoClient, HttpIoClient, HttpIoRequest, SmallHttpIoClient};
+#[cfg(feature = "tls")]
+pub use client::{DefaultHttpTlsIoClient, HttpTlsIoClient, SmallHttpTlsIoClient};
 pub use error::Error;
 pub use handler::{HttpHandler, SimpleHandler};
 pub use header::{HttpHeader, headers, mime_types};
-pub use io::{
-    DefaultHttpIoClient, DefaultHttpIoServer, HttpIoClient, HttpIoRequest, HttpIoServer,
-    SmallHttpIoClient, SmallHttpIoServer, handle_http_connection,
-    handle_http_connection_with_sizes,
-};
-#[cfg(feature = "tls")]
-pub use io::{DefaultHttpTlsIoClient, HttpTlsIoClient, SmallHttpTlsIoClient};
 pub use method::HttpMethod;
 pub use options::{HttpClientOptions, TimeoutDuration};
 pub use request::{HttpRequest, QueryPair, QueryPairs, QueryValues, percent_decode};
 pub use response::{HttpResponse, ResponseBody};
+pub use server::{
+    DefaultHttpIoServer, HttpIoServer, SmallHttpIoServer, handle_http_connection,
+    handle_http_connection_with_sizes,
+};
 #[cfg(feature = "embassy")]
 pub use server::{DefaultHttpServer, HttpServer, ServerTimeouts, SmallHttpServer};
 pub use status_code::StatusCode;
