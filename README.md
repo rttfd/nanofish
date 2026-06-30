@@ -30,7 +30,7 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 
 ## Installation & Feature Flags
 
-### Basic HTTP Support (Default)
+### Core HTTP Support (Default, No Embassy)
 ```toml
 [dependencies]
 nanofish = "0.13"
@@ -40,6 +40,12 @@ nanofish = "0.13"
 ```toml
 [dependencies]
 nanofish = { version = "0.13", features = ["tls"] }
+```
+
+### With Embassy Client/Server Integration
+```toml
+[dependencies]
+nanofish = { version = "0.13", features = ["embassy"] }
 ```
 
 ### With Logging
@@ -55,18 +61,12 @@ nanofish = { version = "0.13", features = ["log"] }
 
 > **Note:** The `defmt` and `log` features are **mutually exclusive**. Enabling both will produce a compile-time error. If neither is enabled, all logging calls are compiled away to no-ops.
 
-### Core HTTP Types Only (No Embassy)
-```toml
-[dependencies]
-nanofish = { version = "0.13", default-features = false }
-```
-
-This builds the transport-neutral HTTP types, parsing, response builders, handlers, headers, methods, status codes, options, and generic `embedded-io-async` client/server helpers without pulling in `embassy-net` or `embassy-time`.
+The default build includes the transport-neutral HTTP types, parsing, response builders, handlers, headers, methods, status codes, options, and generic `embedded-io-async` client/server helpers without pulling in `embassy-net` or `embassy-time`.
 
 ### Available Features
-- **`embassy`** - Enables the Embassy-backed async client and server integration. Enabled by default for compatibility.
+- **`embassy`** - Enables the Embassy-backed async client and server integration. Disabled by default.
 - **`tls`** - Enables HTTPS/TLS support via `embedded-tls`
-  - When disabled (default): Only HTTP requests are supported
+  - When disabled: Only HTTP requests are supported
   - When enabled: Full HTTPS support with TLS 1.2/1.3
 - **`defmt`** - Enables logging via the [`defmt`](https://github.com/knurling-rs/defmt) framework (commonly used with probe-rs)
 - **`log`** - Enables logging via the [`log`](https://docs.rs/log) crate
@@ -131,7 +131,7 @@ where
 
 ## Quick Start
 
-Here's a simple example showing how to use Nanofish:
+Here's a simple example showing how to use the Embassy-backed client (`features = ["embassy"]`):
 
 ```rust,ignore
 use nanofish::{DefaultHttpClient, HttpHeader, ResponseBody, headers, mime_types};
@@ -396,6 +396,8 @@ where
 ```
 
 ### Basic Server Usage
+
+This example uses the Embassy-backed server (`features = ["embassy"]`).
 
 ```rust,ignore
 use nanofish::{DefaultHttpServer, HttpHandler, HttpRequest, HttpResponse, ResponseBody, StatusCode};

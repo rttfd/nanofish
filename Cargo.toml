@@ -11,7 +11,7 @@ keywords = ["no_std", "embedded", "async", "http_client", "http_server"]
 authors = ["rttf <contact@rttf.dev>"]
 
 [features]
-default = ["embassy"]
+default = []
 embassy = ["dep:embassy-net", "dep:embassy-time"]
 tls = ["dep:embedded-tls", "dep:rand_core"]
 defmt = ["dep:defmt", "embassy-net?/defmt"]
