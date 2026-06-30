@@ -258,7 +258,9 @@ impl<
         let mut rx_buffer = [0; TCP_RX];
         let mut tx_buffer = [0; TCP_TX];
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
-        socket.set_timeout(Some(self.options.socket_timeout));
+        socket.set_timeout(Some(embassy_time::Duration::from_millis(
+            self.options.socket_timeout.as_millis(),
+        )));
 
         let ip_addr = Self::resolve_host(*self.stack, host).await?;
         let remote_endpoint = (ip_addr, port);
@@ -318,7 +320,10 @@ impl<
                 Err(e) => {
                     retries -= 1;
                     if retries > 0 {
-                        Timer::after(self.options.retry_delay).await;
+                        Timer::after(embassy_time::Duration::from_millis(
+                            self.options.retry_delay.as_millis(),
+                        ))
+                        .await;
                     } else {
                         return Err(Error::TlsError(e));
                     }
@@ -330,7 +335,10 @@ impl<
             debug!("Error closing TLS connection: {:?}", Error::from(e));
         }
 
-        Timer::after(self.options.socket_close_delay).await;
+        Timer::after(embassy_time::Duration::from_millis(
+            self.options.socket_close_delay.as_millis(),
+        ))
+        .await;
 
         if total_read == 0 {
             return Err(Error::NoResponse);
@@ -354,7 +362,9 @@ impl<
         let mut rx_buffer = [0; TCP_RX];
         let mut tx_buffer = [0; TCP_TX];
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
-        socket.set_timeout(Some(self.options.socket_timeout));
+        socket.set_timeout(Some(embassy_time::Duration::from_millis(
+            self.options.socket_timeout.as_millis(),
+        )));
 
         let ip_addr = Self::resolve_host(*self.stack, host).await?;
         let remote_endpoint = (ip_addr, port);
@@ -402,7 +412,10 @@ impl<
                     error!("Socket read error: {:?}", e);
                     retries -= 1;
                     if retries > 0 {
-                        Timer::after(self.options.retry_delay).await;
+                        Timer::after(embassy_time::Duration::from_millis(
+                            self.options.retry_delay.as_millis(),
+                        ))
+                        .await;
                     } else {
                         socket.close();
                         return Err(Error::from(e));
@@ -412,7 +425,10 @@ impl<
         }
 
         socket.close();
-        Timer::after(self.options.socket_close_delay).await;
+        Timer::after(embassy_time::Duration::from_millis(
+            self.options.socket_close_delay.as_millis(),
+        ))
+        .await;
 
         if total_read == 0 {
             return Err(Error::NoResponse);
@@ -1031,9 +1047,9 @@ mod tests {
         let client = DefaultHttpClient::new(unsafe { &*fake_stack });
         let opts = HttpClientOptions {
             max_retries: 1,
-            socket_timeout: embassy_time::Duration::from_secs(1),
-            retry_delay: embassy_time::Duration::from_millis(1),
-            socket_close_delay: embassy_time::Duration::from_millis(1),
+            socket_timeout: crate::TimeoutDuration::from_secs(1),
+            retry_delay: crate::TimeoutDuration::from_millis(1),
+            socket_close_delay: crate::TimeoutDuration::from_millis(1),
         };
         let client2 = DefaultHttpClient::with_options(unsafe { &*fake_stack }, opts);
         assert_eq!(client.options.max_retries, 5);
@@ -1050,9 +1066,9 @@ mod tests {
             unsafe { &*fake_stack },
             HttpClientOptions {
                 max_retries: 3,
-                socket_timeout: embassy_time::Duration::from_secs(2),
-                retry_delay: embassy_time::Duration::from_millis(10),
-                socket_close_delay: embassy_time::Duration::from_millis(5),
+                socket_timeout: crate::TimeoutDuration::from_secs(2),
+                retry_delay: crate::TimeoutDuration::from_millis(10),
+                socket_close_delay: crate::TimeoutDuration::from_millis(5),
             },
         );
         assert_eq!(client_custom.options.max_retries, 3);
@@ -1068,9 +1084,9 @@ mod tests {
             unsafe { &*fake_stack },
             HttpClientOptions {
                 max_retries: 2,
-                socket_timeout: embassy_time::Duration::from_secs(1),
-                retry_delay: embassy_time::Duration::from_millis(5),
-                socket_close_delay: embassy_time::Duration::from_millis(2),
+                socket_timeout: crate::TimeoutDuration::from_secs(1),
+                retry_delay: crate::TimeoutDuration::from_millis(5),
+                socket_close_delay: crate::TimeoutDuration::from_millis(2),
             },
         );
         assert_eq!(client_small_custom.options.max_retries, 2);
