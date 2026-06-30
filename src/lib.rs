@@ -35,7 +35,7 @@ pub use handler::{HttpHandler, SimpleHandler};
 pub use header::{HttpHeader, headers, mime_types};
 pub use method::HttpMethod;
 pub use options::HttpClientOptions;
-pub use request::HttpRequest;
+pub use request::{HttpRequest, QueryPair, QueryPairs, QueryValues, percent_decode};
 pub use response::{HttpResponse, ResponseBody};
 pub use server::{DefaultHttpServer, HttpServer, ServerTimeouts, SmallHttpServer};
 pub use status_code::StatusCode;
