@@ -40,18 +40,21 @@ impl defmt::Format for Error {
     }
 }
 
+#[cfg(feature = "embassy")]
 impl From<embassy_net::dns::Error> for Error {
     fn from(_err: embassy_net::dns::Error) -> Self {
         Self::DnsError
     }
 }
 
+#[cfg(feature = "embassy")]
 impl From<embassy_net::tcp::ConnectError> for Error {
     fn from(_err: embassy_net::tcp::ConnectError) -> Self {
         Self::ConnectionError
     }
 }
 
+#[cfg(feature = "embassy")]
 impl From<embassy_net::tcp::Error> for Error {
     fn from(_err: embassy_net::tcp::Error) -> Self {
         Self::TcpError
@@ -88,8 +91,8 @@ impl core::fmt::Display for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use embassy_net::dns;
-    use embassy_net::tcp;
+    #[cfg(feature = "embassy")]
+    use embassy_net::{dns, tcp};
 
     #[test]
     fn test_error_display() {
@@ -109,6 +112,7 @@ mod tests {
         assert_eq!(format!("{e}"), "Invalid status code");
     }
 
+    #[cfg(feature = "embassy")]
     #[test]
     fn test_from_dns_error() {
         let dns_err = dns::Error::InvalidName;
@@ -119,6 +123,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "embassy")]
     #[test]
     fn test_from_tcp_error() {
         let tcp_err = tcp::Error::ConnectionReset;

@@ -9,6 +9,7 @@ pub(crate) mod fmt;
 pub mod protocol;
 
 /// HTTP client implementation and request logic.
+#[cfg(feature = "embassy")]
 pub mod client;
 /// Error types for HTTP operations.
 pub mod error;
@@ -25,10 +26,12 @@ pub mod request;
 /// HTTP response types and body handling.
 pub mod response;
 /// HTTP server implementation.
+#[cfg(feature = "embassy")]
 pub mod server;
 /// Predefined HTTP status codes as per RFC 2616.
 pub mod status_code;
 
+#[cfg(feature = "embassy")]
 pub use client::{DefaultHttpClient, HttpClient, SmallHttpClient};
 pub use error::Error;
 pub use handler::{HttpHandler, SimpleHandler};
@@ -37,5 +40,6 @@ pub use method::HttpMethod;
 pub use options::{HttpClientOptions, TimeoutDuration};
 pub use request::{HttpRequest, QueryPair, QueryPairs, QueryValues, percent_decode};
 pub use response::{HttpResponse, ResponseBody};
+#[cfg(feature = "embassy")]
 pub use server::{DefaultHttpServer, HttpServer, ServerTimeouts, SmallHttpServer};
 pub use status_code::StatusCode;
