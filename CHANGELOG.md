@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-06-30
+
+### Added
+
+- Added zero-copy request target and query helpers on `HttpRequest`:
+  - `target()` returns the raw request target.
+  - `route_path()` returns the path without the query string.
+  - `query_string()` returns the raw query string.
+  - `query_pairs()` iterates raw query parameter pairs.
+  - `query()`, `query_first()`, `query_last()`, `query_all()`, `query_indexed()`, and `query_param()` provide URLSearchParams-style access while preserving duplicate keys.
+- Added request convenience helpers: `header()`, `body_str()`, `content_type()`, and `content_length()`.
+- Added `percent_decode()` for explicit, no-allocation query component decoding into a caller-provided buffer.
+- Re-exported `QueryPair`, `QueryPairs`, `QueryValues`, and `percent_decode` from the crate root.
+
+### Notes
+
+- Query helpers return raw, undecoded values by default.
+- Duplicate query keys are preserved.
+- Bracket-style query names such as `f[0]` are treated literally.
+
 ## [0.12.0] - 2026-06-15
 
 ### Changed
@@ -29,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- ❌ **YANKED**: v0.11.8 convenience constructors (`json()`, `text()`, `not_found()`, `bad_request()`) - poorly designed, too opinionated
+- **YANKED**: v0.11.8 convenience constructors (`json()`, `text()`, `not_found()`, `bad_request()`) - poorly designed, too opinionated
   - `json()` was hardcoded to 200 OK (invalid for error responses)
   - `bad_request()` was hardcoded to `text/plain` (invalid for RFC 7807 JSON errors)
   - Not flexible enough for real-world API patterns
@@ -38,8 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Before (removed):**
 ```rust,ignore
-HttpResponse::json(r#"{"status":"ok"}"#)          // ❌ hardcoded 200
-HttpResponse::bad_request("missing parameter")    // ❌ hardcoded text/plain
+HttpResponse::json(r#"{"status":"ok"}"#)          // hardcoded 200
+HttpResponse::bad_request("missing parameter")    // hardcoded text/plain
 ```
 
 **After (builder):**
