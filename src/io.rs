@@ -23,9 +23,9 @@ use embedded_io_async::{Read, Write};
 use heapless::{String, Vec};
 
 const DEFAULT_REQUEST_SIZE: usize = 1024;
+const SMALL_REQUEST_SIZE: usize = 1024;
 const DEFAULT_SERVER_REQUEST_SIZE: usize = 4096;
 const DEFAULT_SERVER_RESPONSE_SIZE: usize = 4096;
-const SMALL_SERVER_REQUEST_SIZE: usize = 1024;
 const SMALL_SERVER_RESPONSE_SIZE: usize = 1024;
 
 macro_rules! try_push {
@@ -195,7 +195,7 @@ impl Default for HttpIoClient<DEFAULT_REQUEST_SIZE> {
 pub type DefaultHttpIoClient = HttpIoClient<DEFAULT_REQUEST_SIZE>;
 
 /// Type alias for `HttpIoClient` with a smaller request buffer size.
-pub type SmallHttpIoClient = HttpIoClient<SMALL_SERVER_REQUEST_SIZE>;
+pub type SmallHttpIoClient = HttpIoClient<SMALL_REQUEST_SIZE>;
 
 /// Transport-generic HTTPS client for already-connected streams.
 ///
@@ -289,7 +289,7 @@ pub type DefaultHttpTlsIoClient = HttpTlsIoClient<DEFAULT_REQUEST_SIZE, 4096, 40
 
 /// Type alias for `HttpTlsIoClient` with smaller request and TLS buffer sizes.
 #[cfg(feature = "tls")]
-pub type SmallHttpTlsIoClient = HttpTlsIoClient<1024, 1024, 1024>;
+pub type SmallHttpTlsIoClient = HttpTlsIoClient<SMALL_REQUEST_SIZE, 1024, 1024>;
 
 /// Transport-generic HTTP server for already-accepted streams.
 ///
@@ -349,7 +349,7 @@ pub type DefaultHttpIoServer =
     HttpIoServer<DEFAULT_SERVER_REQUEST_SIZE, DEFAULT_SERVER_RESPONSE_SIZE>;
 
 /// Type alias for `HttpIoServer` with smaller request and response buffer sizes.
-pub type SmallHttpIoServer = HttpIoServer<SMALL_SERVER_REQUEST_SIZE, SMALL_SERVER_RESPONSE_SIZE>;
+pub type SmallHttpIoServer = HttpIoServer<SMALL_REQUEST_SIZE, SMALL_SERVER_RESPONSE_SIZE>;
 
 /// Handle a single HTTP server connection over a generic async stream.
 ///
