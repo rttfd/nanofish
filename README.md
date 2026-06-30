@@ -61,7 +61,7 @@ nanofish = { version = "0.13", features = ["log"] }
 nanofish = { version = "0.13", default-features = false }
 ```
 
-This builds the transport-neutral HTTP types, parsing, response builders, handlers, headers, methods, status codes, and options without pulling in `embassy-net` or `embassy-time`.
+This builds the transport-neutral HTTP types, parsing, response builders, handlers, headers, methods, status codes, options, and generic `embedded-io-async` client/server helpers without pulling in `embassy-net` or `embassy-time`.
 
 ### Available Features
 - **`embassy`** - Enables the Embassy-backed async client and server integration. Enabled by default for compatibility.
@@ -96,6 +96,36 @@ Network → YOUR Buffer (direct) → Zero-Copy References → User Code (no copi
 ---
 
 # HTTP Client
+
+## Generic IO Client Without Embassy
+
+With `default-features = false`, use `HttpIoClient` over any already-connected `embedded-io-async` stream. Your platform owns DNS, TCP/TLS connection setup, timeouts, and accept loops.
+
+```rust,ignore
+use nanofish::{HttpIoClient, HttpIoRequest, HttpMethod};
+
+async fn request_without_embassy<S>(stream: &mut S) -> Result<(), nanofish::Error>
+where
+    S: embedded_io_async::Read + embedded_io_async::Write,
+{
+    let client = HttpIoClient::new();
+    let mut response_buffer = [0u8; 4096];
+
+    let (response, bytes_read) = client.request(
+        stream,
+        HttpIoRequest {
+            method: HttpMethod::GET,
+            host: "example.com",
+            path: "/api/status",
+            headers: &[],
+            body: None,
+        },
+        &mut response_buffer,
+    ).await?;
+
+    Ok(())
+}
+```
 
 ## Quick Start
 
@@ -345,6 +375,22 @@ Nanofish includes a built-in HTTP server perfect for embedded systems and `IoT` 
 For streaming endpoints such as server-sent events, use the `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and `Connection: keep-alive` helpers, plus the response head builder when you need to send headers before the body stream starts.
 
 > **Important Note**: The server only supports plain HTTP connections, not HTTPS/TLS. While the Nanofish client supports both HTTP and HTTPS, the server implementation is HTTP-only. For secure connections in production, use a reverse proxy (like nginx) or load balancer that handles TLS termination.
+
+### Generic IO Server Without Embassy
+
+With `default-features = false`, use `handle_http_connection()` to serve one request/response cycle over any `embedded-io-async` stream. Your platform owns listening, accepting, timeouts, and connection lifecycle.
+
+```rust,ignore
+use nanofish::{handle_http_connection, SimpleHandler};
+
+async fn serve_one_without_embassy<S>(stream: &mut S) -> Result<(), nanofish::Error>
+where
+    S: embedded_io_async::Read + embedded_io_async::Write,
+{
+    let mut handler = SimpleHandler;
+    handle_http_connection(stream, &mut handler).await
+}
+```
 
 ### Basic Server Usage
 
