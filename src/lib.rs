@@ -43,6 +43,8 @@ pub use io::{
     SmallHttpIoClient, SmallHttpIoServer, handle_http_connection,
     handle_http_connection_with_sizes,
 };
+#[cfg(feature = "tls")]
+pub use io::{DefaultHttpTlsIoClient, HttpTlsIoClient, SmallHttpTlsIoClient};
 pub use method::HttpMethod;
 pub use options::{HttpClientOptions, TimeoutDuration};
 pub use request::{HttpRequest, QueryPair, QueryPairs, QueryValues, percent_decode};

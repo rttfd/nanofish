@@ -27,6 +27,7 @@ impl TimeoutDuration {
 }
 
 /// Options for configuring the HTTP client
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpClientOptions {
     /// Maximum number of retries for read operations
     pub max_retries: usize,

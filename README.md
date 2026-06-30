@@ -99,7 +99,9 @@ Network → YOUR Buffer (direct) → Zero-Copy References → User Code (no copi
 
 ## Generic IO Client Without Embassy
 
-With `default-features = false`, use `HttpIoClient` over any already-connected `embedded-io-async` stream. This is the non-Embassy client implementation that lives alongside the default Embassy-backed `DefaultHttpClient`. Your platform owns DNS, TCP/TLS connection setup, timeouts, and accept loops.
+With `default-features = false`, use `HttpIoClient` over any already-connected `embedded-io-async` stream. This is the non-Embassy client implementation that lives alongside the default Embassy-backed `DefaultHttpClient`. Your platform owns DNS, TCP connection setup, timeouts, and accept loops.
+
+With `default-features = false, features = ["tls"]`, use `HttpTlsIoClient` / `DefaultHttpTlsIoClient` over an already-connected TCP-like stream. TLS is not coupled to Embassy; the caller supplies the stream and RNG.
 
 ```rust,ignore
 use nanofish::{HttpIoClient, HttpIoRequest, HttpMethod};
