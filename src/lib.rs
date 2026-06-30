@@ -2,6 +2,8 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 
+/// Shared HTTP codec helpers.
+pub(crate) mod codec;
 /// Logging macros
 pub(crate) mod fmt;
 

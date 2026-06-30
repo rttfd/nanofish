@@ -5,36 +5,25 @@
 //! DNS, TCP accept/connect, and timeout behavior remain outside the core crate.
 
 use crate::{
+    codec,
     error::Error,
     handler::HttpHandler,
-    header::{HttpHeader, headers::CONTENT_LENGTH, headers::CONTENT_TYPE, mime_types},
+    header::{HttpHeader, headers::CONTENT_LENGTH, mime_types},
     method::HttpMethod,
     options::HttpClientOptions,
-    protocol::{
-        self, CHUNKED, CHUNKED_END_MARKER, CONNECTION_CLOSE_END, CRLF_LEN, CRLF_STR,
-        DOUBLE_CRLF_LEN, HEADER_SEPARATOR, HTTP_VERSION_LINE_SUFFIX, MAX_HEADERS,
-        TRANSFER_ENCODING,
-    },
+    protocol::{self, DOUBLE_CRLF_LEN},
     request::HttpRequest,
     response::{HttpResponse, ResponseBody},
     status_code::StatusCode,
 };
 use embedded_io_async::{Read, Write};
-use heapless::{String, Vec};
+use heapless::Vec;
 
 const DEFAULT_REQUEST_SIZE: usize = 1024;
 const SMALL_REQUEST_SIZE: usize = 1024;
 const DEFAULT_SERVER_REQUEST_SIZE: usize = 4096;
 const DEFAULT_SERVER_RESPONSE_SIZE: usize = 4096;
 const SMALL_SERVER_RESPONSE_SIZE: usize = 1024;
-
-macro_rules! try_push {
-    ($expr:expr) => {
-        if $expr.is_err() {
-            return Err(Error::BufferOverflow);
-        }
-    };
-}
 
 /// Request metadata for [`HttpIoClient`].
 pub struct HttpIoRequest<'a> {
@@ -95,7 +84,7 @@ impl<const RQ: usize> HttpIoClient<RQ> {
     where
         S: Read + Write,
     {
-        let http_request = build_http_request::<RQ>(
+        let http_request = codec::build_req::<RQ>(
             request.method,
             request.host,
             request.path,
@@ -118,8 +107,8 @@ impl<const RQ: usize> HttpIoClient<RQ> {
         stream.flush().await.map_err(|_| Error::TcpError)?;
 
         let total_read = read_response(stream, response_buffer, self.options.max_retries).await?;
-        let total_read = dechunk(response_buffer, total_read)?;
-        let response = parse_http_response_zero_copy(&response_buffer[..total_read])?;
+        let total_read = codec::dechunk(response_buffer, total_read)?;
+        let response = codec::parse_resp(&response_buffer[..total_read])?;
         Ok((response, total_read))
     }
 
@@ -434,7 +423,7 @@ where
             Ok(0) => break,
             Ok(n) => {
                 total_read += n;
-                if is_response_complete(&response_buffer[..total_read]) {
+                if codec::complete(&response_buffer[..total_read]) {
                     break;
                 }
             }
@@ -509,233 +498,6 @@ fn text_error_response<const MAX_RESPONSE_SIZE: usize>(
         body: ResponseBody::Text(body),
     };
     resp.build_bytes::<MAX_RESPONSE_SIZE>()
-}
-
-fn parse_http_response_zero_copy(data: &[u8]) -> Result<HttpResponse<'_>, Error> {
-    let headers_end = protocol::find_double_crlf(data)
-        .ok_or(Error::InvalidResponse("Invalid HTTP response format"))?
-        + DOUBLE_CRLF_LEN;
-
-    let header_bytes = &data[..headers_end];
-    let response_str = core::str::from_utf8(header_bytes)
-        .map_err(|_| Error::InvalidResponse("Invalid HTTP response encoding"))?;
-
-    let status_line_end = protocol::find_crlf(header_bytes)
-        .ok_or(Error::InvalidResponse("Invalid HTTP response format"))?;
-
-    let status_line = &response_str[..status_line_end];
-    let status_code_str = status_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or(Error::InvalidResponse("Invalid HTTP status line"))?;
-
-    let status_code: StatusCode = status_code_str.try_into()?;
-
-    let headers_section = &response_str[status_line_end + CRLF_LEN..headers_end - DOUBLE_CRLF_LEN];
-    let mut headers = Vec::<HttpHeader<'_>, MAX_HEADERS>::new();
-
-    for header_line in headers_section.split(CRLF_STR) {
-        if let Some(colon_pos) = header_line.find(':') {
-            let name = header_line[..colon_pos].trim();
-            let value = header_line[colon_pos + 1..].trim();
-
-            let header = HttpHeader::new(name, value);
-            if headers.push(header).is_err() {
-                break;
-            }
-        }
-    }
-
-    let body_data = if headers_end < data.len() {
-        &data[headers_end..]
-    } else {
-        &[]
-    };
-
-    Ok(HttpResponse {
-        status_code,
-        headers: headers.clone(),
-        body: parse_response_body(&headers, body_data),
-    })
-}
-
-fn parse_response_body<'b>(headers: &[HttpHeader<'_>], body_data: &'b [u8]) -> ResponseBody<'b> {
-    if body_data.is_empty() {
-        return ResponseBody::Empty;
-    }
-
-    get_content_type(headers).map_or_else(
-        || parse_as_text_or_binary(body_data),
-        |content_type| {
-            if is_text_content_type(content_type) {
-                parse_as_text_or_binary(body_data)
-            } else {
-                ResponseBody::Binary(body_data)
-            }
-        },
-    )
-}
-
-fn get_content_type<'h>(headers: &'h [HttpHeader<'_>]) -> Option<&'h str> {
-    headers
-        .iter()
-        .find(|h| h.name.eq_ignore_ascii_case(CONTENT_TYPE))
-        .map(|h| h.value)
-}
-
-fn is_text_content_type(content_type: &str) -> bool {
-    content_type.starts_with("text/")
-        || content_type.starts_with("application/json")
-        || content_type.starts_with("application/xml")
-        || content_type.starts_with("application/x-www-form-urlencoded")
-}
-
-fn parse_as_text_or_binary(body_data: &[u8]) -> ResponseBody<'_> {
-    core::str::from_utf8(body_data)
-        .map_or_else(|_| ResponseBody::Binary(body_data), ResponseBody::Text)
-}
-
-fn build_http_request<const RQ: usize>(
-    method: HttpMethod,
-    host: &str,
-    path: &str,
-    headers: &[HttpHeader<'_>],
-    body: Option<&[u8]>,
-) -> Result<String<RQ>, Error> {
-    let mut http_request = String::<RQ>::new();
-
-    try_push!(http_request.push_str(method.as_str()));
-    try_push!(http_request.push_str(" "));
-    try_push!(http_request.push_str(path));
-    try_push!(http_request.push_str(HTTP_VERSION_LINE_SUFFIX));
-    try_push!(http_request.push_str("Host: "));
-    try_push!(http_request.push_str(host));
-    try_push!(http_request.push_str(CRLF_STR));
-
-    let mut content_length_present = false;
-
-    for header in headers {
-        try_push!(http_request.push_str(header.name));
-        try_push!(http_request.push_str(HEADER_SEPARATOR));
-        try_push!(http_request.push_str(header.value));
-        try_push!(http_request.push_str(CRLF_STR));
-
-        if header.name.eq_ignore_ascii_case(CONTENT_LENGTH) {
-            content_length_present = true;
-        }
-    }
-
-    if !content_length_present && body.is_some() {
-        try_push!(http_request.push_str(CONTENT_LENGTH));
-        try_push!(http_request.push_str(HEADER_SEPARATOR));
-        let mut len_str = String::<8>::new();
-        if core::fmt::write(
-            &mut len_str,
-            format_args!("{}", body.unwrap_or_default().len()),
-        )
-        .is_err()
-        {
-            return Err(Error::BufferOverflow);
-        }
-        try_push!(http_request.push_str(&len_str));
-        try_push!(http_request.push_str(CRLF_STR));
-    }
-
-    try_push!(http_request.push_str(CONNECTION_CLOSE_END));
-
-    Ok(http_request)
-}
-
-fn is_response_complete(data: &[u8]) -> bool {
-    if protocol::find_double_crlf(data).is_none() {
-        return false;
-    }
-
-    if has_chunked_transfer_encoding(data) {
-        return data
-            .windows(CHUNKED_END_MARKER.len())
-            .any(|w| w == CHUNKED_END_MARKER);
-    }
-
-    let headers_end = match protocol::find_double_crlf(data) {
-        Some(pos) => pos + DOUBLE_CRLF_LEN,
-        None => return true,
-    };
-    let header_bytes = &data[..headers_end];
-    if let Ok(headers_str) = core::str::from_utf8(header_bytes)
-        && let Some(value) = protocol::find_header_value(headers_str, CONTENT_LENGTH)
-        && let Ok(content_length) = value.parse::<usize>()
-    {
-        let body_received = data.len().saturating_sub(headers_end);
-        return body_received >= content_length;
-    }
-
-    false
-}
-
-fn has_chunked_transfer_encoding(data: &[u8]) -> bool {
-    let headers_end = match protocol::find_double_crlf(data) {
-        Some(pos) => pos + DOUBLE_CRLF_LEN,
-        None => return false,
-    };
-
-    let header_bytes = &data[..headers_end];
-    if let Ok(headers_str) = core::str::from_utf8(header_bytes)
-        && let Some(value) = protocol::find_header_value(headers_str, TRANSFER_ENCODING)
-    {
-        return value.eq_ignore_ascii_case(CHUNKED);
-    }
-    false
-}
-
-fn dechunk(buffer: &mut [u8], total_read: usize) -> Result<usize, Error> {
-    let data = &buffer[..total_read];
-
-    if !has_chunked_transfer_encoding(data) {
-        return Ok(total_read);
-    }
-
-    let headers_end = protocol::find_double_crlf(data)
-        .ok_or(Error::InvalidResponse("Invalid HTTP response format"))?
-        + DOUBLE_CRLF_LEN;
-
-    let mut read_pos = headers_end;
-    let mut write_pos = headers_end;
-
-    while read_pos < total_read {
-        let chunk_line_end = match protocol::find_crlf(&buffer[read_pos..total_read]) {
-            Some(pos) => read_pos + pos,
-            None => break,
-        };
-
-        let chunk_size_str = match core::str::from_utf8(&buffer[read_pos..chunk_line_end]) {
-            Ok(s) => s.trim(),
-            Err(_) => return Err(Error::InvalidResponse("Invalid chunk size encoding")),
-        };
-
-        let size_part = chunk_size_str.split(';').next().unwrap_or("0").trim();
-        let chunk_size = usize::from_str_radix(size_part, 16)
-            .map_err(|_| Error::InvalidResponse("Invalid chunk size"))?;
-
-        if chunk_size == 0 {
-            break;
-        }
-
-        let chunk_data_start = chunk_line_end + CRLF_LEN;
-        let chunk_data_end = chunk_data_start + chunk_size;
-
-        if chunk_data_end > total_read {
-            return Err(Error::InvalidResponse("Incomplete chunked body"));
-        }
-
-        if write_pos != chunk_data_start {
-            buffer.copy_within(chunk_data_start..chunk_data_end, write_pos);
-        }
-        write_pos += chunk_size;
-        read_pos = chunk_data_end + CRLF_LEN;
-    }
-
-    Ok(write_pos)
 }
 
 #[cfg(test)]
