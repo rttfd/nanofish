@@ -1,11 +1,65 @@
 use crate::{
-    codec, error::Error, header::HttpHeader, method::HttpMethod, options::HttpClientOptions,
+    codec,
+    error::Error,
+    header::HttpHeader,
+    method::HttpMethod,
+    options::HttpClientOptions,
+    protocol::{DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT},
     response::HttpResponse,
 };
 use embedded_io_async::{Read, Write};
 
 const DEFAULT_REQUEST_SIZE: usize = 1024;
 const SMALL_REQUEST_SIZE: usize = 1024;
+
+/// Parsed HTTP endpoint metadata.
+pub struct HttpEndpoint<'a> {
+    /// URL scheme, either `http` or `https`.
+    pub scheme: &'a str,
+    /// Hostname without port.
+    pub host: &'a str,
+    /// Explicit or default port.
+    pub port: u16,
+    /// Request path, defaulting to `/`.
+    pub path: &'a str,
+}
+
+/// Parse an HTTP or HTTPS URL into endpoint metadata.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidUrl`] if the endpoint does not start with `http://` or `https://`.
+pub fn parse_endpoint(endpoint: &str) -> Result<HttpEndpoint<'_>, Error> {
+    let (scheme, host_port) = if let Some(rest) = endpoint.strip_prefix("http://") {
+        ("http", rest)
+    } else if let Some(rest) = endpoint.strip_prefix("https://") {
+        ("https", rest)
+    } else {
+        return Err(Error::InvalidUrl);
+    };
+
+    let host = host_port.split('/').next().ok_or(Error::InvalidUrl)?;
+    let path = &host_port[host.len()..];
+    let path = if path.is_empty() { "/" } else { path };
+
+    let default_port = if scheme == "https" {
+        DEFAULT_HTTPS_PORT
+    } else {
+        DEFAULT_HTTP_PORT
+    };
+    let (host, port) = host.rfind(':').map_or((host, default_port), |colon_pos| {
+        host[colon_pos + 1..]
+            .parse::<u16>()
+            .map_or((host, default_port), |port| (&host[..colon_pos], port))
+    });
+
+    Ok(HttpEndpoint {
+        scheme,
+        host,
+        port,
+        path,
+    })
+}
 
 /// Request metadata for [`HttpClient`].
 pub struct HttpClientRequest<'a> {

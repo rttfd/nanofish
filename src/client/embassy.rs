@@ -1,10 +1,6 @@
+use super::io::{HttpClient as BaseHttpClient, HttpClientRequest, parse_endpoint};
 use crate::{
-    codec,
-    error::Error,
-    header::HttpHeader,
-    method::HttpMethod,
-    options::HttpClientOptions,
-    protocol::{DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT},
+    error::Error, header::HttpHeader, method::HttpMethod, options::HttpClientOptions,
     response::HttpResponse,
 };
 use embassy_net::{
@@ -15,7 +11,6 @@ use embassy_net::{
 #[cfg(feature = "tls")]
 use embassy_time::Instant;
 use embassy_time::Timer;
-use embedded_io_async::Write as EmbeddedWrite;
 #[cfg(feature = "tls")]
 use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
 #[cfg(feature = "tls")]
@@ -164,49 +159,36 @@ impl<
         body: Option<&[u8]>,
         response_buffer: &'b mut [u8],
     ) -> Result<(HttpResponse<'b>, usize), Error> {
-        let (scheme, host_port) = if let Some(rest) = endpoint.strip_prefix("http://") {
-            ("http", rest)
-        } else if let Some(rest) = endpoint.strip_prefix("https://") {
-            ("https", rest)
-        } else {
-            return Err(Error::InvalidUrl);
-        };
+        let endpoint = parse_endpoint(endpoint)?;
 
-        let host = host_port.split('/').next().ok_or(Error::InvalidUrl)?;
-        let path = &host_port[host.len()..];
-        let path = if path.is_empty() { "/" } else { path };
-
-        let default_port = if scheme == "https" {
-            DEFAULT_HTTPS_PORT
-        } else {
-            DEFAULT_HTTP_PORT
-        };
-        let (host, port) = host.rfind(':').map_or((host, default_port), |colon_pos| {
-            host[colon_pos + 1..]
-                .parse::<u16>()
-                .map_or((host, default_port), |port| (&host[..colon_pos], port))
-        });
-
-        let total_read = match scheme {
+        match endpoint.scheme {
             #[cfg(feature = "tls")]
             "https" => {
-                self.make_https_request(method, (host, port), path, headers, body, response_buffer)
-                    .await?
+                self.make_https_request(
+                    method,
+                    (endpoint.host, endpoint.port),
+                    endpoint.path,
+                    headers,
+                    body,
+                    response_buffer,
+                )
+                .await
             }
             #[cfg(not(feature = "tls"))]
-            "https" => return Err(Error::UnsupportedScheme("https (TLS support not enabled)")),
+            "https" => Err(Error::UnsupportedScheme("https (TLS support not enabled)")),
             "http" => {
-                self.make_http_request(method, (host, port), path, headers, body, response_buffer)
-                    .await?
+                self.make_http_request(
+                    method,
+                    (endpoint.host, endpoint.port),
+                    endpoint.path,
+                    headers,
+                    body,
+                    response_buffer,
+                )
+                .await
             }
-            _ => return Err(Error::UnsupportedScheme(scheme)),
-        };
-
-        // Decode chunked transfer-encoding in-place if present
-        let total_read = codec::dechunk(response_buffer, total_read)?;
-
-        let response = codec::parse_resp(&response_buffer[..total_read])?;
-        Ok((response, total_read))
+            _ => Err(Error::UnsupportedScheme("unknown")),
+        }
     }
 
     /// Resolve a hostname to an IP address, trying IPv4 (A) first then IPv6 (AAAA).
@@ -229,15 +211,15 @@ impl<
     /// Make HTTPS request over TLS with zero-copy response handling
     #[cfg(feature = "tls")]
     #[expect(clippy::future_not_send)]
-    async fn make_https_request(
+    async fn make_https_request<'b>(
         &self,
         method: HttpMethod,
         host_port: (&str, u16),
         path: &str,
         headers: &[HttpHeader<'_>],
         body: Option<&[u8]>,
-        response_buffer: &mut [u8],
-    ) -> Result<usize, Error> {
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
         let (host, port) = host_port;
         let mut rx_buffer = [0; TCP_RX];
         let mut tx_buffer = [0; TCP_TX];
@@ -277,43 +259,20 @@ impl<
         ))
         .await?;
 
-        let http_request = codec::build_req::<RQ>(method, host, path, headers, body)?;
-
-        tls.write_all(http_request.as_bytes()).await?;
-
-        if let Some(body_data) = body {
-            tls.write_all(body_data).await?;
-        }
-
-        tls.flush().await?;
-
-        let mut total_read = 0;
-        let mut retries = self.options.max_retries;
-
-        while total_read < response_buffer.len() && retries > 0 {
-            match tls.read(&mut response_buffer[total_read..]).await {
-                Ok(0) => {
-                    break;
-                }
-                Ok(n) => {
-                    total_read += n;
-                    if codec::complete(&response_buffer[..total_read]) {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    retries -= 1;
-                    if retries > 0 {
-                        Timer::after(embassy_time::Duration::from_millis(
-                            self.options.retry_delay.as_millis(),
-                        ))
-                        .await;
-                    } else {
-                        return Err(Error::TlsError(e));
-                    }
-                }
-            }
-        }
+        let client = BaseHttpClient::<RQ>::with_options(self.options);
+        let result = client
+            .request(
+                &mut tls,
+                HttpClientRequest {
+                    method,
+                    host,
+                    path,
+                    headers,
+                    body,
+                },
+                response_buffer,
+            )
+            .await;
 
         if let Err((_, e)) = tls.close().await {
             debug!("Error closing TLS connection: {:?}", Error::from(e));
@@ -324,24 +283,20 @@ impl<
         ))
         .await;
 
-        if total_read == 0 {
-            return Err(Error::NoResponse);
-        }
-
-        Ok(total_read)
+        result
     }
 
     /// Make HTTP request with zero-copy response handling
     #[expect(clippy::future_not_send)]
-    async fn make_http_request(
+    async fn make_http_request<'b>(
         &self,
         method: HttpMethod,
         host_port: (&str, u16),
         path: &str,
         headers: &[HttpHeader<'_>],
         body: Option<&[u8]>,
-        response_buffer: &mut [u8],
-    ) -> Result<usize, Error> {
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
         let (host, port) = host_port;
         let mut rx_buffer = [0; TCP_RX];
         let mut tx_buffer = [0; TCP_TX];
@@ -361,52 +316,20 @@ impl<
                 Error::from(e)
             })?;
 
-        let http_request = codec::build_req::<RQ>(method, host, path, headers, body)?;
-
-        socket
-            .write_all(http_request.as_bytes())
-            .await
-            .map_err(|e| {
-                socket.abort();
-                Error::from(e)
-            })?;
-
-        if let Some(body_data) = body {
-            socket.write_all(body_data).await.map_err(|e| {
-                socket.abort();
-                Error::from(e)
-            })?;
-        }
-
-        let mut total_read = 0;
-        let mut retries = self.options.max_retries;
-
-        while total_read < response_buffer.len() && retries > 0 {
-            match socket.read(&mut response_buffer[total_read..]).await {
-                Ok(0) => {
-                    break;
-                }
-                Ok(n) => {
-                    total_read += n;
-                    if codec::complete(&response_buffer[..total_read]) {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    error!("Socket read error: {:?}", e);
-                    retries -= 1;
-                    if retries > 0 {
-                        Timer::after(embassy_time::Duration::from_millis(
-                            self.options.retry_delay.as_millis(),
-                        ))
-                        .await;
-                    } else {
-                        socket.close();
-                        return Err(Error::from(e));
-                    }
-                }
-            }
-        }
+        let client = BaseHttpClient::<RQ>::with_options(self.options);
+        let result = client
+            .request(
+                &mut socket,
+                HttpClientRequest {
+                    method,
+                    host,
+                    path,
+                    headers,
+                    body,
+                },
+                response_buffer,
+            )
+            .await;
 
         socket.close();
         Timer::after(embassy_time::Duration::from_millis(
@@ -414,11 +337,7 @@ impl<
         ))
         .await;
 
-        if total_read == 0 {
-            return Err(Error::NoResponse);
-        }
-
-        Ok(total_read)
+        result
     }
 
     /// Convenience method for making a PATCH request
@@ -728,7 +647,7 @@ impl CryptoRng for XorShift32Rng {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ResponseBody, StatusCode};
+    use crate::{ResponseBody, StatusCode, codec};
     use embassy_net::Stack;
 
     #[test]
