@@ -7,8 +7,8 @@ use embedded_io_async::{Read, Write};
 const DEFAULT_REQUEST_SIZE: usize = 1024;
 const SMALL_REQUEST_SIZE: usize = 1024;
 
-/// Request metadata for [`HttpIoClient`].
-pub struct HttpIoRequest<'a> {
+/// Request metadata for [`HttpClient`].
+pub struct HttpClientRequest<'a> {
     /// HTTP method to send.
     pub method: HttpMethod,
     /// Host value used for the HTTP `Host` header.
@@ -22,11 +22,11 @@ pub struct HttpIoRequest<'a> {
 }
 
 /// Transport-generic HTTP client for already-connected streams.
-pub struct HttpIoClient<const RQ: usize = DEFAULT_REQUEST_SIZE> {
+pub struct HttpClient<const RQ: usize = DEFAULT_REQUEST_SIZE> {
     options: HttpClientOptions,
 }
 
-impl HttpIoClient<DEFAULT_REQUEST_SIZE> {
+impl HttpClient<DEFAULT_REQUEST_SIZE> {
     /// Create a new transport-generic client with default options and buffer sizes.
     #[must_use]
     pub fn new() -> Self {
@@ -36,7 +36,7 @@ impl HttpIoClient<DEFAULT_REQUEST_SIZE> {
     }
 }
 
-impl<const RQ: usize> HttpIoClient<RQ> {
+impl<const RQ: usize> HttpClient<RQ> {
     /// Create a new transport-generic client with custom options.
     #[must_use]
     pub const fn with_options(options: HttpClientOptions) -> Self {
@@ -52,7 +52,7 @@ impl<const RQ: usize> HttpIoClient<RQ> {
     pub async fn request<'b, S>(
         &self,
         stream: &mut S,
-        request: HttpIoRequest<'_>,
+        request: HttpClientRequest<'_>,
         response_buffer: &'b mut [u8],
     ) -> Result<(HttpResponse<'b>, usize), Error>
     where
@@ -90,7 +90,7 @@ impl<const RQ: usize> HttpIoClient<RQ> {
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`HttpIoClient::request`].
+    /// Returns the same errors as [`HttpClient::request`].
     pub async fn get<'b, S>(
         &self,
         stream: &mut S,
@@ -104,7 +104,7 @@ impl<const RQ: usize> HttpIoClient<RQ> {
     {
         self.request(
             stream,
-            HttpIoRequest {
+            HttpClientRequest {
                 method: HttpMethod::GET,
                 host,
                 path,
@@ -120,7 +120,7 @@ impl<const RQ: usize> HttpIoClient<RQ> {
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`HttpIoClient::request`].
+    /// Returns the same errors as [`HttpClient::request`].
     pub async fn post<'b, S>(
         &self,
         stream: &mut S,
@@ -135,7 +135,7 @@ impl<const RQ: usize> HttpIoClient<RQ> {
     {
         self.request(
             stream,
-            HttpIoRequest {
+            HttpClientRequest {
                 method: HttpMethod::POST,
                 host,
                 path,
@@ -148,21 +148,21 @@ impl<const RQ: usize> HttpIoClient<RQ> {
     }
 }
 
-impl Default for HttpIoClient<DEFAULT_REQUEST_SIZE> {
+impl Default for HttpClient<DEFAULT_REQUEST_SIZE> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Type alias for `HttpIoClient` with the default request buffer size.
-pub type DefaultHttpIoClient = HttpIoClient<DEFAULT_REQUEST_SIZE>;
+/// Type alias for `HttpClient` with the default request buffer size.
+pub type DefaultHttpClient = HttpClient<DEFAULT_REQUEST_SIZE>;
 
-/// Type alias for `HttpIoClient` with a smaller request buffer size.
-pub type SmallHttpIoClient = HttpIoClient<SMALL_REQUEST_SIZE>;
+/// Type alias for `HttpClient` with a smaller request buffer size.
+pub type SmallHttpClient = HttpClient<SMALL_REQUEST_SIZE>;
 
 /// Transport-generic HTTPS client for already-connected streams.
 #[cfg(feature = "tls")]
-pub struct HttpTlsIoClient<
+pub struct HttpTlsClient<
     const RQ: usize = DEFAULT_REQUEST_SIZE,
     const TLS_READ: usize = 4096,
     const TLS_WRITE: usize = 4096,
@@ -171,7 +171,7 @@ pub struct HttpTlsIoClient<
 }
 
 #[cfg(feature = "tls")]
-impl HttpTlsIoClient<DEFAULT_REQUEST_SIZE, 4096, 4096> {
+impl HttpTlsClient<DEFAULT_REQUEST_SIZE, 4096, 4096> {
     /// Create a new transport-generic TLS client with default buffer sizes.
     #[must_use]
     pub fn new() -> Self {
@@ -183,7 +183,7 @@ impl HttpTlsIoClient<DEFAULT_REQUEST_SIZE, 4096, 4096> {
 
 #[cfg(feature = "tls")]
 impl<const RQ: usize, const TLS_READ: usize, const TLS_WRITE: usize>
-    HttpTlsIoClient<RQ, TLS_READ, TLS_WRITE>
+    HttpTlsClient<RQ, TLS_READ, TLS_WRITE>
 {
     /// Create a new transport-generic TLS client with custom options.
     #[must_use]
@@ -202,7 +202,7 @@ impl<const RQ: usize, const TLS_READ: usize, const TLS_WRITE: usize>
         &self,
         stream: S,
         server_name: &str,
-        request: HttpIoRequest<'_>,
+        request: HttpClientRequest<'_>,
         response_buffer: &'b mut [u8],
         rng: RNG,
     ) -> Result<(HttpResponse<'b>, usize), Error>
@@ -225,7 +225,7 @@ impl<const RQ: usize, const TLS_READ: usize, const TLS_WRITE: usize>
         ))
         .await?;
 
-        let client = HttpIoClient::<RQ>::with_options(self.options);
+        let client = HttpClient::<RQ>::with_options(self.options);
         let result = client.request(&mut tls, request, response_buffer).await;
         let _ = tls.close().await;
         result
@@ -233,19 +233,19 @@ impl<const RQ: usize, const TLS_READ: usize, const TLS_WRITE: usize>
 }
 
 #[cfg(feature = "tls")]
-impl Default for HttpTlsIoClient<DEFAULT_REQUEST_SIZE, 4096, 4096> {
+impl Default for HttpTlsClient<DEFAULT_REQUEST_SIZE, 4096, 4096> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Type alias for `HttpTlsIoClient` with default request and TLS buffer sizes.
+/// Type alias for `HttpTlsClient` with default request and TLS buffer sizes.
 #[cfg(feature = "tls")]
-pub type DefaultHttpTlsIoClient = HttpTlsIoClient<DEFAULT_REQUEST_SIZE, 4096, 4096>;
+pub type DefaultHttpTlsClient = HttpTlsClient<DEFAULT_REQUEST_SIZE, 4096, 4096>;
 
-/// Type alias for `HttpTlsIoClient` with smaller request and TLS buffer sizes.
+/// Type alias for `HttpTlsClient` with smaller request and TLS buffer sizes.
 #[cfg(feature = "tls")]
-pub type SmallHttpTlsIoClient = HttpTlsIoClient<SMALL_REQUEST_SIZE, 1024, 1024>;
+pub type SmallHttpTlsClient = HttpTlsClient<SMALL_REQUEST_SIZE, 1024, 1024>;
 
 async fn read_response<S>(
     stream: &mut S,
@@ -339,7 +339,7 @@ mod tests {
         let response =
             b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello";
         let mut stream = MockStream::<128, 256>::new(response);
-        let client = HttpIoClient::new();
+        let client = HttpClient::new();
         let mut buffer = [0; 128];
 
         let (response, _) = futures_lite::future::block_on(client.get(
@@ -361,7 +361,7 @@ mod tests {
     fn test_io_client_binary_response() {
         let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 3\r\n\r\n\x01\x02\x03";
         let mut stream = MockStream::<128, 256>::new(response);
-        let client = HttpIoClient::new();
+        let client = HttpClient::new();
         let mut buffer = [0; 128];
 
         let (response, _) = futures_lite::future::block_on(client.get(

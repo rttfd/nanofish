@@ -35,10 +35,10 @@ pub mod smoltcp;
 pub mod status_code;
 
 #[cfg(feature = "embassy")]
-pub use client::{DefaultHttpClient, HttpClient, SmallHttpClient};
-pub use client::{DefaultHttpIoClient, HttpIoClient, HttpIoRequest, SmallHttpIoClient};
+pub use client::{DefaultEmbassyHttpClient, EmbassyHttpClient, SmallEmbassyHttpClient};
+pub use client::{DefaultHttpClient, HttpClient, HttpClientRequest, SmallHttpClient};
 #[cfg(feature = "tls")]
-pub use client::{DefaultHttpTlsIoClient, HttpTlsIoClient, SmallHttpTlsIoClient};
+pub use client::{DefaultHttpTlsClient, HttpTlsClient, SmallHttpTlsClient};
 pub use error::Error;
 pub use handler::{HttpHandler, SimpleHandler};
 pub use header::{HttpHeader, headers, mime_types};
@@ -50,7 +50,7 @@ pub use server::ServerTimeouts;
 #[cfg(feature = "embassy")]
 pub use server::{DefaultEmbassyHttpServer, EmbassyHttpServer, SmallEmbassyHttpServer};
 pub use server::{
-    DefaultHttpIoServer, HttpIoServer, SmallHttpIoServer, handle_http_connection,
+    DefaultHttpServer, HttpServer, SmallHttpServer, handle_http_connection,
     handle_http_connection_with_sizes,
 };
 #[cfg(feature = "smoltcp")]

@@ -40,6 +40,6 @@ impl ServerTimeouts {
 #[cfg(feature = "embassy")]
 pub use embassy::{DefaultEmbassyHttpServer, EmbassyHttpServer, SmallEmbassyHttpServer};
 pub use io::{
-    DefaultHttpIoServer, HttpIoServer, SmallHttpIoServer, handle_http_connection,
+    DefaultHttpServer, HttpServer, SmallHttpServer, handle_http_connection,
     handle_http_connection_with_sizes,
 };

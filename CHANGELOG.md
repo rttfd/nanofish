@@ -12,9 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Added a default `embassy` feature, making `embassy-net` and `embassy-time` optional dependencies.
-- Added `HttpIoClient` and `HttpIoRequest` for running the HTTP client over any already-connected `embedded-io-async` stream without Embassy.
-- Added `HttpTlsIoClient` for running TLS over any already-connected `embedded-io-async` stream without Embassy when `tls` is enabled.
-- Added `HttpIoServer` and `handle_http_connection()` for serving a single HTTP connection over any `embedded-io-async` stream without Embassy.
+- Added `HttpClient` and `HttpClientRequest` for running the HTTP client over any already-connected `embedded-io-async` stream without Embassy.
+- Added `HttpTlsClient` for running TLS over any already-connected `embedded-io-async` stream without Embassy when `tls` is enabled.
+- Added `HttpServer` and `handle_http_connection()` for serving a single HTTP connection over any `embedded-io-async` stream without Embassy.
 - Added optional `smoltcp` feature with `SmolTcpStream`, an `embedded-io-async` adapter for `smoltcp` TCP sockets.
 - Added `TimeoutDuration`, a transport-neutral duration type for `HttpClientOptions`.
 - Added CI coverage for `--no-default-features` and `--no-default-features --features tls`.
@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING**: `HttpClientOptions` now uses `TimeoutDuration` instead of `embassy_time::Duration`.
 - **BREAKING**: Transport error variants no longer expose Embassy error types directly; `DnsError`, `ConnectionError`, and `TcpError` are now transport-neutral variants.
 - **BREAKING**: The `embassy` feature is no longer enabled by default. Enable `features = ["embassy"]` to use Embassy-backed adapters.
-- **BREAKING**: Embassy-backed server root exports are now explicitly named `DefaultEmbassyHttpServer`, `EmbassyHttpServer`, and `SmallEmbassyHttpServer`; shared timeout configuration remains `ServerTimeouts`.
+- **BREAKING**: Transport-generic client/server APIs dropped the `Io` infix: `HttpClient`, `HttpClientRequest`, `HttpTlsClient`, `HttpServer`, `DefaultHttpClient`, `DefaultHttpServer`, etc.
+- **BREAKING**: Embassy-backed client/server root exports are now explicitly named `DefaultEmbassyHttpClient`, `EmbassyHttpClient`, `SmallEmbassyHttpClient`, `DefaultEmbassyHttpServer`, `EmbassyHttpServer`, and `SmallEmbassyHttpServer`; shared timeout configuration remains `ServerTimeouts`.
 - Embassy-backed client and server modules are now gated behind the `embassy` feature.
 - Internal layout is now hexagonal: `client/` and `server/` contain transport-neutral IO adapters plus Embassy adapters.
 
@@ -277,7 +278,7 @@ HttpResponseBuilder::new()
 
 - **BREAKING**: Added const generic parameter `RQ` for HTTP request buffer size.
 - **BREAKING**: Added const generics for TCP and TLS buffer sizes (`TCP_RX`, `TCP_TX`, `TLS_READ`, `TLS_WRITE`).
-- Introduced `DefaultHttpClient` and `SmallHttpClient` type aliases.
+- Introduced `DefaultEmbassyHttpClient` and `SmallEmbassyHttpClient` type aliases.
 
 ## [0.7.0] - 2025-04-13
 

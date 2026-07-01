@@ -25,8 +25,8 @@ const REQUEST_SIZE: usize = 1024;
 const SMALL_BUFFER_SIZE: usize = 1024;
 const MEDIUM_BUFFER_SIZE: usize = 4096;
 
-/// Type alias for `HttpClient` with default buffer sizes
-pub type DefaultHttpClient<'a> = HttpClient<
+/// Type alias for `EmbassyHttpClient` with default buffer sizes
+pub type DefaultEmbassyHttpClient<'a> = EmbassyHttpClient<
     'a,
     MEDIUM_BUFFER_SIZE, // TCP_RX: 4KB
     MEDIUM_BUFFER_SIZE, // TCP_TX: 4KB
@@ -35,8 +35,8 @@ pub type DefaultHttpClient<'a> = HttpClient<
     REQUEST_SIZE,       // RQ: 1KB
 >;
 
-/// Type alias for `HttpClient` with small buffer sizes for memory-constrained environments
-pub type SmallHttpClient<'a> = HttpClient<
+/// Type alias for `EmbassyHttpClient` with small buffer sizes for memory-constrained environments
+pub type SmallEmbassyHttpClient<'a> = EmbassyHttpClient<
     'a,
     SMALL_BUFFER_SIZE, // TCP_RX: 1KB
     SMALL_BUFFER_SIZE, // TCP_TX: 1KB
@@ -62,7 +62,7 @@ pub type SmallHttpClient<'a> = HttpClient<
 /// * `TLS_READ` - TLS read record buffer size (default: 4096 bytes, when TLS feature is enabled)
 /// * `TLS_WRITE` - TLS write record buffer size (default: 4096 bytes, when TLS feature is enabled)
 /// * `RQ` - HTTP request buffer size for building requests (default: 1024 bytes)
-pub struct HttpClient<
+pub struct EmbassyHttpClient<
     'a,
     const TCP_RX: usize = MEDIUM_BUFFER_SIZE,
     const TCP_TX: usize = MEDIUM_BUFFER_SIZE,
@@ -83,7 +83,7 @@ impl<
     const TLS_READ: usize,
     const TLS_WRITE: usize,
     const RQ: usize,
-> HttpClient<'a, TCP_RX, TCP_TX, TLS_READ, TLS_WRITE, RQ>
+> EmbassyHttpClient<'a, TCP_RX, TCP_TX, TLS_READ, TLS_WRITE, RQ>
 {
     /// Create a new HTTP client with custom buffer sizes and default options
     #[must_use]
@@ -132,11 +132,11 @@ impl<
     /// # Examples
     ///
     /// ```no_run
-    /// use nanofish::{DefaultHttpClient, HttpHeader, HttpMethod, ResponseBody};
+    /// use nanofish::{DefaultEmbassyHttpClient, HttpHeader, HttpMethod, ResponseBody};
     /// use embassy_net::Stack;
     ///
     /// async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
-    ///     let client = DefaultHttpClient::new(stack);
+    ///     let client = DefaultEmbassyHttpClient::new(stack);
     ///     let mut buffer = [0u8; 8192]; // You control the buffer size!
     ///     let (response, bytes_read) = client.request(
     ///         HttpMethod::GET,
@@ -434,7 +434,7 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`HttpClient::request`].
+    /// Returns the same errors as [`EmbassyHttpClient::request`].
     #[expect(clippy::future_not_send)]
     pub async fn patch<'b>(
         &self,
@@ -465,7 +465,7 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`HttpClient::request`].
+    /// Returns the same errors as [`EmbassyHttpClient::request`].
     #[expect(clippy::future_not_send)]
     pub async fn head<'b>(
         &self,
@@ -489,7 +489,7 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`HttpClient::request`].
+    /// Returns the same errors as [`EmbassyHttpClient::request`].
     #[expect(clippy::future_not_send)]
     pub async fn options<'b>(
         &self,
@@ -519,7 +519,7 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`HttpClient::request`].
+    /// Returns the same errors as [`EmbassyHttpClient::request`].
     #[expect(clippy::future_not_send)]
     pub async fn trace<'b>(
         &self,
@@ -543,7 +543,7 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`HttpClient::request`].
+    /// Returns the same errors as [`EmbassyHttpClient::request`].
     #[expect(clippy::future_not_send)]
     pub async fn connect<'b>(
         &self,
@@ -573,7 +573,7 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`HttpClient::request`].
+    /// Returns the same errors as [`EmbassyHttpClient::request`].
     #[expect(clippy::future_not_send)]
     pub async fn get<'b>(
         &self,
@@ -598,7 +598,7 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`HttpClient::request`].
+    /// Returns the same errors as [`EmbassyHttpClient::request`].
     #[expect(clippy::future_not_send)]
     pub async fn post<'b>(
         &self,
@@ -630,7 +630,7 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`HttpClient::request`].
+    /// Returns the same errors as [`EmbassyHttpClient::request`].
     #[expect(clippy::future_not_send)]
     pub async fn put<'b>(
         &self,
@@ -661,7 +661,7 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`HttpClient::request`].
+    /// Returns the same errors as [`EmbassyHttpClient::request`].
     #[expect(clippy::future_not_send)]
     pub async fn delete<'b>(
         &self,
@@ -763,14 +763,14 @@ mod tests {
         // This test only checks that the options are set correctly, not that the stack is valid.
         // Use a raw pointer to avoid UB and static mut issues. This is safe for type-checking only.
         let fake_stack: *const Stack = core::ptr::NonNull::dangling().as_ptr();
-        let client = DefaultHttpClient::new(unsafe { &*fake_stack });
+        let client = DefaultEmbassyHttpClient::new(unsafe { &*fake_stack });
         let opts = HttpClientOptions {
             max_retries: 1,
             socket_timeout: crate::TimeoutDuration::from_secs(1),
             retry_delay: crate::TimeoutDuration::from_millis(1),
             socket_close_delay: crate::TimeoutDuration::from_millis(1),
         };
-        let client2 = DefaultHttpClient::with_options(unsafe { &*fake_stack }, opts);
+        let client2 = DefaultEmbassyHttpClient::with_options(unsafe { &*fake_stack }, opts);
         assert_eq!(client.options.max_retries, 5);
         assert_eq!(client2.options.max_retries, 1);
     }
@@ -778,10 +778,10 @@ mod tests {
     #[test]
     fn test_default_http_client_constructors() {
         let fake_stack: *const Stack = core::ptr::NonNull::dangling().as_ptr();
-        let client_default = DefaultHttpClient::new(unsafe { &*fake_stack });
+        let client_default = DefaultEmbassyHttpClient::new(unsafe { &*fake_stack });
         assert_eq!(client_default.options.max_retries, 5);
 
-        let client_custom = DefaultHttpClient::with_options(
+        let client_custom = DefaultEmbassyHttpClient::with_options(
             unsafe { &*fake_stack },
             HttpClientOptions {
                 max_retries: 3,
@@ -796,10 +796,10 @@ mod tests {
     #[test]
     fn test_small_http_client_constructors() {
         let fake_stack: *const Stack = core::ptr::NonNull::dangling().as_ptr();
-        let client_small = SmallHttpClient::new(unsafe { &*fake_stack });
+        let client_small = SmallEmbassyHttpClient::new(unsafe { &*fake_stack });
         assert_eq!(client_small.options.max_retries, 5);
 
-        let client_small_custom = SmallHttpClient::with_options(
+        let client_small_custom = SmallEmbassyHttpClient::with_options(
             unsafe { &*fake_stack },
             HttpClientOptions {
                 max_retries: 2,

@@ -11,7 +11,7 @@ use smoltcp::socket::tcp::{RecvError, SendError, Socket};
 
 /// Async IO adapter for a `smoltcp` TCP socket.
 ///
-/// Use this with [`crate::HttpIoClient`], [`crate::HttpIoServer`], or
+/// Use this with [`crate::HttpClient`], [`crate::HttpServer`], or
 /// [`crate::handle_http_connection`] once the socket is connected or accepted.
 /// The surrounding application must keep polling the `smoltcp` interface so the
 /// socket can make progress and wake pending reads/writes.

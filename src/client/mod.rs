@@ -5,7 +5,7 @@ mod embassy;
 mod io;
 
 #[cfg(feature = "embassy")]
-pub use embassy::{DefaultHttpClient, HttpClient, SmallHttpClient};
-pub use io::{DefaultHttpIoClient, HttpIoClient, HttpIoRequest, SmallHttpIoClient};
+pub use embassy::{DefaultEmbassyHttpClient, EmbassyHttpClient, SmallEmbassyHttpClient};
+pub use io::{DefaultHttpClient, HttpClient, HttpClientRequest, SmallHttpClient};
 #[cfg(feature = "tls")]
-pub use io::{DefaultHttpTlsIoClient, HttpTlsIoClient, SmallHttpTlsIoClient};
+pub use io::{DefaultHttpTlsClient, HttpTlsClient, SmallHttpTlsClient};

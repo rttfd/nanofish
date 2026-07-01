@@ -107,18 +107,18 @@ Network → YOUR Buffer (direct) → Zero-Copy References → User Code (no copi
 
 ## Generic IO Client Without Embassy
 
-With `default-features = false`, use `HttpIoClient` over any already-connected `embedded-io-async` stream. This is the non-Embassy client implementation that lives alongside the default Embassy-backed `DefaultHttpClient`. Your platform owns DNS, TCP connection setup, timeouts, and accept loops.
+With `default-features = false`, use `HttpClient` over any already-connected `embedded-io-async` stream. This is the non-Embassy client implementation that lives alongside the default Embassy-backed `DefaultEmbassyHttpClient`. Your platform owns DNS, TCP connection setup, timeouts, and accept loops.
 
-With `default-features = false, features = ["tls"]`, use `HttpTlsIoClient` / `DefaultHttpTlsIoClient` over an already-connected TCP-like stream. TLS is not coupled to Embassy; the caller supplies the stream and RNG.
+With `default-features = false, features = ["tls"]`, use `HttpTlsClient` / `DefaultHttpTlsClient` over an already-connected TCP-like stream. TLS is not coupled to Embassy; the caller supplies the stream and RNG.
 
-With `features = ["smoltcp"]`, wrap a connected or accepted `smoltcp` TCP socket with `SmolTcpStream` and pass it to `HttpIoClient`, `HttpTlsIoClient`, `HttpIoServer`, or `handle_http_connection()`. Your application still owns the `smoltcp` interface/device polling and socket lifecycle.
+With `features = ["smoltcp"]`, wrap a connected or accepted `smoltcp` TCP socket with `SmolTcpStream` and pass it to `HttpClient`, `HttpTlsClient`, `HttpServer`, or `handle_http_connection()`. Your application still owns the `smoltcp` interface/device polling and socket lifecycle.
 
 ```rust,ignore
-use nanofish::{HttpIoClient, SmolTcpStream};
+use nanofish::{HttpClient, SmolTcpStream};
 
 async fn request(socket: &mut smoltcp::socket::tcp::Socket<'_>) -> Result<(), nanofish::Error> {
     let mut stream = SmolTcpStream::new(socket);
-    let client = HttpIoClient::new();
+    let client = HttpClient::new();
     let mut response = [0; 1024];
 
     let (_response, _used) = client
@@ -130,18 +130,18 @@ async fn request(socket: &mut smoltcp::socket::tcp::Socket<'_>) -> Result<(), na
 ```
 
 ```rust,ignore
-use nanofish::{HttpIoClient, HttpIoRequest, HttpMethod};
+use nanofish::{HttpClient, HttpClientRequest, HttpMethod};
 
 async fn request_without_embassy<S>(stream: &mut S) -> Result<(), nanofish::Error>
 where
     S: embedded_io_async::Read + embedded_io_async::Write,
 {
-    let client = HttpIoClient::new();
+    let client = HttpClient::new();
     let mut response_buffer = [0u8; 4096];
 
     let (response, bytes_read) = client.request(
         stream,
-        HttpIoRequest {
+        HttpClientRequest {
             method: HttpMethod::GET,
             host: "example.com",
             path: "/api/status",
@@ -160,11 +160,11 @@ where
 Here's a simple example showing how to use the Embassy-backed client (`features = ["embassy"]`):
 
 ```rust,ignore
-use nanofish::{DefaultHttpClient, HttpHeader, ResponseBody, headers, mime_types};
+use nanofish::{DefaultEmbassyHttpClient, HttpHeader, ResponseBody, headers, mime_types};
 use embassy_net::Stack;
 
 async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
-    let client = DefaultHttpClient::new(stack);
+    let client = DefaultEmbassyHttpClient::new(stack);
     let mut response_buffer = [0u8; 8192];
     let headers = [
         HttpHeader::user_agent("Nanofish/0.13"),
@@ -346,16 +346,16 @@ All methods return a `Result<(HttpResponse, usize), Error>` where:
 Just like the server, you can choose different client sizes:
 
 ```rust,ignore
-use nanofish::{DefaultHttpClient, SmallHttpClient, HttpClient};
+use nanofish::{DefaultEmbassyHttpClient, SmallEmbassyHttpClient, EmbassyHttpClient};
 
 // Default client (4KB buffers) - good for most use cases
-let client = DefaultHttpClient::new(stack);
+let client = DefaultEmbassyHttpClient::new(stack);
 
 // Small client (1KB buffers) - for memory-constrained devices  
-let client = SmallHttpClient::new(stack);
+let client = SmallEmbassyHttpClient::new(stack);
 
 // Custom client with your own buffer sizes
-type CustomClient<'a> = HttpClient<'a, 2048, 2048, 8192, 8192, 2048>;
+type CustomClient<'a> = EmbassyHttpClient<'a, 2048, 2048, 8192, 8192, 2048>;
 //                              TCP_RX ↑    ↑ TCP_TX  ↑     ↑ TLS_WRITE ↑ REQUEST
 //                                           TLS_READ ↑
 let client = CustomClient::new(stack);
@@ -406,17 +406,17 @@ For streaming endpoints such as server-sent events, use the `Content-Type: text/
 
 ### Generic IO Server Without Embassy
 
-With `default-features = false`, use `HttpIoServer` or `handle_http_connection()` to serve one request/response cycle over any `embedded-io-async` stream. This is the non-Embassy server implementation that lives alongside the default Embassy-backed `DefaultEmbassyHttpServer`. Your platform owns listening, accepting, timeouts, and connection lifecycle.
+With `default-features = false`, use `HttpServer` or `handle_http_connection()` to serve one request/response cycle over any `embedded-io-async` stream. This is the non-Embassy server implementation that lives alongside the default Embassy-backed `DefaultEmbassyHttpServer`. Your platform owns listening, accepting, timeouts, and connection lifecycle.
 
 ```rust,ignore
-use nanofish::{DefaultHttpIoServer, SimpleHandler};
+use nanofish::{DefaultHttpServer, SimpleHandler};
 
 async fn serve_one_without_embassy<S>(stream: &mut S) -> Result<(), nanofish::Error>
 where
     S: embedded_io_async::Read + embedded_io_async::Write,
 {
     let mut handler = SimpleHandler;
-    let server = DefaultHttpIoServer::new();
+    let server = DefaultHttpServer::new();
     server.handle_connection(stream, &mut handler).await
 }
 ```

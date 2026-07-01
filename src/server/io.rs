@@ -16,12 +16,12 @@ const SMALL_REQUEST_SIZE: usize = 1024;
 const SMALL_RESPONSE_SIZE: usize = 1024;
 
 /// Transport-generic HTTP server for already-accepted streams.
-pub struct HttpIoServer<
+pub struct HttpServer<
     const REQ_SIZE: usize = DEFAULT_REQUEST_SIZE,
     const MAX_RESPONSE_SIZE: usize = DEFAULT_RESPONSE_SIZE,
 >;
 
-impl HttpIoServer<DEFAULT_REQUEST_SIZE, DEFAULT_RESPONSE_SIZE> {
+impl HttpServer<DEFAULT_REQUEST_SIZE, DEFAULT_RESPONSE_SIZE> {
     /// Create a new transport-generic server with default buffer sizes.
     #[must_use]
     pub const fn new() -> Self {
@@ -30,7 +30,7 @@ impl HttpIoServer<DEFAULT_REQUEST_SIZE, DEFAULT_RESPONSE_SIZE> {
 }
 
 impl<const REQ_SIZE: usize, const MAX_RESPONSE_SIZE: usize>
-    HttpIoServer<REQ_SIZE, MAX_RESPONSE_SIZE>
+    HttpServer<REQ_SIZE, MAX_RESPONSE_SIZE>
 {
     /// Create a new transport-generic server with custom buffer sizes.
     #[must_use]
@@ -58,17 +58,17 @@ impl<const REQ_SIZE: usize, const MAX_RESPONSE_SIZE: usize>
     }
 }
 
-impl Default for HttpIoServer<DEFAULT_REQUEST_SIZE, DEFAULT_RESPONSE_SIZE> {
+impl Default for HttpServer<DEFAULT_REQUEST_SIZE, DEFAULT_RESPONSE_SIZE> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Type alias for `HttpIoServer` with default request and response buffer sizes.
-pub type DefaultHttpIoServer = HttpIoServer<DEFAULT_REQUEST_SIZE, DEFAULT_RESPONSE_SIZE>;
+/// Type alias for `HttpServer` with default request and response buffer sizes.
+pub type DefaultHttpServer = HttpServer<DEFAULT_REQUEST_SIZE, DEFAULT_RESPONSE_SIZE>;
 
-/// Type alias for `HttpIoServer` with smaller request and response buffer sizes.
-pub type SmallHttpIoServer = HttpIoServer<SMALL_REQUEST_SIZE, SMALL_RESPONSE_SIZE>;
+/// Type alias for `HttpServer` with smaller request and response buffer sizes.
+pub type SmallHttpServer = HttpServer<SMALL_REQUEST_SIZE, SMALL_RESPONSE_SIZE>;
 
 /// Handle a single HTTP server connection over a generic async stream.
 ///
@@ -259,7 +259,7 @@ mod tests {
         let request = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let mut stream = MockStream::<128, 512>::new(request);
         let mut handler = SimpleHandler;
-        let server = HttpIoServer::<128, 512>::with_buffer_sizes();
+        let server = HttpServer::<128, 512>::with_buffer_sizes();
 
         futures_lite::future::block_on(server.handle_connection(&mut stream, &mut handler))
             .unwrap();
