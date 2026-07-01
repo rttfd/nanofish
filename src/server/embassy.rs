@@ -18,7 +18,7 @@ const DEFAULT_MAX_RESPONSE_SIZE: usize = 4096;
 
 /// HTTP server timeout configuration
 #[derive(Debug, Clone, Copy)]
-pub struct ServerTimeouts {
+pub struct EmbassyServerTimeouts {
     /// Socket accept timeout in seconds
     pub accept_timeout: u64,
     /// Socket read timeout in seconds
@@ -27,7 +27,7 @@ pub struct ServerTimeouts {
     pub handler_timeout: u64,
 }
 
-impl Default for ServerTimeouts {
+impl Default for EmbassyServerTimeouts {
     fn default() -> Self {
         Self {
             accept_timeout: 10,
@@ -37,7 +37,7 @@ impl Default for ServerTimeouts {
     }
 }
 
-impl ServerTimeouts {
+impl EmbassyServerTimeouts {
     /// Create new server timeouts with custom values
     #[must_use]
     pub const fn new(accept_timeout: u64, read_timeout: u64, handler_timeout: u64) -> Self {
@@ -54,14 +54,14 @@ impl ServerTimeouts {
 /// **Note**: This server only supports HTTP connections, not HTTPS/TLS.
 /// For secure connections, consider using a reverse proxy or load balancer
 /// that handles TLS termination.
-pub struct HttpServer<
+pub struct EmbassyHttpServer<
     const RX_SIZE: usize,
     const TX_SIZE: usize,
     const REQ_SIZE: usize,
     const MAX_RESPONSE_SIZE: usize,
 > {
     port: u16,
-    timeouts: ServerTimeouts,
+    timeouts: EmbassyServerTimeouts,
 }
 
 impl<
@@ -69,20 +69,20 @@ impl<
     const TX_SIZE: usize,
     const REQ_SIZE: usize,
     const MAX_RESPONSE_SIZE: usize,
-> HttpServer<RX_SIZE, TX_SIZE, REQ_SIZE, MAX_RESPONSE_SIZE>
+> EmbassyHttpServer<RX_SIZE, TX_SIZE, REQ_SIZE, MAX_RESPONSE_SIZE>
 {
     /// Create a new HTTP server with default timeouts
     #[must_use]
     pub fn new(port: u16) -> Self {
         Self {
             port,
-            timeouts: ServerTimeouts::default(),
+            timeouts: EmbassyServerTimeouts::default(),
         }
     }
 
     /// Create a new HTTP server with custom timeouts
     #[must_use]
-    pub const fn with_timeouts(port: u16, timeouts: ServerTimeouts) -> Self {
+    pub const fn with_timeouts(port: u16, timeouts: EmbassyServerTimeouts) -> Self {
         Self { port, timeouts }
     }
 
@@ -266,12 +266,16 @@ impl<
     }
 }
 
-/// Type alias for `HttpServer` with default buffer sizes (4KB each)
-pub type DefaultHttpServer =
-    HttpServer<SERVER_BUFFER_SIZE, SERVER_BUFFER_SIZE, MAX_REQUEST_SIZE, DEFAULT_MAX_RESPONSE_SIZE>;
+/// Type alias for `EmbassyHttpServer` with default buffer sizes (4KB each)
+pub type DefaultEmbassyHttpServer = EmbassyHttpServer<
+    SERVER_BUFFER_SIZE,
+    SERVER_BUFFER_SIZE,
+    MAX_REQUEST_SIZE,
+    DEFAULT_MAX_RESPONSE_SIZE,
+>;
 
-/// Type alias for `HttpServer` with small buffer sizes for memory-constrained environments (1KB each)
-pub type SmallHttpServer = HttpServer<1024, 1024, 1024, 1024>;
+/// Type alias for `EmbassyHttpServer` with small buffer sizes for memory-constrained environments (1KB each)
+pub type SmallEmbassyHttpServer = EmbassyHttpServer<1024, 1024, 1024, 1024>;
 
 #[cfg(test)]
 mod tests {
@@ -279,32 +283,33 @@ mod tests {
 
     #[test]
     fn test_http_server_creation() {
-        let server: DefaultHttpServer = HttpServer::new(8080);
+        let server: DefaultEmbassyHttpServer = EmbassyHttpServer::new(8080);
         assert_eq!(server.port, 8080);
         assert_eq!(server.timeouts.accept_timeout, 10);
         assert_eq!(server.timeouts.read_timeout, 30);
         assert_eq!(server.timeouts.handler_timeout, 60);
 
-        let server: SmallHttpServer = HttpServer::new(3000);
+        let server: SmallEmbassyHttpServer = EmbassyHttpServer::new(3000);
         assert_eq!(server.port, 3000);
     }
 
     #[test]
     fn test_server_timeouts() {
         // Test default timeouts
-        let timeouts = ServerTimeouts::default();
+        let timeouts = EmbassyServerTimeouts::default();
         assert_eq!(timeouts.accept_timeout, 10);
         assert_eq!(timeouts.read_timeout, 30);
         assert_eq!(timeouts.handler_timeout, 60);
 
         // Test custom timeouts
-        let custom_timeouts = ServerTimeouts::new(5, 15, 45);
+        let custom_timeouts = EmbassyServerTimeouts::new(5, 15, 45);
         assert_eq!(custom_timeouts.accept_timeout, 5);
         assert_eq!(custom_timeouts.read_timeout, 15);
         assert_eq!(custom_timeouts.handler_timeout, 45);
 
         // Test server with custom timeouts
-        let server = HttpServer::<1024, 1024, 1024, 1024>::with_timeouts(8080, custom_timeouts);
+        let server =
+            EmbassyHttpServer::<1024, 1024, 1024, 1024>::with_timeouts(8080, custom_timeouts);
         assert_eq!(server.port, 8080);
         assert_eq!(server.timeouts.accept_timeout, 5);
         assert_eq!(server.timeouts.read_timeout, 15);
