@@ -16,7 +16,8 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 - **User-Controlled Memory** - You provide the buffer and control exactly how much memory is used
 - **Configurable Buffer Sizes** - Compile-time buffer size configuration using const generics for optimal memory usage
 - **No Standard Library** - Full `no_std` compatibility with no heap allocations
-- **Optional Embassy Integration** - Default async client/server integration built on Embassy networking; core HTTP types build without Embassy via `default-features = false`
+- **Optional Embassy Integration** - Async client/server integration built on Embassy networking; core HTTP types build without Embassy via `default-features = false`
+- **Optional smoltcp Adapter** - Wrap `smoltcp` TCP sockets as `embedded-io-async` streams for the generic client/server APIs
 - **Complete HTTP Support** - All standard HTTP methods (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, CONNECT)
 - **HTTP Server** - Built-in async server with customizable timeouts and request handling
 - **Smart Response Parsing** - Automatic text/binary detection based on Content-Type headers
@@ -48,6 +49,12 @@ nanofish = { version = "0.13", features = ["tls"] }
 nanofish = { version = "0.13", features = ["embassy"] }
 ```
 
+### With smoltcp Socket Adapter
+```toml
+[dependencies]
+nanofish = { version = "0.13", features = ["smoltcp"] }
+```
+
 ### With Logging
 ```toml
 # Using defmt (common in embedded/probe-based workflows)
@@ -65,13 +72,14 @@ The default build includes the transport-neutral HTTP types, parsing, response b
 
 ### Available Features
 - **`embassy`** - Enables the Embassy-backed async client and server integration. Disabled by default.
+- **`smoltcp`** - Enables `SmolTcpStream`, an `embedded-io-async` adapter for `smoltcp` TCP sockets.
 - **`tls`** - Enables HTTPS/TLS support via `embedded-tls`
   - When disabled: Only HTTP requests are supported
   - When enabled: Full HTTPS support with TLS 1.2/1.3
 - **`defmt`** - Enables logging via the [`defmt`](https://github.com/knurling-rs/defmt) framework (commonly used with probe-rs)
 - **`log`** - Enables logging via the [`log`](https://docs.rs/log) crate
 
-Features can be combined freely (except `defmt` + `log`), for example `features = ["tls", "defmt"]`.
+Features can be combined freely (except `defmt` + `log`), for example `features = ["smoltcp", "tls", "defmt"]`.
 
 ## Zero-Copy Architecture
 
@@ -102,6 +110,24 @@ Network → YOUR Buffer (direct) → Zero-Copy References → User Code (no copi
 With `default-features = false`, use `HttpIoClient` over any already-connected `embedded-io-async` stream. This is the non-Embassy client implementation that lives alongside the default Embassy-backed `DefaultHttpClient`. Your platform owns DNS, TCP connection setup, timeouts, and accept loops.
 
 With `default-features = false, features = ["tls"]`, use `HttpTlsIoClient` / `DefaultHttpTlsIoClient` over an already-connected TCP-like stream. TLS is not coupled to Embassy; the caller supplies the stream and RNG.
+
+With `features = ["smoltcp"]`, wrap a connected or accepted `smoltcp` TCP socket with `SmolTcpStream` and pass it to `HttpIoClient`, `HttpTlsIoClient`, `HttpIoServer`, or `handle_http_connection()`. Your application still owns the `smoltcp` interface/device polling and socket lifecycle.
+
+```rust,ignore
+use nanofish::{HttpIoClient, SmolTcpStream};
+
+async fn request(socket: &mut smoltcp::socket::tcp::Socket<'_>) -> Result<(), nanofish::Error> {
+    let mut stream = SmolTcpStream::new(socket);
+    let client = HttpIoClient::new();
+    let mut response = [0; 1024];
+
+    let (_response, _used) = client
+        .get(&mut stream, "example.com", "/", &[], &mut response)
+        .await?;
+
+    Ok(())
+}
+```
 
 ```rust,ignore
 use nanofish::{HttpIoClient, HttpIoRequest, HttpMethod};

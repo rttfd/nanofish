@@ -13,6 +13,7 @@ authors = ["rttf <contact@rttf.dev>"]
 [features]
 default = []
 embassy = ["dep:embassy-net", "dep:embassy-time"]
+smoltcp = ["dep:smoltcp"]
 tls = ["dep:embedded-tls", "dep:rand_core"]
 defmt = ["dep:defmt", "embassy-net?/defmt"]
 log = ["dep:log", "embassy-net?/log"]
@@ -34,6 +35,7 @@ log = { version = "0.4", optional = true }
 # Keep this on 0.6: embedded-tls 0.19 exposes rand_core 0.6 traits in its provider API,
 # so newer rand_core versions are trait-incompatible until embedded-tls upgrades.
 rand_core = { version = "0.6", optional = true }
+smoltcp = { version = "0.13", default-features = false, features = ["async", "medium-ethernet", "proto-ipv4", "socket-tcp"], optional = true }
 
 [dev-dependencies]
 futures-lite = "2.6"

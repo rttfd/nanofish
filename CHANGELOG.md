@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `HttpIoClient` and `HttpIoRequest` for running the HTTP client over any already-connected `embedded-io-async` stream without Embassy.
 - Added `HttpTlsIoClient` for running TLS over any already-connected `embedded-io-async` stream without Embassy when `tls` is enabled.
 - Added `HttpIoServer` and `handle_http_connection()` for serving a single HTTP connection over any `embedded-io-async` stream without Embassy.
+- Added optional `smoltcp` feature with `SmolTcpStream`, an `embedded-io-async` adapter for `smoltcp` TCP sockets.
 - Added `TimeoutDuration`, a transport-neutral duration type for `HttpClientOptions`.
 - Added CI coverage for `--no-default-features` and `--no-default-features --features tls`.
 

@@ -28,6 +28,9 @@ pub mod request;
 pub mod response;
 /// HTTP server ports and adapters.
 pub mod server;
+/// smoltcp adapters for transport-generic IO APIs.
+#[cfg(feature = "smoltcp")]
+pub mod smoltcp;
 /// Predefined HTTP status codes as per RFC 2616.
 pub mod status_code;
 
@@ -49,4 +52,6 @@ pub use server::{
 };
 #[cfg(feature = "embassy")]
 pub use server::{DefaultHttpServer, HttpServer, ServerTimeouts, SmallHttpServer};
+#[cfg(feature = "smoltcp")]
+pub use smoltcp::{SmolTcpError, SmolTcpStream};
 pub use status_code::StatusCode;
