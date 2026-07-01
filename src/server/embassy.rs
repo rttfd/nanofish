@@ -1,17 +1,14 @@
 use crate::{
     error::Error,
     handler::HttpHandler,
-    header::{HttpHeader, headers::CONTENT_LENGTH, mime_types},
-    protocol::{self, DOUBLE_CRLF_LEN},
+    header::mime_types,
     request::HttpRequest,
-    response::{HttpResponse, ResponseBody},
-    server::ServerTimeouts,
+    response::{HttpResponse, HttpResponseBuilder},
+    server::{ServerTimeouts, handle_http_connection_with_sizes},
     status_code::StatusCode,
 };
 use embassy_net::{Stack, tcp::TcpSocket};
 use embassy_time::{Duration, Timer, with_timeout};
-use embedded_io_async::Write as EmbeddedWrite;
-use heapless::Vec;
 
 const SERVER_BUFFER_SIZE: usize = 4096;
 const MAX_REQUEST_SIZE: usize = 4096;
@@ -67,8 +64,6 @@ impl<
 
         let mut rx_buffer = [0; RX_SIZE];
         let mut tx_buffer = [0; TX_SIZE];
-        let mut buf = [0; REQ_SIZE];
-
         loop {
             let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
             socket.set_timeout(Some(Duration::from_secs(self.timeouts.accept_timeout)));
@@ -79,158 +74,60 @@ impl<
                 continue;
             }
 
-            // Reset socket timeout after accept so it doesn't race with read timeout
-            socket.set_timeout(None);
+            socket.set_timeout(Some(Duration::from_secs(self.timeouts.read_timeout)));
 
-            // Read loop: accumulate data until headers + body are complete
-            let mut total_read = 0;
-            let read_ok = match with_timeout(
-                Duration::from_secs(self.timeouts.read_timeout),
-                Self::read_request(&mut socket, &mut buf, &mut total_read),
+            let mut handler = TimeoutHandler {
+                inner: &mut handler,
+                timeout_secs: self.timeouts.handler_timeout,
+            };
+
+            if let Err(e) = handle_http_connection_with_sizes::<_, _, REQ_SIZE, MAX_RESPONSE_SIZE>(
+                &mut socket,
+                &mut handler,
             )
             .await
             {
-                Ok(Ok(())) => true,
-                Ok(Err(e)) => {
-                    warn!("Read error: {:?}", e);
-                    false
-                }
-                Err(_) => {
-                    warn!("Socket read timeout");
-                    false
-                }
-            };
-
-            if !read_ok || total_read == 0 {
-                socket.close();
-                continue;
-            }
-
-            // Parse the request
-            match self
-                .handle_connection(&buf[..total_read], &mut handler)
-                .await
-            {
-                Ok(response_bytes) => {
-                    if let Err(e) = socket.write_all(&response_bytes).await {
-                        warn!("Failed to write response: {:?}", e);
-                    }
-                    if let Err(e) = socket.flush().await {
-                        warn!("Failed to flush response: {:?}", e);
-                    }
-                }
-                Err(e) => {
-                    error!("Error handling request: {:?}", e);
-                    if let Ok(error_bytes) = Self::text_error_response(
-                        StatusCode::InternalServerError,
-                        "Internal Server Error",
-                    ) {
-                        let _ = socket.write_all(&error_bytes).await;
-                        let _ = socket.flush().await;
-                    }
-                }
+                error!("Error handling request: {:?}", e);
             }
 
             socket.close();
         }
     }
+}
 
-    /// Read a complete HTTP request from the socket.
-    ///
-    /// Accumulates data until headers are found (`\r\n\r\n`), then reads
-    /// any remaining body bytes indicated by `Content-Length`.
-    #[expect(clippy::future_not_send)]
-    async fn read_request(
-        socket: &mut TcpSocket<'_>,
-        buf: &mut [u8],
-        total_read: &mut usize,
-    ) -> Result<(), embassy_net::tcp::Error> {
-        let mut header_end = None;
+struct TimeoutHandler<'a, H> {
+    inner: &'a mut H,
+    timeout_secs: u64,
+}
 
-        while *total_read < buf.len() {
-            let n = socket.read(&mut buf[*total_read..]).await?;
-            if n == 0 {
-                break;
-            }
-            *total_read += n;
-
-            // Look for end of headers if not yet found
-            if header_end.is_none() {
-                header_end = protocol::find_double_crlf(&buf[..*total_read]);
-            }
-
-            if let Some(hdr_end) = header_end {
-                let body_start = hdr_end + DOUBLE_CRLF_LEN;
-                // Try to determine Content-Length from the headers
-                if let Some(cl) = Self::parse_content_length(&buf[..hdr_end]) {
-                    if *total_read >= body_start + cl {
-                        break;
-                    }
-                } else {
-                    // No Content-Length — headers are complete, no body expected
-                    break;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Extract `Content-Length` value from raw header bytes.
-    fn parse_content_length(header_bytes: &[u8]) -> Option<usize> {
-        let headers_str = core::str::from_utf8(header_bytes).ok()?;
-        protocol::find_header_value(headers_str, CONTENT_LENGTH)?
-            .parse()
-            .ok()
-    }
-
-    /// Build a plain-text error response.
-    fn text_error_response(
-        status: StatusCode,
-        body: &str,
-    ) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error> {
-        let mut headers = Vec::new();
-        let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
-        let resp = HttpResponse {
-            status_code: status,
-            headers,
-            body: ResponseBody::Text(body),
-        };
-        resp.build_bytes::<MAX_RESPONSE_SIZE>()
-    }
-
-    async fn handle_connection<H>(
-        &self,
-        buffer: &[u8],
-        handler: &mut H,
-    ) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error>
-    where
-        H: HttpHandler,
-    {
-        // Parse the request
-        let request = HttpRequest::try_from(buffer)?;
-
-        // Handle the request
-        let response = match with_timeout(
-            Duration::from_secs(self.timeouts.handler_timeout),
-            handler.handle_request(&request),
+impl<H> HttpHandler for TimeoutHandler<'_, H>
+where
+    H: HttpHandler,
+{
+    async fn handle_request(
+        &mut self,
+        request: &HttpRequest<'_>,
+    ) -> Result<HttpResponse<'_>, Error> {
+        match with_timeout(
+            Duration::from_secs(self.timeout_secs),
+            self.inner.handle_request(request),
         )
         .await
         {
-            Ok(Ok(response)) => response,
+            Ok(Ok(response)) => Ok(response),
             Ok(Err(e)) => {
                 warn!("Handler error: {:?}", e);
-                return Self::text_error_response(
-                    StatusCode::InternalServerError,
-                    "Internal Server Error",
-                );
+                Err(e)
             }
             Err(_) => {
                 warn!("Request handling timed out");
-                return Self::text_error_response(StatusCode::RequestTimeout, "Request Timeout");
+                HttpResponseBuilder::new()
+                    .status(StatusCode::RequestTimeout)
+                    .content_type(mime_types::TEXT)?
+                    .text("Request Timeout")
+                    .build()
             }
-        };
-
-        response.build_bytes::<MAX_RESPONSE_SIZE>()
+        }
     }
 }
 
