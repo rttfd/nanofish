@@ -576,13 +576,13 @@ let server = MyServer::new(80);
 You can customize how long the server waits for different operations:
 
 ```rust,ignore
-use nanofish::{DefaultEmbassyHttpServer, EmbassyServerTimeouts};
+use nanofish::{DefaultEmbassyHttpServer, ServerTimeouts};
 
 // Default timeouts: 10s accept, 30s read, 60s handler
 let server = DefaultEmbassyHttpServer::new(80);
 
 // Custom timeouts
-let timeouts = EmbassyServerTimeouts::new(
+let timeouts = ServerTimeouts::new(
     5,   // 5 seconds to accept new connections
     15,  // 15 seconds to read request data
     30   // 30 seconds for your handler to process requests

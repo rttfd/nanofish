@@ -5,6 +5,7 @@ use crate::{
     protocol::{self, DOUBLE_CRLF_LEN},
     request::HttpRequest,
     response::{HttpResponse, ResponseBody},
+    server::ServerTimeouts,
     status_code::StatusCode,
 };
 use embassy_net::{Stack, tcp::TcpSocket};
@@ -15,39 +16,6 @@ use heapless::Vec;
 const SERVER_BUFFER_SIZE: usize = 4096;
 const MAX_REQUEST_SIZE: usize = 4096;
 const DEFAULT_MAX_RESPONSE_SIZE: usize = 4096;
-
-/// HTTP server timeout configuration
-#[derive(Debug, Clone, Copy)]
-pub struct EmbassyServerTimeouts {
-    /// Socket accept timeout in seconds
-    pub accept_timeout: u64,
-    /// Socket read timeout in seconds
-    pub read_timeout: u64,
-    /// Request handler timeout in seconds
-    pub handler_timeout: u64,
-}
-
-impl Default for EmbassyServerTimeouts {
-    fn default() -> Self {
-        Self {
-            accept_timeout: 10,
-            read_timeout: 30,
-            handler_timeout: 60,
-        }
-    }
-}
-
-impl EmbassyServerTimeouts {
-    /// Create new server timeouts with custom values
-    #[must_use]
-    pub const fn new(accept_timeout: u64, read_timeout: u64, handler_timeout: u64) -> Self {
-        Self {
-            accept_timeout,
-            read_timeout,
-            handler_timeout,
-        }
-    }
-}
 
 /// Simple HTTP server implementation
 ///
@@ -61,7 +29,7 @@ pub struct EmbassyHttpServer<
     const MAX_RESPONSE_SIZE: usize,
 > {
     port: u16,
-    timeouts: EmbassyServerTimeouts,
+    timeouts: ServerTimeouts,
 }
 
 impl<
@@ -76,13 +44,13 @@ impl<
     pub fn new(port: u16) -> Self {
         Self {
             port,
-            timeouts: EmbassyServerTimeouts::default(),
+            timeouts: ServerTimeouts::default(),
         }
     }
 
     /// Create a new HTTP server with custom timeouts
     #[must_use]
-    pub const fn with_timeouts(port: u16, timeouts: EmbassyServerTimeouts) -> Self {
+    pub const fn with_timeouts(port: u16, timeouts: ServerTimeouts) -> Self {
         Self { port, timeouts }
     }
 
@@ -296,13 +264,13 @@ mod tests {
     #[test]
     fn test_server_timeouts() {
         // Test default timeouts
-        let timeouts = EmbassyServerTimeouts::default();
+        let timeouts = ServerTimeouts::default();
         assert_eq!(timeouts.accept_timeout, 10);
         assert_eq!(timeouts.read_timeout, 30);
         assert_eq!(timeouts.handler_timeout, 60);
 
         // Test custom timeouts
-        let custom_timeouts = EmbassyServerTimeouts::new(5, 15, 45);
+        let custom_timeouts = ServerTimeouts::new(5, 15, 45);
         assert_eq!(custom_timeouts.accept_timeout, 5);
         assert_eq!(custom_timeouts.read_timeout, 15);
         assert_eq!(custom_timeouts.handler_timeout, 45);
