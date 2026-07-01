@@ -46,12 +46,14 @@ pub use method::HttpMethod;
 pub use options::{HttpClientOptions, TimeoutDuration};
 pub use request::{HttpRequest, QueryPair, QueryPairs, QueryValues, percent_decode};
 pub use response::{HttpResponse, ResponseBody};
+#[cfg(feature = "embassy")]
+pub use server::{
+    DefaultEmbassyHttpServer, EmbassyHttpServer, EmbassyServerTimeouts, SmallEmbassyHttpServer,
+};
 pub use server::{
     DefaultHttpIoServer, HttpIoServer, SmallHttpIoServer, handle_http_connection,
     handle_http_connection_with_sizes,
 };
-#[cfg(feature = "embassy")]
-pub use server::{DefaultHttpServer, HttpServer, ServerTimeouts, SmallHttpServer};
 #[cfg(feature = "smoltcp")]
 pub use smoltcp::{SmolTcpError, SmolTcpStream};
 pub use status_code::StatusCode;

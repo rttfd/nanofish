@@ -406,7 +406,7 @@ For streaming endpoints such as server-sent events, use the `Content-Type: text/
 
 ### Generic IO Server Without Embassy
 
-With `default-features = false`, use `HttpIoServer` or `handle_http_connection()` to serve one request/response cycle over any `embedded-io-async` stream. This is the non-Embassy server implementation that lives alongside the default Embassy-backed `DefaultHttpServer`. Your platform owns listening, accepting, timeouts, and connection lifecycle.
+With `default-features = false`, use `HttpIoServer` or `handle_http_connection()` to serve one request/response cycle over any `embedded-io-async` stream. This is the non-Embassy server implementation that lives alongside the default Embassy-backed `DefaultEmbassyHttpServer`. Your platform owns listening, accepting, timeouts, and connection lifecycle.
 
 ```rust,ignore
 use nanofish::{DefaultHttpIoServer, SimpleHandler};
@@ -426,7 +426,7 @@ where
 This example uses the Embassy-backed server (`features = ["embassy"]`).
 
 ```rust,ignore
-use nanofish::{DefaultHttpServer, HttpHandler, HttpRequest, HttpResponse, ResponseBody, StatusCode};
+use nanofish::{DefaultEmbassyHttpServer, HttpHandler, HttpRequest, HttpResponse, ResponseBody, StatusCode};
 use embassy_net::Stack;
 
 // Create a simple request handler
@@ -455,7 +455,7 @@ impl HttpHandler for MyHandler {
 }
 
 async fn run_server(stack: Stack<'_>) -> Result<(), nanofish::Error> {
-    let mut server = DefaultHttpServer::new(80);  // Listen on port 80
+    let mut server = DefaultEmbassyHttpServer::new(80);  // Listen on port 80
     let handler = MyHandler;
     
     // This runs forever, handling requests
@@ -558,16 +558,16 @@ impl HttpHandler for DynamicHandler {
 Just like the client, you can choose different server sizes:
 
 ```rust,ignore
-use nanofish::{DefaultHttpServer, SmallHttpServer, HttpServer};
+use nanofish::{DefaultEmbassyHttpServer, SmallEmbassyHttpServer, EmbassyHttpServer};
 
 // Default server (4KB buffers) - good for most use cases
-let server = DefaultHttpServer::new(80);
+let server = DefaultEmbassyHttpServer::new(80);
 
 // Small server (1KB buffers) - for memory-constrained devices  
-let server = SmallHttpServer::new(80);
+let server = SmallEmbassyHttpServer::new(80);
 
 // Custom server with your own buffer sizes
-type MyServer = HttpServer<2048, 2048, 1024, 8192>;  // RX, TX, Request, Response buffer sizes
+type MyServer = EmbassyHttpServer<2048, 2048, 1024, 8192>;  // RX, TX, Request, Response buffer sizes
 let server = MyServer::new(80);
 ```
 
@@ -576,18 +576,18 @@ let server = MyServer::new(80);
 You can customize how long the server waits for different operations:
 
 ```rust,ignore
-use nanofish::{DefaultHttpServer, ServerTimeouts};
+use nanofish::{DefaultEmbassyHttpServer, EmbassyServerTimeouts};
 
 // Default timeouts: 10s accept, 30s read, 60s handler
-let server = DefaultHttpServer::new(80);
+let server = DefaultEmbassyHttpServer::new(80);
 
 // Custom timeouts
-let timeouts = ServerTimeouts::new(
+let timeouts = EmbassyServerTimeouts::new(
     5,   // 5 seconds to accept new connections
     15,  // 15 seconds to read request data
     30   // 30 seconds for your handler to process requests
 );
-let server = DefaultHttpServer::with_timeouts(80, timeouts);
+let server = DefaultEmbassyHttpServer::with_timeouts(80, timeouts);
 ```
 
 ### Request Information
@@ -628,10 +628,10 @@ impl HttpHandler for MyHandler {
 For quick testing, you can use the built-in `SimpleHandler`:
 
 ```rust,ignore
-use nanofish::{DefaultHttpServer, SimpleHandler};
+use nanofish::{DefaultEmbassyHttpServer, SimpleHandler};
 
 async fn run_test_server(stack: Stack<'_>) {
-    let mut server = DefaultHttpServer::new(8080);
+    let mut server = DefaultEmbassyHttpServer::new(8080);
     let handler = SimpleHandler;  // Serves "/" and "/health" endpoints
     
     server.serve(stack, handler).await;

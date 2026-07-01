@@ -23,7 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **BREAKING**: `HttpClientOptions` now uses `TimeoutDuration` instead of `embassy_time::Duration`.
 - **BREAKING**: Transport error variants no longer expose Embassy error types directly; `DnsError`, `ConnectionError`, and `TcpError` are now transport-neutral variants.
-- **BREAKING**: The `embassy` feature is no longer enabled by default. Enable `features = ["embassy"]` to use `DefaultHttpClient`, `HttpClient`, `DefaultHttpServer`, or `HttpServer`.
+- **BREAKING**: The `embassy` feature is no longer enabled by default. Enable `features = ["embassy"]` to use Embassy-backed adapters.
+- **BREAKING**: Embassy-backed server root exports are now explicitly named `DefaultEmbassyHttpServer`, `EmbassyHttpServer`, `SmallEmbassyHttpServer`, and `EmbassyServerTimeouts`.
 - Embassy-backed client and server modules are now gated behind the `embassy` feature.
 - Internal layout is now hexagonal: `client/` and `server/` contain transport-neutral IO adapters plus Embassy adapters.
 
