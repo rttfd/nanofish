@@ -29,11 +29,16 @@ impl TimeoutDuration {
 /// Options for configuring the HTTP client
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpClientOptions {
-    /// Maximum number of retries for read operations
+    /// Maximum number of read attempts for response reads
     pub max_retries: usize,
     /// Timeout duration for socket operations
     pub socket_timeout: TimeoutDuration,
-    /// Delay between retry attempts
+    /// Delay between read retry attempts.
+    ///
+    /// Honored by request APIs that accept a retry delay (for example the
+    /// Embassy-backed clients, which sleep between attempts). Transport-neutral
+    /// APIs retry immediately unless given a delay via
+    /// [`HttpClient::request_with_retry_delay`](crate::client::HttpClient::request_with_retry_delay).
     pub retry_delay: TimeoutDuration,
     /// Delay after closing a socket before proceeding
     pub socket_close_delay: TimeoutDuration,

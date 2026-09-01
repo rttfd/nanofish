@@ -38,7 +38,8 @@ pub mod status_code;
 pub use client::{DefaultEmbassyHttpClient, EmbassyHttpClient, SmallEmbassyHttpClient};
 pub use client::{DefaultHttpClient, HttpClient, HttpClientRequest, SmallHttpClient};
 #[cfg(feature = "tls")]
-pub use client::{DefaultHttpTlsClient, HttpTlsClient, SmallHttpTlsClient};
+pub use client::{DefaultHttpTlsClient, HttpTlsClient, SmallHttpTlsClient, TlsVerification};
+pub use client::{HttpEndpoint, parse_endpoint};
 pub use error::Error;
 pub use handler::{HttpHandler, SimpleHandler};
 pub use header::{HttpHeader, headers, mime_types};
@@ -46,9 +47,10 @@ pub use method::HttpMethod;
 pub use options::{HttpClientOptions, TimeoutDuration};
 pub use request::{HttpRequest, QueryPair, QueryPairs, QueryValues, percent_decode};
 pub use response::{HttpResponse, ResponseBody};
-pub use server::ServerTimeouts;
 #[cfg(feature = "embassy")]
-pub use server::{DefaultEmbassyHttpServer, EmbassyHttpServer, SmallEmbassyHttpServer};
+pub use server::{
+    DefaultEmbassyHttpServer, EmbassyHttpServer, ServerTimeouts, SmallEmbassyHttpServer,
+};
 pub use server::{
     DefaultHttpServer, HttpServer, SmallHttpServer, handle_http_connection,
     handle_http_connection_with_sizes,

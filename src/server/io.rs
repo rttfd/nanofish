@@ -1,7 +1,8 @@
 use crate::{
+    codec,
     error::Error,
     handler::HttpHandler,
-    header::{HttpHeader, headers::CONTENT_LENGTH, mime_types},
+    header::{HttpHeader, mime_types},
     protocol::{self, DOUBLE_CRLF_LEN},
     request::HttpRequest,
     response::{HttpResponse, ResponseBody},
@@ -21,20 +22,15 @@ pub struct HttpServer<
     const MAX_RESPONSE_SIZE: usize = DEFAULT_RESPONSE_SIZE,
 >;
 
-impl HttpServer<DEFAULT_REQUEST_SIZE, DEFAULT_RESPONSE_SIZE> {
-    /// Create a new transport-generic server with default buffer sizes.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self
-    }
-}
-
 impl<const REQ_SIZE: usize, const MAX_RESPONSE_SIZE: usize>
     HttpServer<REQ_SIZE, MAX_RESPONSE_SIZE>
 {
-    /// Create a new transport-generic server with custom buffer sizes.
+    /// Create a new transport-generic server.
+    ///
+    /// Buffer sizes come from the type parameters; see [`DefaultHttpServer`]
+    /// and [`SmallHttpServer`] for ready-made configurations.
     #[must_use]
-    pub const fn with_buffer_sizes() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 
@@ -108,9 +104,6 @@ where
 {
     let mut request_buffer = [0; REQ_SIZE];
     let total_read = read_request(stream, &mut request_buffer).await?;
-    if total_read == 0 {
-        return Err(Error::NoResponse);
-    }
 
     let request = HttpRequest::try_from(&request_buffer[..total_read])?;
     let response = handler.handle_request(&request).await.map_or_else(
@@ -130,12 +123,25 @@ where
     stream.flush().await.map_err(|_| Error::TcpError)
 }
 
+/// Read one complete HTTP request (headers plus any `Content-Length` body).
+///
+/// Requests without `Content-Length` are considered complete once the headers
+/// end; the peer is expected to close the connection after such a request.
+///
+/// # Errors
+///
+/// - [`Error::TcpError`] if the stream fails.
+/// - [`Error::InvalidResponse`] if the peer closes the connection before the
+///   request headers (or a declared body) are complete.
+/// - [`Error::BufferOverflow`] if `buf` fills before the request is complete.
 async fn read_request<S>(stream: &mut S, buf: &mut [u8]) -> Result<usize, Error>
 where
     S: Read,
 {
     let mut total_read = 0;
     let mut header_end = None;
+    let mut saw_eof = false;
+    let mut request_complete = false;
 
     while total_read < buf.len() {
         let n = stream
@@ -143,6 +149,7 @@ where
             .await
             .map_err(|_| Error::TcpError)?;
         if n == 0 {
+            saw_eof = true;
             break;
         }
         total_read += n;
@@ -153,24 +160,26 @@ where
 
         if let Some(hdr_end) = header_end {
             let body_start = hdr_end + DOUBLE_CRLF_LEN;
-            if let Some(content_length) = content_len(&buf[..hdr_end]) {
-                if total_read >= body_start + content_length {
+            if let Some(content_length) = codec::content_length(&buf[..hdr_end]) {
+                if total_read >= body_start.saturating_add(content_length) {
+                    request_complete = true;
                     break;
                 }
             } else {
+                // No Content-Length — headers are complete, no body expected
+                request_complete = true;
                 break;
             }
         }
     }
 
-    Ok(total_read)
-}
-
-fn content_len(header_bytes: &[u8]) -> Option<usize> {
-    let headers_str = core::str::from_utf8(header_bytes).ok()?;
-    protocol::find_header_value(headers_str, CONTENT_LENGTH)?
-        .parse()
-        .ok()
+    if request_complete {
+        return Ok(total_read);
+    }
+    if saw_eof {
+        return Err(Error::InvalidResponse("Incomplete request"));
+    }
+    Err(Error::BufferOverflow)
 }
 
 fn text_error<const MAX_RESPONSE_SIZE: usize>(
@@ -259,7 +268,7 @@ mod tests {
         let request = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let mut stream = MockStream::<128, 512>::new(request);
         let mut handler = SimpleHandler;
-        let server = HttpServer::<128, 512>::with_buffer_sizes();
+        let server = HttpServer::<128, 512>::new();
 
         futures_lite::future::block_on(server.handle_connection(&mut stream, &mut handler))
             .unwrap();
@@ -267,5 +276,115 @@ mod tests {
         let response = core::str::from_utf8(&stream.output).unwrap();
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(response.contains("Hello from nanofish HTTP server"));
+    }
+
+    /// Handler that asserts the parsed request body equals `hello`.
+    struct BodyCheckHandler;
+
+    impl HttpHandler for BodyCheckHandler {
+        async fn handle_request(
+            &mut self,
+            request: &HttpRequest<'_>,
+        ) -> Result<HttpResponse<'_>, Error> {
+            let mut headers = Vec::new();
+            let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
+            let body = if request.body == b"hello".as_slice() && request.content_length() == Some(5)
+            {
+                "body-ok"
+            } else {
+                "body-bad"
+            };
+            Ok(HttpResponse {
+                status_code: StatusCode::Ok,
+                headers,
+                body: ResponseBody::Text(body),
+            })
+        }
+    }
+
+    #[test]
+    fn test_handle_post_with_content_length_body() {
+        let request = b"POST /echo HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello";
+        let mut stream = MockStream::<128, 512>::new(request);
+        let mut handler = BodyCheckHandler;
+
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut handler,
+        ))
+        .unwrap();
+
+        let response = core::str::from_utf8(&stream.output).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with("body-ok"));
+    }
+
+    #[test]
+    fn test_incomplete_request_body_is_rejected() {
+        // Declares Content-Length: 100 but the peer closes after 5 body bytes.
+        let request =
+            b"POST /echo HTTP/1.1\r\nHost: example.com\r\nContent-Length: 100\r\n\r\nhello";
+        let mut stream = MockStream::<128, 512>::new(request);
+        let mut handler = BodyCheckHandler;
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidResponse("Incomplete request")));
+        assert!(stream.output.is_empty());
+    }
+
+    #[test]
+    fn test_incomplete_request_headers_are_rejected() {
+        let request = b"GET / HTTP/1.1\r\nHost: exa";
+        let mut stream = MockStream::<128, 512>::new(request);
+        let mut handler = SimpleHandler;
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidResponse("Incomplete request")));
+    }
+
+    #[test]
+    fn test_request_larger_than_buffer_is_rejected() {
+        let mut raw = Vec::<u8, 256>::new();
+        raw.extend_from_slice(b"GET /").unwrap();
+        for _ in 0..200 {
+            raw.push(b'a').unwrap();
+        }
+        raw.extend_from_slice(b" HTTP/1.1\r\nHost: h\r\n\r\n")
+            .unwrap();
+
+        let mut stream = MockStream::<256, 512>::new(&raw);
+        let mut handler = SimpleHandler;
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::BufferOverflow));
+        assert!(stream.output.is_empty());
+    }
+
+    #[test]
+    fn test_absurd_content_length_does_not_overflow() {
+        // usize::MAX must not overflow the completion check in debug builds.
+        let request =
+            b"POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 18446744073709551615\r\n\r\nhi";
+        let mut stream = MockStream::<128, 512>::new(request);
+        let mut handler = BodyCheckHandler;
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidResponse("Incomplete request")));
     }
 }

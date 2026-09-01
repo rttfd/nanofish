@@ -75,11 +75,19 @@ The default build includes the transport-neutral HTTP types, parsing, response b
 - **`smoltcp`** - Enables `SmolTcpStream`, an `embedded-io-async` adapter for `smoltcp` TCP sockets.
 - **`tls`** - Enables HTTPS/TLS support via `embedded-tls`
   - When disabled: Only HTTP requests are supported
-  - When enabled: Full HTTPS support with TLS 1.2/1.3
+  - When enabled: HTTPS client support with TLS 1.2/1.3 (server remains HTTP-only)
 - **`defmt`** - Enables logging via the [`defmt`](https://github.com/knurling-rs/defmt) framework (commonly used with probe-rs)
 - **`log`** - Enables logging via the [`log`](https://docs.rs/log) crate
 
 Features can be combined freely (except `defmt` + `log`), for example `features = ["smoltcp", "tls", "defmt"]`.
+
+> **TLS security note**: Convenience HTTPS clients (`EmbassyHttpClient` HTTPS paths and
+> `HttpTlsClient` built with `TlsVerification::Unverified`) do **not** verify the server
+> certificate (`embedded-tls` `UnsecureProvider`) and are vulnerable to man-in-the-middle
+> attacks; the Embassy TLS client also derives handshake randomness from the system tick
+> counter. For verified TLS over any stream — including an Embassy `TcpSocket` — build an
+> `HttpTlsClient` with `HttpTlsClient::verified(rng, &mut CertVerifier::new(root_ca))`
+> (requires a cryptographic RNG and, for expiry checks, a clock returning Unix time).
 
 ## Zero-Copy Architecture
 
@@ -109,7 +117,52 @@ Network → YOUR Buffer (direct) → Zero-Copy References → User Code (no copi
 
 With `default-features = false`, use `HttpClient` over any already-connected `embedded-io-async` stream. This is the non-Embassy client implementation that lives alongside the default Embassy-backed `DefaultEmbassyHttpClient`. Your platform owns DNS, TCP connection setup, timeouts, and accept loops.
 
-With `default-features = false, features = ["tls"]`, use `HttpTlsClient` / `DefaultHttpTlsClient` over an already-connected TCP-like stream. TLS is not coupled to Embassy; the caller supplies the stream and RNG.
+With `default-features = false, features = ["tls"]`, use `HttpTlsClient` / `DefaultHttpTlsClient` over an already-connected TCP-like stream. TLS is not coupled to Embassy; the client stores a `TlsVerification` policy and an RNG. With `TlsVerification::Verified` the server certificate chain, hostname, and validity period are verified against a root CA you pin (DER); with `TlsVerification::Unverified` the certificate is **not** checked (see the TLS security note above).
+
+```rust,ignore
+use embedded_tls::{pki::CertVerifier, Aes128GcmSha256, Certificate};
+use nanofish::{DefaultHttpTlsClient, HttpClientRequest, HttpMethod};
+
+// Clock used for certificate expiry checks; return Unix time when known.
+struct WallClock;
+impl embedded_tls::TlsClock for WallClock {
+    fn now() -> Option<u64> {
+        /* from your RTC / NTP */ None
+    }
+}
+
+async fn request<S>(
+    stream: S,
+    root_ca_der: &[u8],
+    rng: impl rand_core::CryptoRngCore,
+) -> Result<(), nanofish::Error>
+where
+    S: embedded_io_async::Read + embedded_io_async::Write,
+{
+    // Verified: chain + hostname + validity against a pinned root CA.
+    let mut verifier = CertVerifier::<Aes128GcmSha256, WallClock, 4096>::new(
+        Certificate::X509(root_ca_der),
+    );
+    let mut client = DefaultHttpTlsClient::verified(rng, &mut verifier);
+    let mut response_buffer = [0u8; 4096];
+
+    let (_response, _used) = client
+        .request(
+            stream,
+            "example.com",
+            HttpClientRequest {
+                method: HttpMethod::GET,
+                host: "example.com",
+                path: "/",
+                headers: &[],
+                body: None,
+            },
+            &mut response_buffer,
+        )
+        .await
+    // Unverified instead: `DefaultHttpTlsClient::unverified(rng)` — no certificate checks.
+}
+```
 
 With `features = ["smoltcp"]`, wrap a connected or accepted `smoltcp` TCP socket with `SmolTcpStream` and pass it to `HttpClient`, `HttpTlsClient`, `HttpServer`, or `handle_http_connection()`. Your application still owns the `smoltcp` interface/device polling and socket lifecycle.
 
@@ -576,16 +629,17 @@ let server = MyServer::new(80);
 You can customize how long the server waits for different operations:
 
 ```rust,ignore
-use nanofish::{DefaultEmbassyHttpServer, ServerTimeouts};
+use nanofish::{DefaultEmbassyHttpServer, ServerTimeouts, TimeoutDuration};
 
 // Default timeouts: 10s accept, 30s read, 60s handler
 let server = DefaultEmbassyHttpServer::new(80);
 
 // Custom timeouts
 let timeouts = ServerTimeouts::new(
-    5,   // 5 seconds to accept new connections
-    15,  // 15 seconds to read request data
-    30   // 30 seconds for your handler to process requests
+    TimeoutDuration::from_secs(5),   // 5 seconds to accept new connections
+    TimeoutDuration::from_secs(15),  // 15 seconds of socket inactivity while
+                                     // reading/writing a request
+    TimeoutDuration::from_secs(30)   // 30 seconds for your handler to process requests
 );
 let server = DefaultEmbassyHttpServer::with_timeouts(80, timeouts);
 ```

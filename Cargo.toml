@@ -14,7 +14,7 @@ authors = ["rttf <contact@rttf.dev>"]
 default = []
 embassy = ["dep:embassy-net", "dep:embassy-time"]
 smoltcp = ["dep:smoltcp"]
-tls = ["dep:embedded-tls", "dep:rand_core"]
+tls = ["dep:embedded-tls", "dep:rand_core", "embedded-tls/rustpki"]
 defmt = ["dep:defmt", "embassy-net?/defmt"]
 log = ["dep:log", "embassy-net?/log"]
 

@@ -1,4 +1,4 @@
-use super::io::{HttpClient as BaseHttpClient, HttpClientRequest, parse_endpoint};
+use crate::client::io::{HttpClient as BaseHttpClient, HttpClientRequest, parse_endpoint};
 use crate::{
     error::Error, header::HttpHeader, method::HttpMethod, options::HttpClientOptions,
     response::HttpResponse,
@@ -49,6 +49,15 @@ pub type SmallEmbassyHttpClient<'a> = EmbassyHttpClient<
 /// The client is designed to work with Embassy's networking stack and requires
 /// users to provide their own response buffers, ensuring maximum memory efficiency
 /// and control while maintaining `no_std` compatibility.
+///
+/// # Security
+///
+/// With the `tls` feature, HTTPS connections **do not verify the server
+/// certificate** (`embedded-tls` `UnsecureProvider`): the server's identity is
+/// not authenticated, so connections are vulnerable to man-in-the-middle
+/// attacks. Handshake randomness is derived from the system tick counter, not
+/// a cryptographic RNG. Only use HTTPS on trusted networks, or terminate TLS
+/// elsewhere (for example on a reverse proxy).
 ///
 /// # Type Parameters
 ///
@@ -244,14 +253,7 @@ impl<
 
         let tls_config = TlsConfig::new().with_server_name(host);
         let mut tls = TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
-        let timeseed_bytes = timeseed();
-        let seed = u32::from_be_bytes([
-            timeseed_bytes[0],
-            timeseed_bytes[1],
-            timeseed_bytes[2],
-            timeseed_bytes[3],
-        ]);
-        let rng = XorShift32Rng::new(seed);
+        let rng = XorShift32Rng::new(tls_seed(Instant::now().as_ticks()));
 
         tls.open(TlsContext::new(
             &tls_config,
@@ -261,7 +263,7 @@ impl<
 
         let client = BaseHttpClient::<RQ>::with_options(self.options);
         let result = client
-            .request(
+            .request_with_retry_delay(
                 &mut tls,
                 HttpClientRequest {
                     method,
@@ -271,6 +273,11 @@ impl<
                     body,
                 },
                 response_buffer,
+                || {
+                    Timer::after(embassy_time::Duration::from_millis(
+                        self.options.retry_delay.as_millis(),
+                    ))
+                },
             )
             .await;
 
@@ -318,7 +325,7 @@ impl<
 
         let client = BaseHttpClient::<RQ>::with_options(self.options);
         let result = client
-            .request(
+            .request_with_retry_delay(
                 &mut socket,
                 HttpClientRequest {
                     method,
@@ -328,6 +335,11 @@ impl<
                     body,
                 },
                 response_buffer,
+                || {
+                    Timer::after(embassy_time::Duration::from_millis(
+                        self.options.retry_delay.as_millis(),
+                    ))
+                },
             )
             .await;
 
@@ -594,11 +606,14 @@ impl<
 }
 
 #[cfg(feature = "tls")]
-fn timeseed() -> [u8; 32] {
-    let bytes: [u8; 8] = Instant::now().as_ticks().to_be_bytes();
-    let mut result: [u8; 32] = [0; 32];
-    result[..8].copy_from_slice(&bytes);
-    result
+fn tls_seed(ticks: u64) -> u32 {
+    /// Fallback seed for the one tick value that is absorbing for `XORShift32`.
+    const ZERO_STATE_FALLBACK: u32 = 0x9E37_79B9;
+
+    match (ticks & 0xFFFF_FFFF).try_into() {
+        Ok(0) | Err(_) => ZERO_STATE_FALLBACK,
+        Ok(seed) => seed,
+    }
 }
 
 /// Simple `XORShift32` PRNG for TLS seeding.
@@ -647,35 +662,8 @@ impl CryptoRng for XorShift32Rng {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ResponseBody, StatusCode, codec};
+    use crate::TimeoutDuration;
     use embassy_net::Stack;
-
-    #[test]
-    fn test_is_response_complete_no_content_length() {
-        // Without Content-Length or chunked, response is never "complete" —
-        // the read loop must rely on connection close (Ok(0))
-        let data = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n";
-        assert!(!codec::complete(data));
-    }
-
-    #[test]
-    fn test_is_response_complete_content_length_zero() {
-        // Content-Length: 0 means empty body — complete once headers end
-        let data = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-        assert!(codec::complete(data));
-    }
-
-    #[test]
-    fn test_is_response_complete_with_content_length() {
-        let data = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
-        assert!(codec::complete(data));
-    }
-
-    #[test]
-    fn test_is_response_complete_incomplete() {
-        let data = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort";
-        assert!(!codec::complete(data));
-    }
 
     #[test]
     fn test_new_and_with_options() {
@@ -685,9 +673,9 @@ mod tests {
         let client = DefaultEmbassyHttpClient::new(unsafe { &*fake_stack });
         let opts = HttpClientOptions {
             max_retries: 1,
-            socket_timeout: crate::TimeoutDuration::from_secs(1),
-            retry_delay: crate::TimeoutDuration::from_millis(1),
-            socket_close_delay: crate::TimeoutDuration::from_millis(1),
+            socket_timeout: TimeoutDuration::from_secs(1),
+            retry_delay: TimeoutDuration::from_millis(1),
+            socket_close_delay: TimeoutDuration::from_millis(1),
         };
         let client2 = DefaultEmbassyHttpClient::with_options(unsafe { &*fake_stack }, opts);
         assert_eq!(client.options.max_retries, 5);
@@ -704,9 +692,9 @@ mod tests {
             unsafe { &*fake_stack },
             HttpClientOptions {
                 max_retries: 3,
-                socket_timeout: crate::TimeoutDuration::from_secs(2),
-                retry_delay: crate::TimeoutDuration::from_millis(10),
-                socket_close_delay: crate::TimeoutDuration::from_millis(5),
+                socket_timeout: TimeoutDuration::from_secs(2),
+                retry_delay: TimeoutDuration::from_millis(10),
+                socket_close_delay: TimeoutDuration::from_millis(5),
             },
         );
         assert_eq!(client_custom.options.max_retries, 3);
@@ -722,85 +710,24 @@ mod tests {
             unsafe { &*fake_stack },
             HttpClientOptions {
                 max_retries: 2,
-                socket_timeout: crate::TimeoutDuration::from_secs(1),
-                retry_delay: crate::TimeoutDuration::from_millis(5),
-                socket_close_delay: crate::TimeoutDuration::from_millis(2),
+                socket_timeout: TimeoutDuration::from_secs(1),
+                retry_delay: TimeoutDuration::from_millis(5),
+                socket_close_delay: TimeoutDuration::from_millis(2),
             },
         );
         assert_eq!(client_small_custom.options.max_retries, 2);
     }
 
+    #[cfg(feature = "tls")]
     #[test]
-    fn test_parse_http_response_binary_body() {
-        // Simulate a PNG-like response with invalid UTF-8 in the body
-        let header = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 8\r\n\r\n";
-        let binary_body: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // PNG magic bytes
-        let mut data = [0u8; 256];
-        data[..header.len()].copy_from_slice(header);
-        data[header.len()..header.len() + binary_body.len()].copy_from_slice(&binary_body);
-        let data = &data[..header.len() + binary_body.len()];
-
-        let response = codec::parse_resp(data).expect("should parse binary response");
-
-        assert_eq!(response.status_code, StatusCode::Ok);
-        assert!(matches!(response.body, ResponseBody::Binary(b) if b == binary_body));
-    }
-
-    #[test]
-    fn test_parse_http_response_text_body() {
-        let data = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello";
-
-        let response = codec::parse_resp(data).expect("should parse text response");
-
-        assert_eq!(response.status_code, StatusCode::Ok);
-        assert!(matches!(response.body, ResponseBody::Text("hello")));
-    }
-
-    #[test]
-    fn test_is_response_complete_chunked() {
-        let incomplete = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
-        assert!(!codec::complete(incomplete));
-
-        let complete =
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
-        assert!(codec::complete(complete));
-    }
-
-    #[test]
-    fn test_dechunk_single_chunk() {
-        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
-        let mut buf = [0u8; 256];
-        buf[..raw.len()].copy_from_slice(raw);
-
-        let new_len = codec::dechunk(&mut buf, raw.len()).expect("should decode chunked");
-
-        let response = codec::parse_resp(&buf[..new_len]).expect("should parse dechunked response");
-
-        assert_eq!(response.status_code, StatusCode::Ok);
-        assert_eq!(response.body.as_str(), Some("hello"));
-    }
-
-    #[test]
-    fn test_dechunk_multiple_chunks() {
-        // Mimics the weather API response from issue #29
-        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\nb\r\n{\"temp\":23}\r\n0\r\n\r\n";
-        let mut buf = [0u8; 256];
-        buf[..raw.len()].copy_from_slice(raw);
-
-        let new_len = codec::dechunk(&mut buf, raw.len()).expect("should decode chunked");
-
-        let response = codec::parse_resp(&buf[..new_len]).expect("should parse dechunked response");
-
-        assert_eq!(response.body.as_str(), Some("{\"temp\":23}"));
-    }
-
-    #[test]
-    fn test_dechunk_noop_when_not_chunked() {
-        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
-        let mut buf = [0u8; 128];
-        buf[..raw.len()].copy_from_slice(raw);
-
-        let new_len = codec::dechunk(&mut buf, raw.len()).expect("should pass through");
-        assert_eq!(new_len, raw.len());
+    fn test_tls_seed_avoids_zero_state() {
+        // At tick zero (and anywhere the low 32 bits are zero) the seed must
+        // fall back to a nonzero value: zero is absorbing for XORShift32.
+        assert_eq!(tls_seed(0), 0x9E37_79B9);
+        assert_eq!(tls_seed(0x1_0000_0000), 0x9E37_79B9);
+        // The low 32 bits are used, so fresh tick values map to themselves.
+        assert_eq!(tls_seed(1), 1);
+        assert_eq!(tls_seed(0xDEAD_BEEF), 0xDEAD_BEEF);
+        assert_eq!(tls_seed(0xFFFF_FFFF), 0xFFFF_FFFF);
     }
 }

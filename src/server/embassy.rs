@@ -2,9 +2,10 @@ use crate::{
     error::Error,
     handler::HttpHandler,
     header::mime_types,
+    options::TimeoutDuration,
     request::HttpRequest,
     response::{HttpResponse, HttpResponseBuilder},
-    server::{ServerTimeouts, handle_http_connection_with_sizes},
+    server::handle_http_connection_with_sizes,
     status_code::StatusCode,
 };
 use embassy_net::{Stack, tcp::TcpSocket};
@@ -13,6 +14,45 @@ use embassy_time::{Duration, Timer, with_timeout};
 const SERVER_BUFFER_SIZE: usize = 4096;
 const MAX_REQUEST_SIZE: usize = 4096;
 const DEFAULT_MAX_RESPONSE_SIZE: usize = 4096;
+
+/// HTTP server timeout configuration for the Embassy-backed server.
+#[derive(Debug, Clone, Copy)]
+pub struct ServerTimeouts {
+    /// Maximum time to wait for accepting a connection.
+    pub accept_timeout: TimeoutDuration,
+    /// Maximum inactivity period on the socket while a connection is being
+    /// handled: the connection is aborted when no traffic is seen for this
+    /// long between socket reads and writes.
+    pub read_timeout: TimeoutDuration,
+    /// Maximum time a request handler may run per request.
+    pub handler_timeout: TimeoutDuration,
+}
+
+impl Default for ServerTimeouts {
+    fn default() -> Self {
+        Self {
+            accept_timeout: TimeoutDuration::from_secs(10),
+            read_timeout: TimeoutDuration::from_secs(30),
+            handler_timeout: TimeoutDuration::from_secs(60),
+        }
+    }
+}
+
+impl ServerTimeouts {
+    /// Create new server timeouts with custom values.
+    #[must_use]
+    pub const fn new(
+        accept_timeout: TimeoutDuration,
+        read_timeout: TimeoutDuration,
+        handler_timeout: TimeoutDuration,
+    ) -> Self {
+        Self {
+            accept_timeout,
+            read_timeout,
+            handler_timeout,
+        }
+    }
+}
 
 /// Simple HTTP server implementation
 ///
@@ -66,7 +106,9 @@ impl<
         let mut tx_buffer = [0; TX_SIZE];
         loop {
             let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
-            socket.set_timeout(Some(Duration::from_secs(self.timeouts.accept_timeout)));
+            socket.set_timeout(Some(Duration::from_millis(
+                self.timeouts.accept_timeout.as_millis(),
+            )));
 
             if let Err(e) = socket.accept(self.port).await {
                 warn!("Accept error: {:?}", e);
@@ -74,11 +116,15 @@ impl<
                 continue;
             }
 
-            socket.set_timeout(Some(Duration::from_secs(self.timeouts.read_timeout)));
+            // Abort the connection when it goes idle, so half-open peers
+            // cannot hold buffers forever.
+            socket.set_timeout(Some(Duration::from_millis(
+                self.timeouts.read_timeout.as_millis(),
+            )));
 
             let mut handler = TimeoutHandler {
                 inner: &mut handler,
-                timeout_secs: self.timeouts.handler_timeout,
+                timeout: self.timeouts.handler_timeout,
             };
 
             if let Err(e) = handle_http_connection_with_sizes::<_, _, REQ_SIZE, MAX_RESPONSE_SIZE>(
@@ -97,7 +143,7 @@ impl<
 
 struct TimeoutHandler<'a, H> {
     inner: &'a mut H,
-    timeout_secs: u64,
+    timeout: TimeoutDuration,
 }
 
 impl<H> HttpHandler for TimeoutHandler<'_, H>
@@ -109,7 +155,7 @@ where
         request: &HttpRequest<'_>,
     ) -> Result<HttpResponse<'_>, Error> {
         match with_timeout(
-            Duration::from_secs(self.timeout_secs),
+            Duration::from_millis(self.timeout.as_millis()),
             self.inner.handle_request(request),
         )
         .await
@@ -150,9 +196,15 @@ mod tests {
     fn test_http_server_creation() {
         let server: DefaultEmbassyHttpServer = EmbassyHttpServer::new(8080);
         assert_eq!(server.port, 8080);
-        assert_eq!(server.timeouts.accept_timeout, 10);
-        assert_eq!(server.timeouts.read_timeout, 30);
-        assert_eq!(server.timeouts.handler_timeout, 60);
+        assert_eq!(
+            server.timeouts.accept_timeout,
+            TimeoutDuration::from_secs(10)
+        );
+        assert_eq!(server.timeouts.read_timeout, TimeoutDuration::from_secs(30));
+        assert_eq!(
+            server.timeouts.handler_timeout,
+            TimeoutDuration::from_secs(60)
+        );
 
         let server: SmallEmbassyHttpServer = EmbassyHttpServer::new(3000);
         assert_eq!(server.port, 3000);
@@ -162,22 +214,38 @@ mod tests {
     fn test_server_timeouts() {
         // Test default timeouts
         let timeouts = ServerTimeouts::default();
-        assert_eq!(timeouts.accept_timeout, 10);
-        assert_eq!(timeouts.read_timeout, 30);
-        assert_eq!(timeouts.handler_timeout, 60);
+        assert_eq!(timeouts.accept_timeout, TimeoutDuration::from_secs(10));
+        assert_eq!(timeouts.read_timeout, TimeoutDuration::from_secs(30));
+        assert_eq!(timeouts.handler_timeout, TimeoutDuration::from_secs(60));
 
         // Test custom timeouts
-        let custom_timeouts = ServerTimeouts::new(5, 15, 45);
-        assert_eq!(custom_timeouts.accept_timeout, 5);
-        assert_eq!(custom_timeouts.read_timeout, 15);
-        assert_eq!(custom_timeouts.handler_timeout, 45);
+        let custom_timeouts = ServerTimeouts::new(
+            TimeoutDuration::from_secs(5),
+            TimeoutDuration::from_secs(15),
+            TimeoutDuration::from_secs(45),
+        );
+        assert_eq!(
+            custom_timeouts.accept_timeout,
+            TimeoutDuration::from_secs(5)
+        );
+        assert_eq!(custom_timeouts.read_timeout, TimeoutDuration::from_secs(15));
+        assert_eq!(
+            custom_timeouts.handler_timeout,
+            TimeoutDuration::from_secs(45)
+        );
 
         // Test server with custom timeouts
         let server =
             EmbassyHttpServer::<1024, 1024, 1024, 1024>::with_timeouts(8080, custom_timeouts);
         assert_eq!(server.port, 8080);
-        assert_eq!(server.timeouts.accept_timeout, 5);
-        assert_eq!(server.timeouts.read_timeout, 15);
-        assert_eq!(server.timeouts.handler_timeout, 45);
+        assert_eq!(
+            server.timeouts.accept_timeout,
+            TimeoutDuration::from_secs(5)
+        );
+        assert_eq!(server.timeouts.read_timeout, TimeoutDuration::from_secs(15));
+        assert_eq!(
+            server.timeouts.handler_timeout,
+            TimeoutDuration::from_secs(45)
+        );
     }
 }
