@@ -143,6 +143,35 @@ pub fn complete(data: &[u8]) -> bool {
         .is_some_and(|content_length| data.len().saturating_sub(headers_end) >= content_length)
 }
 
+/// Whether a full response to a `method` request has been received.
+///
+/// Responses to `HEAD` requests and `1xx`, `204` and `304` responses never
+/// carry a body, even when their headers advertise a `Content-Length` or
+/// chunked encoding, so they are complete once the headers end. Everything else
+/// follows [`complete`].
+pub fn response_complete(method: HttpMethod, data: &[u8]) -> bool {
+    if protocol::find_double_crlf(data).is_none() {
+        return false;
+    }
+    bodyless(method, data) || complete(data)
+}
+
+/// Whether the response head in `data` belongs to a response without a body.
+fn bodyless(method: HttpMethod, data: &[u8]) -> bool {
+    method == HttpMethod::HEAD || matches!(status_code(data), Some(100..=199 | 204 | 304))
+}
+
+/// Numeric status code from the status line, if it is present and valid.
+fn status_code(data: &[u8]) -> Option<u16> {
+    let line_end = protocol::find_crlf(data)?;
+    core::str::from_utf8(&data[..line_end])
+        .ok()?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
 /// Whether `body` holds a whole chunked body: every chunk, the last (zero
 /// size) chunk, any trailers and the final empty line.
 ///
@@ -455,6 +484,55 @@ mod tests {
         let overflow =
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nhello\r\n";
         assert!(complete(overflow));
+    }
+
+    #[test]
+    fn test_response_complete_head_ignores_body_framing() {
+        // A HEAD response advertises the length of the body it does not send.
+        let content_length = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n";
+        assert!(response_complete(HttpMethod::HEAD, content_length));
+        assert!(!response_complete(HttpMethod::GET, content_length));
+
+        let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+        assert!(response_complete(HttpMethod::HEAD, chunked));
+        assert!(!response_complete(HttpMethod::GET, chunked));
+
+        // Still waits for the end of the headers.
+        assert!(!response_complete(
+            HttpMethod::HEAD,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"
+        ));
+    }
+
+    #[test]
+    fn test_response_complete_bodyless_statuses() {
+        for status in ["100 Continue", "101 Switching Protocols", "204 No Content"] {
+            let mut data = heapless::Vec::<u8, 128>::new();
+            data.extend_from_slice(b"HTTP/1.1 ").unwrap();
+            data.extend_from_slice(status.as_bytes()).unwrap();
+            data.extend_from_slice(b"\r\n\r\n").unwrap();
+            assert!(
+                response_complete(HttpMethod::GET, &data),
+                "{status} should be complete at the end of the headers"
+            );
+        }
+
+        // A 304 may repeat the `Content-Length` of the cached representation.
+        let not_modified = b"HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\n\r\n";
+        assert!(response_complete(HttpMethod::GET, not_modified));
+    }
+
+    #[test]
+    fn test_response_complete_other_statuses_follow_body_framing() {
+        // No declared length: only connection close ends the body.
+        let no_length = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello";
+        assert!(!response_complete(HttpMethod::GET, no_length));
+
+        let partial = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort";
+        assert!(!response_complete(HttpMethod::GET, partial));
+
+        let full = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        assert!(response_complete(HttpMethod::GET, full));
     }
 
     #[test]

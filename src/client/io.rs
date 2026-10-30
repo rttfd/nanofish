@@ -178,6 +178,7 @@ impl<const RQ: usize> HttpClient<RQ> {
 
         let total_read = read_response(
             stream,
+            request.method,
             response_buffer,
             self.options.max_retries,
             retry_delay,
@@ -254,7 +255,9 @@ impl<const RQ: usize> HttpClient<RQ> {
 ///
 /// `retry_delay` is awaited between retries. A response is complete once its
 /// headers plus `Content-Length` body bytes or the chunked terminator arrive;
-/// a body without either is delimited by connection close.
+/// a body without either is delimited by connection close. Responses to `HEAD`
+/// requests and `1xx`, `204` and `304` responses have no body and are complete
+/// at the end of the headers.
 ///
 /// # Errors
 ///
@@ -266,6 +269,7 @@ impl<const RQ: usize> HttpClient<RQ> {
 ///   complete.
 async fn read_response<S, D, Fut>(
     stream: &mut S,
+    method: HttpMethod,
     response_buffer: &mut [u8],
     max_retries: usize,
     retry_delay: D,
@@ -287,7 +291,7 @@ where
             }
             Ok(n) => {
                 total_read += n;
-                if codec::complete(&response_buffer[..total_read]) {
+                if codec::response_complete(method, &response_buffer[..total_read]) {
                     return Ok(total_read);
                 }
             }
@@ -305,7 +309,7 @@ where
         return Err(Error::NoResponse);
     }
 
-    if codec::complete(&response_buffer[..total_read]) {
+    if codec::response_complete(method, &response_buffer[..total_read]) {
         return Ok(total_read);
     }
 
@@ -502,6 +506,75 @@ mod tests {
             result,
             Err(Error::InvalidResponse("Incomplete response body"))
         ));
+    }
+
+    #[test]
+    fn test_io_client_head_response_without_body() {
+        // HEAD advertises the body length but never sends the body.
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100\r\n\r\n";
+        let mut stream = MockStream::<128, 256>::new(raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+
+        let (response, total) = futures_lite::future::block_on(client.request(
+            &mut stream,
+            HttpClientRequest {
+                method: HttpMethod::HEAD,
+                host: "example.com",
+                path: "/",
+                headers: &[],
+                body: None,
+            },
+            &mut buffer,
+        ))
+        .unwrap();
+
+        assert_eq!(total, raw.len());
+        assert_eq!(response.status_code, StatusCode::Ok);
+        assert_eq!(response.content_length(), Some(100));
+        assert_eq!(response.body, ResponseBody::Empty);
+    }
+
+    #[test]
+    fn test_io_client_head_response_over_get_is_incomplete() {
+        // The same bytes are a truncated response to a GET.
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n";
+        let mut stream = MockStream::<128, 256>::new(raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+
+        let result = futures_lite::future::block_on(client.get(
+            &mut stream,
+            "example.com",
+            "/",
+            &[],
+            &mut buffer,
+        ));
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidResponse("Incomplete response body"))
+        ));
+    }
+
+    #[test]
+    fn test_io_client_not_modified_with_content_length() {
+        let raw = b"HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\nETag: \"x\"\r\n\r\n";
+        let mut stream = MockStream::<128, 256>::new(raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+
+        let (response, _) = futures_lite::future::block_on(client.get(
+            &mut stream,
+            "example.com",
+            "/",
+            &[],
+            &mut buffer,
+        ))
+        .unwrap();
+
+        assert_eq!(response.status_code, StatusCode::NotModified);
+        assert_eq!(response.body, ResponseBody::Empty);
     }
 
     #[test]
