@@ -3,6 +3,7 @@ use crate::client::io::{
     HttpClient as BaseHttpClient, HttpClientRequest, HttpEndpoint, parse_endpoint,
 };
 use crate::client::redirect::follow;
+use crate::client::stream::{BodySink, StreamedResponse};
 use crate::{
     codec, error::Error, header::HttpHeader, method::HttpMethod, options::HttpClientOptions,
     response::HttpResponse,
@@ -407,6 +408,86 @@ impl<
                 .await
         })
         .await
+    }
+
+    /// Make a request and stream the response body to `sink` instead of
+    /// collecting it in a buffer.
+    ///
+    /// `buffer` only has to hold the status line and headers plus the piece of
+    /// the body read at a time. See
+    /// [`HttpClient::request_streaming`](crate::HttpClient::request_streaming)
+    /// for how the sink is driven and which errors can occur. Redirects are not
+    /// followed; check the status in [`BodySink::head`] and request the
+    /// `Location` yourself. [`HttpClientOptions::total_timeout`] applies.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`EmbassyHttpClient::request`] that apply before
+    /// the response, and those of `request_streaming` while reading it.
+    #[expect(clippy::future_not_send)]
+    pub async fn request_streaming<K: BodySink>(
+        &self,
+        method: HttpMethod,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        body: Option<&[u8]>,
+        buffer: &mut [u8],
+        sink: &mut K,
+    ) -> Result<StreamedResponse, Error> {
+        let attempt = async {
+            let endpoint = parse_endpoint(endpoint)?;
+            let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
+            let client = BaseHttpClient::<RQ>::with_options(self.options);
+            let request = HttpClientRequest {
+                method,
+                host: &host_header,
+                path: endpoint.path,
+                query: endpoint.query,
+                headers,
+                body,
+            };
+
+            match endpoint.scheme {
+                #[cfg(feature = "tls")]
+                "https" => {
+                    self.with_https_connection(&endpoint, async |tls| {
+                        client
+                            .request_streaming_with_retry_delay(tls, request, buffer, sink, || {
+                                self.retry_delay()
+                            })
+                            .await
+                    })
+                    .await
+                }
+                #[cfg(not(feature = "tls"))]
+                "https" => Err(Error::UnsupportedScheme("https (TLS support not enabled)")),
+                "http" => {
+                    self.with_http_connection(&endpoint, async |socket| {
+                        client
+                            .request_streaming_with_retry_delay(
+                                socket,
+                                request,
+                                buffer,
+                                sink,
+                                || self.retry_delay(),
+                            )
+                            .await
+                    })
+                    .await
+                }
+                _ => Err(Error::UnsupportedScheme("unknown")),
+            }
+        };
+
+        match self.options.total_timeout {
+            Some(limit) => with_timeout(
+                embassy_time::Duration::from_millis(limit.as_millis()),
+                attempt,
+            )
+            .await
+            .unwrap_or(Err(Error::Timeout)),
+            None => attempt.await,
+        }
     }
 
     /// Send a request described by a [`RequestBuilder`].

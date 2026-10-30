@@ -1,11 +1,14 @@
 use crate::{
-    client::builder::RequestBuilder,
-    codec,
+    client::{
+        builder::RequestBuilder,
+        stream::{BodySink, ChunkDecoder, StreamedResponse},
+    },
+    codec::{self, BodyFraming},
     error::Error,
     header::HttpHeader,
     method::HttpMethod,
     options::HttpClientOptions,
-    protocol::{DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT},
+    protocol::{self, DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DOUBLE_CRLF_LEN},
     response::HttpResponse,
 };
 use core::fmt::Write as _;
@@ -383,6 +386,164 @@ impl<const RQ: usize> HttpClient<RQ> {
         stream.flush().await.map_err(Error::io)
     }
 
+    /// Send one HTTP request and hand the response body to `sink` piece by
+    /// piece, instead of collecting it in a buffer.
+    ///
+    /// `buffer` only has to hold the status line and headers, plus whatever
+    /// piece of the body is read at a time, so a response of any size passes
+    /// through a small buffer. The sink first sees the head
+    /// ([`BodySink::head`]) and can reject the response, then the decoded body
+    /// ([`BodySink::chunk`]); a chunked body is delivered without its framing.
+    ///
+    /// Read errors are retried like in [`HttpClient::request`].
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::BufferOverflow`] if the response head does not fit in
+    ///   `buffer`.
+    /// - [`Error::NoResponse`] if the connection closes before any response
+    ///   byte arrives.
+    /// - [`Error::InvalidResponse`] if the response is malformed or is cut
+    ///   short, so a truncated download is never reported as complete.
+    /// - Any error returned by the sink.
+    /// - The errors of building and sending the request, see
+    ///   [`HttpClient::request`].
+    pub async fn request_streaming<S, K>(
+        &self,
+        stream: &mut S,
+        request: HttpClientRequest<'_>,
+        buffer: &mut [u8],
+        sink: &mut K,
+    ) -> Result<StreamedResponse, Error>
+    where
+        S: Read + Write,
+        K: BodySink,
+    {
+        self.request_streaming_with_retry_delay(stream, request, buffer, sink, || {
+            core::future::ready(())
+        })
+        .await
+    }
+
+    /// Like [`HttpClient::request_streaming`], sleeping via `retry_delay`
+    /// between read retries.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpClient::request_streaming`].
+    pub async fn request_streaming_with_retry_delay<S, K, D, Fut>(
+        &self,
+        stream: &mut S,
+        request: HttpClientRequest<'_>,
+        buffer: &mut [u8],
+        sink: &mut K,
+        mut retry_delay: D,
+    ) -> Result<StreamedResponse, Error>
+    where
+        S: Read + Write,
+        K: BodySink,
+        D: Fn() -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let method = request.method;
+        self.send_request(stream, &request, false).await?;
+
+        let mut retries = self.options.max_retries;
+        let mut held = 0;
+        let mut searched: usize = 0;
+        let head_end = loop {
+            if held == buffer.len() {
+                return Err(Error::BufferOverflow);
+            }
+            let n =
+                read_retrying(stream, &mut buffer[held..], &mut retries, &mut retry_delay).await?;
+            if n == 0 {
+                return Err(if held == 0 {
+                    Error::NoResponse
+                } else {
+                    Error::InvalidResponse("Incomplete response head")
+                });
+            }
+            held += n;
+            let from = searched.saturating_sub(DOUBLE_CRLF_LEN - 1);
+            if let Some(pos) = protocol::find_double_crlf(&buffer[from..held]) {
+                break from + pos + DOUBLE_CRLF_LEN;
+            }
+            searched = held;
+        };
+
+        codec::check_response_framing(&buffer[..head_end])?;
+        let framing = codec::response_framing(method, &buffer[..head_end]);
+        let status_code = {
+            let response = codec::parse_resp(&buffer[..head_end])?;
+            sink.head(&response).await?;
+            response.status_code
+        };
+
+        // Keep what followed the head in the same read: it is body.
+        buffer.copy_within(head_end..held, 0);
+        held -= head_end;
+
+        let mut delivered = 0;
+        match framing {
+            BodyFraming::None => {}
+            BodyFraming::Length(total) => {
+                while delivered < total {
+                    if held == 0 {
+                        held = read_retrying(stream, &mut *buffer, &mut retries, &mut retry_delay)
+                            .await?;
+                        if held == 0 {
+                            return Err(Error::InvalidResponse("Incomplete response body"));
+                        }
+                    }
+                    // Bytes beyond the declared length are not part of the body.
+                    let take = held.min(total - delivered);
+                    sink.chunk(&buffer[..take]).await?;
+                    delivered += take;
+                    held = 0;
+                }
+            }
+            BodyFraming::UntilClose => loop {
+                if held > 0 {
+                    sink.chunk(&buffer[..held]).await?;
+                    delivered += held;
+                }
+                held = read_retrying(stream, &mut *buffer, &mut retries, &mut retry_delay).await?;
+                if held == 0 {
+                    break;
+                }
+            },
+            BodyFraming::Chunked => {
+                let mut decoder = ChunkDecoder::new();
+                loop {
+                    let mut pos = 0;
+                    while pos < held && !decoder.is_done() {
+                        let step = decoder.step(&buffer[pos..held])?;
+                        if let Some(range) = step.data {
+                            sink.chunk(&buffer[pos + range.start..pos + range.end])
+                                .await?;
+                            delivered += range.len();
+                        }
+                        pos += step.consumed;
+                    }
+                    if decoder.is_done() {
+                        break;
+                    }
+                    held =
+                        read_retrying(stream, &mut *buffer, &mut retries, &mut retry_delay).await?;
+                    if held == 0 {
+                        return Err(Error::InvalidResponse("Incomplete response body"));
+                    }
+                }
+            }
+        }
+
+        Ok(StreamedResponse {
+            status_code,
+            body_len: delivered,
+        })
+    }
+
     /// Send a request described by a [`RequestBuilder`] over an already-connected
     /// stream.
     ///
@@ -503,6 +664,36 @@ impl<const RQ: usize> HttpClient<RQ> {
             response_buffer,
         )
         .await
+    }
+}
+
+/// One read from `stream`, retrying transient errors like [`read_response`]:
+/// `retries` counts the read attempts left across the whole response.
+async fn read_retrying<S, D, Fut>(
+    stream: &mut S,
+    buffer: &mut [u8],
+    retries: &mut usize,
+    retry_delay: &mut D,
+) -> Result<usize, Error>
+where
+    S: Read,
+    D: FnMut() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    loop {
+        if *retries == 0 {
+            return Err(Error::NoResponse);
+        }
+        match stream.read(buffer).await {
+            Ok(n) => return Ok(n),
+            Err(error) => {
+                *retries -= 1;
+                if *retries == 0 {
+                    return Err(Error::io(error));
+                }
+                retry_delay().await;
+            }
+        }
     }
 }
 
@@ -1014,6 +1205,369 @@ mod tests {
         let request = core::str::from_utf8(&stream.output).unwrap();
         assert!(request.contains("Content-Type: application/x-www-form-urlencoded\r\n"));
         assert!(request.ends_with("name=A%20B&k=v%26w"));
+    }
+
+    /// Collects what `request_streaming` hands to a sink.
+    #[derive(Default)]
+    struct Collect {
+        status: Option<StatusCode>,
+        content_length: Option<usize>,
+        body: std::vec::Vec<u8>,
+        chunk_sizes: std::vec::Vec<usize>,
+        reject_status: Option<StatusCode>,
+        fail_after: Option<usize>,
+    }
+
+    impl BodySink for Collect {
+        async fn head(&mut self, response: &HttpResponse<'_>) -> Result<(), Error> {
+            self.status = Some(response.status_code);
+            self.content_length = response.content_length();
+            if self.reject_status == Some(response.status_code) {
+                return Err(Error::InvalidResponse("rejected by sink"));
+            }
+            Ok(())
+        }
+
+        async fn chunk(&mut self, data: &[u8]) -> Result<(), Error> {
+            assert!(!data.is_empty());
+            if self
+                .fail_after
+                .is_some_and(|limit| self.body.len() >= limit)
+            {
+                return Err(Error::BufferOverflow);
+            }
+            self.body.extend_from_slice(data);
+            self.chunk_sizes.push(data.len());
+            Ok(())
+        }
+    }
+
+    /// Hands out at most `max` bytes per read.
+    struct Trickle<const IN: usize, const OUT: usize> {
+        inner: MockStream<IN, OUT>,
+        max: usize,
+    }
+
+    impl<const IN: usize, const OUT: usize> ErrorType for Trickle<IN, OUT> {
+        type Error = Infallible;
+    }
+
+    impl<const IN: usize, const OUT: usize> Read for Trickle<IN, OUT> {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let n = buf.len().min(self.max);
+            self.inner.read(&mut buf[..n]).await
+        }
+    }
+
+    impl<const IN: usize, const OUT: usize> Write for Trickle<IN, OUT> {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.inner.write(buf).await
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            self.inner.flush().await
+        }
+    }
+
+    fn get_request(method: HttpMethod) -> HttpClientRequest<'static> {
+        HttpClientRequest {
+            method,
+            host: "example.com",
+            path: "/fw.bin",
+            query: None,
+            headers: &[],
+            body: None,
+        }
+    }
+
+    /// A response with a `len`-byte body of `0..=250` repeating.
+    fn length_response(len: usize) -> std::vec::Vec<u8> {
+        let mut raw = std::vec::Vec::from(
+            std::format!("HTTP/1.1 200 OK\r\nContent-Length: {len}\r\n\r\n").as_bytes(),
+        );
+        raw.extend((0..len).map(|i| u8::try_from(i % 251).unwrap()));
+        raw
+    }
+
+    #[test]
+    fn test_streaming_length_body_through_small_buffer() {
+        let raw = length_response(600);
+        let mut stream = MockStream::<1024, 256>::new(&raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 100];
+        let mut sink = Collect::default();
+
+        let streamed = futures_lite::future::block_on(client.request_streaming(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+            &mut sink,
+        ))
+        .unwrap();
+
+        assert_eq!(streamed.status_code, StatusCode::Ok);
+        assert_eq!(streamed.body_len, 600);
+        assert_eq!(sink.status, Some(StatusCode::Ok));
+        assert_eq!(sink.content_length, Some(600));
+        assert_eq!(sink.body, raw[raw.len() - 600..]);
+        // The buffer is far smaller than the body.
+        assert!(sink.chunk_sizes.iter().all(|&n| n <= 100));
+        let request = core::str::from_utf8(&stream.output).unwrap();
+        assert!(request.starts_with("GET /fw.bin HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn test_streaming_body_is_exact_for_every_read_size() {
+        let raw = length_response(130);
+        for max in [1, 2, 7, 50, 1000] {
+            let mut stream = Trickle {
+                inner: MockStream::<512, 256>::new(&raw),
+                max,
+            };
+            let client = HttpClient::new();
+            let mut buffer = [0; 64];
+            let mut sink = Collect::default();
+
+            let streamed = futures_lite::future::block_on(client.request_streaming(
+                &mut stream,
+                get_request(HttpMethod::GET),
+                &mut buffer,
+                &mut sink,
+            ))
+            .unwrap();
+
+            assert_eq!(streamed.body_len, 130, "max {max}");
+            assert_eq!(sink.body, raw[raw.len() - 130..], "max {max}");
+        }
+    }
+
+    #[test]
+    fn test_streaming_chunked_body_is_decoded() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nab0\r\n\r\n\r\na;x=1\r\n0123456789\r\n0\r\nT: v\r\n\r\n";
+        for max in [1, 3, 8, 1000] {
+            let mut stream = Trickle {
+                inner: MockStream::<256, 256>::new(raw),
+                max,
+            };
+            let client = HttpClient::new();
+            let mut buffer = [0; 48];
+            let mut sink = Collect::default();
+
+            let streamed = futures_lite::future::block_on(client.request_streaming(
+                &mut stream,
+                get_request(HttpMethod::GET),
+                &mut buffer,
+                &mut sink,
+            ))
+            .unwrap();
+
+            assert_eq!(sink.body, b"ab0\r\n\r\n0123456789", "max {max}");
+            assert_eq!(streamed.body_len, 17);
+        }
+    }
+
+    #[test]
+    fn test_streaming_close_delimited_body() {
+        let raw = b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nuntil the connection closes";
+        let mut stream = Trickle {
+            inner: MockStream::<256, 256>::new(raw),
+            max: 5,
+        };
+        let client = HttpClient::new();
+        let mut buffer = [0; 64];
+        let mut sink = Collect::default();
+
+        let streamed = futures_lite::future::block_on(client.request_streaming(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+            &mut sink,
+        ))
+        .unwrap();
+
+        assert_eq!(sink.body, b"until the connection closes");
+        assert_eq!(streamed.body_len, 27);
+    }
+
+    #[test]
+    fn test_streaming_head_response_has_no_body() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n";
+        let mut stream = MockStream::<128, 256>::new(raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+        let mut sink = Collect::default();
+
+        let streamed = futures_lite::future::block_on(client.request_streaming(
+            &mut stream,
+            get_request(HttpMethod::HEAD),
+            &mut buffer,
+            &mut sink,
+        ))
+        .unwrap();
+
+        assert_eq!(streamed.body_len, 0);
+        assert_eq!(sink.content_length, Some(5000));
+        assert!(sink.chunk_sizes.is_empty());
+    }
+
+    #[test]
+    fn test_streaming_empty_body_calls_no_chunks() {
+        let raw = b"HTTP/1.1 204 No Content\r\n\r\n";
+        let mut stream = MockStream::<64, 256>::new(raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 64];
+        let mut sink = Collect::default();
+
+        let streamed = futures_lite::future::block_on(client.request_streaming(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+            &mut sink,
+        ))
+        .unwrap();
+
+        assert_eq!(streamed.status_code, StatusCode::NoContent);
+        assert!(sink.chunk_sizes.is_empty());
+    }
+
+    #[test]
+    fn test_streaming_sink_can_reject_the_response_before_the_body() {
+        let raw = b"HTTP/1.1 404 Not Found\r\nContent-Length: 4\r\n\r\nnope";
+        let mut stream = MockStream::<128, 256>::new(raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+        let mut sink = Collect {
+            reject_status: Some(StatusCode::NotFound),
+            ..Collect::default()
+        };
+
+        let result = futures_lite::future::block_on(client.request_streaming(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+            &mut sink,
+        ));
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidResponse("rejected by sink"))
+        ));
+        assert!(sink.chunk_sizes.is_empty());
+    }
+
+    #[test]
+    fn test_streaming_sink_error_stops_the_download() {
+        let raw = length_response(300);
+        let mut stream = MockStream::<512, 256>::new(&raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 80];
+        let mut sink = Collect {
+            fail_after: Some(100),
+            ..Collect::default()
+        };
+
+        let result = futures_lite::future::block_on(client.request_streaming(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+            &mut sink,
+        ));
+
+        assert!(matches!(result, Err(Error::BufferOverflow)));
+        assert!(sink.body.len() < 300);
+    }
+
+    #[test]
+    fn test_streaming_truncated_body_is_an_error() {
+        let mut raw = length_response(100);
+        raw.truncate(raw.len() - 10);
+        let mut stream = MockStream::<256, 256>::new(&raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 64];
+        let mut sink = Collect::default();
+
+        let result = futures_lite::future::block_on(client.request_streaming(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+            &mut sink,
+        ));
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidResponse("Incomplete response body"))
+        ));
+
+        // The same for an unfinished chunked body.
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
+        let mut stream = MockStream::<128, 256>::new(raw);
+        let result = futures_lite::future::block_on(client.request_streaming(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+            &mut Collect::default(),
+        ));
+        assert!(matches!(
+            result,
+            Err(Error::InvalidResponse("Incomplete response body"))
+        ));
+    }
+
+    #[test]
+    fn test_streaming_head_larger_than_buffer() {
+        let raw = length_response(10);
+        let mut stream = MockStream::<256, 256>::new(&raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 20];
+        let mut sink = Collect::default();
+
+        let result = futures_lite::future::block_on(client.request_streaming(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+            &mut sink,
+        ));
+
+        assert!(matches!(result, Err(Error::BufferOverflow)));
+        assert_eq!(sink.status, None);
+    }
+
+    #[test]
+    fn test_streaming_no_response() {
+        let mut stream = MockStream::<8, 256>::new(b"");
+        let client = HttpClient::new();
+        let mut buffer = [0; 64];
+
+        let result = futures_lite::future::block_on(client.request_streaming(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+            &mut Collect::default(),
+        ));
+
+        assert!(matches!(result, Err(Error::NoResponse)));
+    }
+
+    #[test]
+    fn test_streaming_rejects_conflicting_content_length() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Length: 5\r\n\r\nabcd";
+        let mut stream = MockStream::<128, 256>::new(raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+        let mut sink = Collect::default();
+
+        let result = futures_lite::future::block_on(client.request_streaming(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+            &mut sink,
+        ));
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidResponse("Conflicting Content-Length"))
+        ));
+        assert_eq!(sink.status, None);
     }
 
     /// A server that answers each flushed request with the next canned reply,

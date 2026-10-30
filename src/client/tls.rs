@@ -2,6 +2,7 @@ use core::future::Future;
 
 use crate::client::builder::RequestBuilder;
 use crate::client::io::{HttpClient, HttpClientRequest};
+use crate::client::stream::{BodySink, StreamedResponse};
 use crate::client::{DEFAULT_REQUEST_SIZE, SMALL_REQUEST_SIZE};
 use crate::{error::Error, options::HttpClientOptions, response::HttpResponse};
 use embedded_io_async::{Read, Write};
@@ -208,6 +209,93 @@ impl<'a, RNG, const RQ: usize, const TLS_READ: usize, const TLS_WRITE: usize>
         D: Fn() -> Fut,
         Fut: Future<Output = ()>,
     {
+        let client = HttpClient::<RQ>::with_options(self.options);
+        self.with_connection(stream, server_name, async |tls| {
+            client
+                .request_with_retry_delay(tls, request, response_buffer, retry_delay)
+                .await
+        })
+        .await
+    }
+
+    /// Send one HTTPS request over an already-connected stream and hand the
+    /// response body to `sink` piece by piece.
+    ///
+    /// See [`HttpClient::request_streaming`] for how the sink is driven and
+    /// which errors can occur; the client's [`TlsVerification`] policy applies
+    /// as for [`HttpTlsClient::request`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`HttpTlsClient::request`] that apply before the
+    /// response, and those of `request_streaming` while reading it.
+    #[expect(clippy::future_not_send)]
+    pub async fn request_streaming<S, K>(
+        &mut self,
+        stream: S,
+        server_name: &str,
+        request: HttpClientRequest<'_>,
+        buffer: &mut [u8],
+        sink: &mut K,
+    ) -> Result<StreamedResponse, Error>
+    where
+        S: Read + Write,
+        RNG: embedded_tls::CryptoRngCore,
+        K: BodySink,
+    {
+        self.request_streaming_with_retry_delay(stream, server_name, request, buffer, sink, || {
+            core::future::ready(())
+        })
+        .await
+    }
+
+    /// Like [`HttpTlsClient::request_streaming`], sleeping via `retry_delay`
+    /// between read retries.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpTlsClient::request_streaming`].
+    #[expect(clippy::future_not_send)]
+    pub async fn request_streaming_with_retry_delay<S, K, D, Fut>(
+        &mut self,
+        stream: S,
+        server_name: &str,
+        request: HttpClientRequest<'_>,
+        buffer: &mut [u8],
+        sink: &mut K,
+        retry_delay: D,
+    ) -> Result<StreamedResponse, Error>
+    where
+        S: Read + Write,
+        RNG: embedded_tls::CryptoRngCore,
+        K: BodySink,
+        D: Fn() -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let client = HttpClient::<RQ>::with_options(self.options);
+        self.with_connection(stream, server_name, async |tls| {
+            client
+                .request_streaming_with_retry_delay(tls, request, buffer, sink, retry_delay)
+                .await
+        })
+        .await
+    }
+
+    /// Run the TLS handshake on `stream`, run `operation` on the connection,
+    /// and close it.
+    #[expect(clippy::future_not_send)]
+    async fn with_connection<S, R>(
+        &mut self,
+        stream: S,
+        server_name: &str,
+        operation: impl AsyncFnOnce(
+            &mut embedded_tls::TlsConnection<'_, S, Aes128GcmSha256>,
+        ) -> Result<R, Error>,
+    ) -> Result<R, Error>
+    where
+        S: Read + Write,
+        RNG: embedded_tls::CryptoRngCore,
+    {
         let tls_config = embedded_tls::TlsConfig::new().with_server_name(server_name);
         let mut read_record_buffer = [0; TLS_READ];
         let mut write_record_buffer = [0; TLS_WRITE];
@@ -237,10 +325,7 @@ impl<'a, RNG, const RQ: usize, const TLS_READ: usize, const TLS_WRITE: usize>
             }
         }
 
-        let client = HttpClient::<RQ>::with_options(self.options);
-        let result = client
-            .request_with_retry_delay(&mut tls, request, response_buffer, retry_delay)
-            .await;
+        let result = operation(&mut tls).await;
         let _ = tls.close().await;
         result
     }

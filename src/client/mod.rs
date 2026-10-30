@@ -11,6 +11,7 @@ mod embassy;
 mod io;
 #[cfg(any(feature = "embassy", test))]
 pub(crate) mod redirect;
+mod stream;
 #[cfg(feature = "tls")]
 mod tls;
 
@@ -23,5 +24,6 @@ pub use io::{
     DefaultHttpClient, Exchange, HttpClient, HttpClientRequest, HttpEndpoint, SmallHttpClient,
     parse_endpoint,
 };
+pub use stream::{BodySink, StreamedResponse};
 #[cfg(feature = "tls")]
 pub use tls::{DefaultHttpTlsClient, HttpTlsClient, SmallHttpTlsClient, TlsVerification};
