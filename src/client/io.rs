@@ -22,8 +22,12 @@ pub struct HttpEndpoint<'a> {
     pub host: &'a str,
     /// Explicit or default port.
     pub port: u16,
-    /// Request path, defaulting to `/`.
+    /// Request path without the query string. Always starts with `/`; a URL
+    /// without a path yields `/`.
     pub path: &'a str,
+    /// Query string without the leading `?`, if the URL has one. It is
+    /// `Some("")` for a URL that ends in a bare `?`.
+    pub query: Option<&'a str>,
 }
 
 impl HttpEndpoint<'_> {
@@ -60,9 +64,11 @@ fn default_port(scheme: &str) -> u16 {
 
 /// Parse an HTTP or HTTPS URL into endpoint metadata.
 ///
-/// The URL fragment (`#...`) is dropped, since it is never sent to the server.
-/// IPv6 hosts keep their brackets, as in `[::1]`. A port is optional; an empty
-/// one (`host:`) means the default for the scheme.
+/// The path and query are returned separately, so `http://host?x=1` yields the
+/// path `/` and the query `x=1`. The URL fragment (`#...`) is dropped, since
+/// it is never sent to the server. IPv6 hosts keep their brackets, as in
+/// `[::1]`. A port is optional; an empty one (`host:`) means the default for
+/// the scheme.
 ///
 /// # Errors
 ///
@@ -70,11 +76,8 @@ fn default_port(scheme: &str) -> u16 {
 ///
 /// - does not start with `http://` or `https://`,
 /// - has an empty host or a malformed IPv6 host,
-/// - has a port that is not in `1..=65535`,
-/// - contains user information (`user@host`), which is not supported, or
-/// - has a query but no path (`http://host?x=1`). Write `http://host/?x=1`
-///   instead: the query cannot be borrowed into a request target that starts
-///   with `/` without a buffer.
+/// - has a port that is not in `1..=65535`, or
+/// - contains user information (`user@host`), which is not supported.
 pub fn parse_endpoint(endpoint: &str) -> Result<HttpEndpoint<'_>, Error> {
     let (scheme, rest) = if let Some(rest) = endpoint.strip_prefix("http://") {
         ("http", rest)
@@ -86,10 +89,13 @@ pub fn parse_endpoint(endpoint: &str) -> Result<HttpEndpoint<'_>, Error> {
 
     // The fragment is client-side only and must not reach the request target.
     let rest = rest.split_once('#').map_or(rest, |(before, _)| before);
-    let (authority, path) = rest.split_at(rest.find(['/', '?']).unwrap_or(rest.len()));
-    if path.starts_with('?') || authority.contains('@') {
+    let (authority, target) = rest.split_at(rest.find(['/', '?']).unwrap_or(rest.len()));
+    if authority.contains('@') {
         return Err(Error::InvalidUrl);
     }
+    let (path, query) = target
+        .split_once('?')
+        .map_or((target, None), |(path, query)| (path, Some(query)));
     let path = if path.is_empty() { "/" } else { path };
 
     let (host, port) = split_host_port(authority, default_port(scheme))?;
@@ -99,6 +105,7 @@ pub fn parse_endpoint(endpoint: &str) -> Result<HttpEndpoint<'_>, Error> {
         host,
         port,
         path,
+        query,
     })
 }
 
@@ -148,8 +155,14 @@ pub struct HttpClientRequest<'a> {
     /// Include the port when it is not the default for the scheme; see
     /// [`HttpEndpoint::host_header`].
     pub host: &'a str,
-    /// Request target, for example `/`, `/api`, or `/api?limit=10`.
+    /// Request path, for example `/` or `/api`. It may also carry the query
+    /// (`/api?limit=10`) when `query` is `None`.
     pub path: &'a str,
+    /// Query string without the leading `?`, sent after `path` when present.
+    ///
+    /// Together with `path` this is the request target; use
+    /// [`HttpEndpoint::path`] and [`HttpEndpoint::query`] for a parsed URL.
+    pub query: Option<&'a str>,
     /// Additional request headers.
     pub headers: &'a [HttpHeader<'a>],
     /// Optional request body.
@@ -239,6 +252,7 @@ impl<const RQ: usize> HttpClient<RQ> {
             request.method,
             request.host,
             request.path,
+            request.query,
             request.headers,
             request.body,
         )?;
@@ -292,6 +306,7 @@ impl<const RQ: usize> HttpClient<RQ> {
                 method: HttpMethod::GET,
                 host,
                 path,
+                query: None,
                 headers,
                 body: None,
             },
@@ -323,6 +338,7 @@ impl<const RQ: usize> HttpClient<RQ> {
                 method: HttpMethod::POST,
                 host,
                 path,
+                query: None,
                 headers,
                 body: Some(body),
             },
@@ -603,6 +619,7 @@ mod tests {
                 method: HttpMethod::HEAD,
                 host: "example.com",
                 path: "/",
+                query: None,
                 headers: &[],
                 body: None,
             },
@@ -717,7 +734,8 @@ mod tests {
         assert_eq!(endpoint.scheme, "https");
         assert_eq!(endpoint.host, "example.com");
         assert_eq!(endpoint.port, 8443);
-        assert_eq!(endpoint.path, "/api?x=1");
+        assert_eq!(endpoint.path, "/api");
+        assert_eq!(endpoint.query, Some("x=1"));
     }
 
     #[test]
@@ -819,7 +837,8 @@ mod tests {
     fn test_parse_endpoint_strips_fragment() {
         let endpoint = parse_endpoint("http://example.com/a?x=1#top").unwrap();
         assert_eq!(endpoint.host, "example.com");
-        assert_eq!(endpoint.path, "/a?x=1");
+        assert_eq!(endpoint.path, "/a");
+        assert_eq!(endpoint.query, Some("x=1"));
 
         let endpoint = parse_endpoint("http://example.com#top").unwrap();
         assert_eq!(endpoint.host, "example.com");
@@ -831,16 +850,77 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_endpoint_query_without_path_is_rejected() {
-        // This used to put `?x=1` into the host.
-        for url in ["http://example.com?x=1", "http://example.com:8080?x=1#f"] {
-            assert!(
-                matches!(parse_endpoint(url), Err(Error::InvalidUrl)),
-                "{url}"
-            );
+    fn test_parse_endpoint_splits_path_and_query() {
+        // A query without a path used to end up in the host name.
+        let endpoint = parse_endpoint("http://example.com?x=1").unwrap();
+        assert_eq!(endpoint.host, "example.com");
+        assert_eq!(endpoint.path, "/");
+        assert_eq!(endpoint.query, Some("x=1"));
+
+        let endpoint = parse_endpoint("http://example.com:8080?x=1#f").unwrap();
+        assert_eq!(endpoint.host, "example.com");
+        assert_eq!(endpoint.port, 8080);
+        assert_eq!(endpoint.path, "/");
+        assert_eq!(endpoint.query, Some("x=1"));
+
+        let endpoint = parse_endpoint("http://example.com/?x=1&y=2").unwrap();
+        assert_eq!(endpoint.path, "/");
+        assert_eq!(endpoint.query, Some("x=1&y=2"));
+
+        let endpoint = parse_endpoint("http://[::1]:8080/a/b?q=a?b").unwrap();
+        assert_eq!(endpoint.path, "/a/b");
+        assert_eq!(endpoint.query, Some("q=a?b"));
+    }
+
+    #[test]
+    fn test_parse_endpoint_without_query() {
+        let endpoint = parse_endpoint("http://example.com").unwrap();
+        assert_eq!(endpoint.query, None);
+
+        let endpoint = parse_endpoint("http://example.com/a/b").unwrap();
+        assert_eq!(endpoint.path, "/a/b");
+        assert_eq!(endpoint.query, None);
+
+        // A bare `?` is an empty query, kept so the request target round-trips.
+        let endpoint = parse_endpoint("http://example.com/a?").unwrap();
+        assert_eq!(endpoint.path, "/a");
+        assert_eq!(endpoint.query, Some(""));
+    }
+
+    #[test]
+    fn test_io_client_sends_endpoint_path_and_query() {
+        for (url, target) in [
+            ("http://example.com?x=1", "GET /?x=1 HTTP/1.1\r\n"),
+            ("http://example.com/", "GET / HTTP/1.1\r\n"),
+            (
+                "http://example.com/a/b?x=1&y=2",
+                "GET /a/b?x=1&y=2 HTTP/1.1\r\n",
+            ),
+            ("http://example.com/a?", "GET /a? HTTP/1.1\r\n"),
+        ] {
+            let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+            let mut stream = MockStream::<128, 256>::new(response);
+            let client = HttpClient::new();
+            let mut buffer = [0; 64];
+            let endpoint = parse_endpoint(url).unwrap();
+
+            futures_lite::future::block_on(client.request(
+                &mut stream,
+                HttpClientRequest {
+                    method: HttpMethod::GET,
+                    host: endpoint.host,
+                    path: endpoint.path,
+                    query: endpoint.query,
+                    headers: &[],
+                    body: None,
+                },
+                &mut buffer,
+            ))
+            .unwrap();
+
+            let request = core::str::from_utf8(&stream.output).unwrap();
+            assert!(request.starts_with(target), "{url}: {request}");
         }
-        let endpoint = parse_endpoint("http://example.com/?x=1").unwrap();
-        assert_eq!(endpoint.path, "/?x=1");
     }
 
     #[test]
@@ -1000,6 +1080,7 @@ mod tests {
                 method: HttpMethod::GET,
                 host: "example.com",
                 path: "/",
+                query: None,
                 headers: &[],
                 body: None,
             },
@@ -1032,6 +1113,7 @@ mod tests {
                 method: HttpMethod::GET,
                 host: "example.com",
                 path: "/",
+                query: None,
                 headers: &[],
                 body: None,
             },

@@ -3,7 +3,10 @@ use crate::{
     error::Error,
     header::headers::{CONTENT_LENGTH, CONTENT_TYPE},
     header::mime_types,
-    protocol::{CRLF, HEADER_SEPARATOR, HTTP_VERSION_PREFIX, MAX_HEADERS},
+    protocol::{
+        CRLF, HEADER_SEPARATOR, HTTP_VERSION_PREFIX, MAX_HEADERS, is_valid_header_name,
+        is_valid_header_value,
+    },
 };
 use heapless::Vec;
 
@@ -118,7 +121,9 @@ impl HttpResponse<'_> {
     ///
     /// # Errors
     ///
-    /// Returns `Error::BufferOverflow` if the response exceeds `MAX_RESPONSE_SIZE`.
+    /// - `Error::HeaderError` if a header name is not a valid token or a value
+    ///   contains control characters such as CR or LF.
+    /// - `Error::BufferOverflow` if the response exceeds `MAX_RESPONSE_SIZE`.
     pub fn build_bytes<const MAX_RESPONSE_SIZE: usize>(
         &self,
     ) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error> {
@@ -136,7 +141,7 @@ impl HttpResponse<'_> {
     ///
     /// # Errors
     ///
-    /// Returns `Error::BufferOverflow` if the response exceeds `MAX_RESPONSE_SIZE`.
+    /// Returns the same errors as [`HttpResponse::build_bytes`].
     pub fn build_head_bytes<const MAX_RESPONSE_SIZE: usize>(
         &self,
     ) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error> {
@@ -156,6 +161,14 @@ impl HttpResponse<'_> {
         // Headers
         let mut has_content_length = false;
         for header in &self.headers {
+            // Refuse to serialize a header that could split the response, for
+            // example a reflected `Location` value containing CR LF.
+            if !is_valid_header_name(header.name) {
+                return Err(Error::HeaderError("Invalid header name"));
+            }
+            if !is_valid_header_value(header.value) {
+                return Err(Error::HeaderError("Invalid header value"));
+            }
             push_slice(bytes, header.name.as_bytes())?;
             push_slice(bytes, HEADER_SEPARATOR.as_bytes())?;
             push_slice(bytes, header.value.as_bytes())?;
@@ -418,6 +431,70 @@ mod tests {
     use super::*;
     use crate::header::{HttpHeader, headers};
     use heapless::Vec;
+
+    fn response_with_header<'a>(name: &'a str, value: &'a str) -> HttpResponse<'a> {
+        let mut headers = Vec::new();
+        let _ = headers.push(HttpHeader::new(name, value));
+        HttpResponse {
+            status_code: StatusCode::Found,
+            headers,
+            body: ResponseBody::Empty,
+        }
+    }
+
+    #[test]
+    fn test_build_bytes_rejects_header_value_injection() {
+        let response = response_with_header("Location", "/ok\r\nSet-Cookie: session=evil");
+        assert!(matches!(
+            response.build_bytes::<256>(),
+            Err(Error::HeaderError("Invalid header value"))
+        ));
+        assert!(matches!(
+            response.build_head_bytes::<256>(),
+            Err(Error::HeaderError("Invalid header value"))
+        ));
+
+        let response = response_with_header("Location", "/ok\nX: y");
+        assert!(matches!(
+            response.build_bytes::<256>(),
+            Err(Error::HeaderError("Invalid header value"))
+        ));
+    }
+
+    #[test]
+    fn test_build_bytes_rejects_invalid_header_name() {
+        for name in ["X-A: b\r\nX-B", "X Bad", ""] {
+            let response = response_with_header(name, "v");
+            assert!(
+                matches!(
+                    response.build_bytes::<256>(),
+                    Err(Error::HeaderError("Invalid header name"))
+                ),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_bytes_accepts_tab_in_header_value() {
+        let response = response_with_header("Location", "/a\tb");
+        let bytes = response.build_bytes::<256>().unwrap();
+        assert!(bytes.ends_with(b"Location: /a\tb\r\n\r\n"));
+    }
+
+    #[test]
+    fn test_builder_header_with_injection_fails_to_serialize() {
+        let response = HttpResponseBuilder::new()
+            .status(StatusCode::Found)
+            .header("Location", "/x\r\nSet-Cookie: a=b")
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(matches!(
+            response.build_bytes::<256>(),
+            Err(Error::HeaderError(_))
+        ));
+    }
 
     #[test]
     fn test_response_body_as_str_and_bytes() {

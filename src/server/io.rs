@@ -319,6 +319,39 @@ mod tests {
         assert!(response.ends_with("body-ok"));
     }
 
+    /// Handler that reflects request input into a response header.
+    struct ReflectHandler;
+
+    impl HttpHandler for ReflectHandler {
+        async fn handle_request(
+            &mut self,
+            _request: &HttpRequest<'_>,
+        ) -> Result<HttpResponse<'_>, Error> {
+            let mut headers = Vec::new();
+            let _ = headers.push(HttpHeader::new("Location", "/a\r\nSet-Cookie: evil=1"));
+            Ok(HttpResponse {
+                status_code: StatusCode::Found,
+                headers,
+                body: ResponseBody::Empty,
+            })
+        }
+    }
+
+    #[test]
+    fn test_response_header_injection_is_not_sent() {
+        let request = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(request);
+        let mut handler = ReflectHandler;
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::HeaderError("Invalid header value")));
+        assert!(stream.output.is_empty());
+    }
+
     #[test]
     fn test_incomplete_request_body_is_rejected() {
         // Declares Content-Length: 100 but the peer closes after 5 body bytes.

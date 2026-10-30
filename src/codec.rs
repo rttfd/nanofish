@@ -86,18 +86,54 @@ pub fn parse_body<'b>(headers: &[HttpHeader<'_>], body_data: &'b [u8]) -> Respon
     )
 }
 
+/// Build the request line and headers.
+///
+/// The request target is `path`, followed by `?` and `query` when present.
+///
+/// # Errors
+///
+/// - [`Error::InvalidUrl`] if `path` is empty or `path`, `query` or `host`
+///   contain spaces or control characters.
+/// - [`Error::HeaderError`] if a header name is not a valid token or a value
+///   contains control characters such as CR or LF.
+/// - [`Error::BufferOverflow`] if the request does not fit in `RQ` bytes.
 pub fn build_req<const RQ: usize>(
     method: HttpMethod,
     host: &str,
     path: &str,
+    query: Option<&str>,
     headers: &[HttpHeader<'_>],
     body: Option<&[u8]>,
 ) -> Result<String<RQ>, Error> {
+    // Anything that could end the request line or a header early would let
+    // the caller's data inject headers or whole requests.
+    if path.is_empty() || !protocol::is_valid_request_token(path) {
+        return Err(Error::InvalidUrl);
+    }
+    if query.is_some_and(|query| !protocol::is_valid_request_token(query)) {
+        return Err(Error::InvalidUrl);
+    }
+    if !protocol::is_valid_request_token(host) {
+        return Err(Error::InvalidUrl);
+    }
+    for header in headers {
+        if !protocol::is_valid_header_name(header.name) {
+            return Err(Error::HeaderError("Invalid header name"));
+        }
+        if !protocol::is_valid_header_value(header.value) {
+            return Err(Error::HeaderError("Invalid header value"));
+        }
+    }
+
     let mut req = String::<RQ>::new();
 
     try_push!(req.push_str(method.as_str()));
     try_push!(req.push_str(" "));
     try_push!(req.push_str(path));
+    if let Some(query) = query {
+        try_push!(req.push_str("?"));
+        try_push!(req.push_str(query));
+    }
     try_push!(req.push_str(HTTP_VERSION_LINE_SUFFIX));
     try_push!(req.push_str("Host: "));
     try_push!(req.push_str(host));
@@ -338,6 +374,103 @@ fn chunked(data: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::{ResponseBody, StatusCode};
+
+    fn build(path: &str, host: &str, headers: &[HttpHeader<'_>]) -> Result<(), Error> {
+        build_req::<256>(HttpMethod::GET, host, path, None, headers, None).map(|_| ())
+    }
+
+    #[test]
+    fn test_build_req_accepts_ordinary_requests() {
+        let headers = [
+            HttpHeader::new("Authorization", "Bearer abc.def-ghi"),
+            HttpHeader::new("X-API-Key", "k3y"),
+            HttpHeader::new("Accept", "text/html,\tapplication/json;q=0.9"),
+        ];
+        build(
+            "/api/v1/items?limit=10&q=a%20b",
+            "example.com:8080",
+            &headers,
+        )
+        .unwrap();
+        build("/", "[::1]:80", &[]).unwrap();
+    }
+
+    #[test]
+    fn test_build_req_rejects_path_injection() {
+        for path in [
+            "/x HTTP/1.1\r\nHost: evil\r\n\r\nGET /",
+            "/x\r\nX-Injected: 1",
+            "/x\ny",
+            "/a b",
+            "/a\0",
+            "",
+        ] {
+            assert!(
+                matches!(build(path, "example.com", &[]), Err(Error::InvalidUrl)),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_req_appends_query() {
+        let req = build_req::<128>(HttpMethod::GET, "h", "/a", Some("x=1&y=2"), &[], None).unwrap();
+        assert!(req.starts_with("GET /a?x=1&y=2 HTTP/1.1\r\nHost: h\r\n"));
+
+        let req = build_req::<128>(HttpMethod::GET, "h", "/a", Some(""), &[], None).unwrap();
+        assert!(req.starts_with("GET /a? HTTP/1.1\r\n"));
+
+        let req = build_req::<128>(HttpMethod::GET, "h", "/a", None, &[], None).unwrap();
+        assert!(req.starts_with("GET /a HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn test_build_req_rejects_query_injection() {
+        for query in ["x=1 HTTP/1.1\r\nHost: evil", "x=1\r\nX: y", "a b", "x\0"] {
+            assert!(
+                matches!(
+                    build_req::<128>(HttpMethod::GET, "h", "/a", Some(query), &[], None),
+                    Err(Error::InvalidUrl)
+                ),
+                "{query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_req_rejects_host_injection() {
+        for host in ["example.com\r\nX-Injected: 1", "exa mple.com", "h\n"] {
+            assert!(
+                matches!(build("/", host, &[]), Err(Error::InvalidUrl)),
+                "{host:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_req_rejects_header_injection() {
+        let value = [HttpHeader::new("X-Token", "abc\r\nX-Injected: 1")];
+        assert!(matches!(
+            build("/", "example.com", &value),
+            Err(Error::HeaderError("Invalid header value"))
+        ));
+        let nul = [HttpHeader::new("X-Token", "a\0b")];
+        assert!(matches!(
+            build("/", "example.com", &nul),
+            Err(Error::HeaderError("Invalid header value"))
+        ));
+
+        for name in ["X-A: b\r\nX-B", "X Bad", "", "X-A:"] {
+            let header = [HttpHeader::new(name, "v")];
+            assert!(
+                matches!(
+                    build("/", "example.com", &header),
+                    Err(Error::HeaderError("Invalid header name"))
+                ),
+                "{name:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_is_response_complete_no_content_length() {

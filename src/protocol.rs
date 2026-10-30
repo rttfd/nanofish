@@ -79,3 +79,88 @@ pub fn find_header_value<'a>(headers_str: &'a str, target_name: &str) -> Option<
     }
     None
 }
+
+/// Whether `name` is a valid header field name: a non-empty HTTP token.
+///
+/// Rejects the characters that would let a name terminate itself or the
+/// header block (`:`, spaces, CR, LF and other control characters).
+pub(crate) fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+/// Whether `value` is a valid header field value: no control characters other
+/// than horizontal tab, so it cannot contain a line break.
+pub(crate) fn is_valid_header_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b == b'\t' || (b >= 0x20 && b != 0x7f))
+}
+
+/// Whether `value` can be written into the request line or `Host` header as
+/// is: no spaces and no control characters.
+pub(crate) fn is_valid_request_token(value: &str) -> bool {
+    value.bytes().all(|b| b > 0x20 && b != 0x7f)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_valid_header_name() {
+        for name in ["Content-Type", "X-API-Key", "x_custom.header", "ETag", "A1"] {
+            assert!(is_valid_header_name(name), "{name}");
+        }
+        for name in [
+            "",
+            "X Bad",
+            "X-Bad:",
+            "X-Bad\r\nInjected",
+            "X-Bad\n",
+            "X-\0",
+            "Näme",
+        ] {
+            assert!(!is_valid_header_name(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn test_is_valid_header_value() {
+        for value in ["", "application/json", "Bearer abc.def", "a\tb", "ünïcode"] {
+            assert!(is_valid_header_value(value), "{value:?}");
+        }
+        for value in ["a\r\nX-Injected: 1", "a\nb", "a\rb", "a\0b", "a\x7fb"] {
+            assert!(!is_valid_header_value(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn test_is_valid_request_token() {
+        for value in ["/", "/a/b?x=1&y=2", "example.com:8080", "[::1]:80"] {
+            assert!(is_valid_request_token(value), "{value}");
+        }
+        for value in ["/a b", "/a\r\nHost: evil", "/a\n", "/a\0", "/a\x7f", " "] {
+            assert!(!is_valid_request_token(value), "{value:?}");
+        }
+    }
+}
