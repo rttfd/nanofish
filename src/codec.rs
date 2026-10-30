@@ -41,7 +41,11 @@ pub fn parse_resp(data: &[u8]) -> Result<HttpResponse<'_>, Error> {
 
     let status_code: StatusCode = status_code_str.try_into()?;
 
-    let headers_section = &response_str[status_line_end + CRLF_LEN..headers_end - DOUBLE_CRLF_LEN];
+    // With no header lines the status line's CRLF is also the start of the
+    // terminating blank line, so the section is empty.
+    let headers_section = response_str
+        .get(status_line_end + CRLF_LEN..headers_end - DOUBLE_CRLF_LEN)
+        .unwrap_or_default();
     let mut headers = Vec::<HttpHeader<'_>, MAX_HEADERS>::new();
 
     for header_line in headers_section.split(CRLF_STR) {
@@ -150,7 +154,13 @@ pub fn build_req<const RQ: usize>(
         }
     }
 
-    if !has_len && body.is_some() {
+    // POST, PUT and PATCH without a body still need an explicit length, or
+    // some servers answer `411 Length Required`.
+    let carries_body = matches!(
+        method,
+        HttpMethod::POST | HttpMethod::PUT | HttpMethod::PATCH
+    );
+    if !has_len && (body.is_some() || carries_body) {
         try_push!(req.push_str(CONTENT_LENGTH));
         try_push!(req.push_str(HEADER_SEPARATOR));
         let mut len = String::<8>::new();
@@ -215,7 +225,7 @@ fn status_code(data: &[u8]) -> Option<u16> {
 /// also appear in chunk data or at the end of a header block (`Age: 0`).
 /// Malformed framing counts as complete so that [`dechunk`] reports the error
 /// instead of the read loop waiting for bytes that will never make it valid.
-fn chunked_body_complete(body: &[u8]) -> bool {
+pub fn chunked_body_complete(body: &[u8]) -> bool {
     let mut pos = 0;
     loop {
         let Some(line_len) = protocol::find_crlf(&body[pos..]) else {
@@ -274,11 +284,121 @@ pub fn declares_length(data: &[u8]) -> bool {
 }
 
 /// Extract the `Content-Length` value from raw header bytes.
+///
+/// A missing, malformed or conflicting header yields `None`; use
+/// [`check_content_length`] to tell those cases apart.
 pub fn content_length(header_bytes: &[u8]) -> Option<usize> {
-    let headers_str = core::str::from_utf8(header_bytes).ok()?;
-    protocol::find_header_value(headers_str, CONTENT_LENGTH)?
-        .parse()
-        .ok()
+    check_content_length(header_bytes).ok().flatten()
+}
+
+/// Extract the `Content-Length` value from raw header bytes, rejecting
+/// malformed or conflicting values.
+///
+/// Repeated `Content-Length` headers, or comma-separated lists, are accepted
+/// only when every value is identical (RFC 9110 section 8.6). Values must be
+/// plain decimal digits: signs, spaces inside the number and empty values are
+/// rejected. Disagreeing lengths are a request-smuggling vector, so they are
+/// an error rather than "use the first one".
+///
+/// # Errors
+///
+/// Returns a static description if a value is not a decimal number that fits
+/// in `usize`, or if the values disagree.
+pub fn check_content_length(header_bytes: &[u8]) -> Result<Option<usize>, &'static str> {
+    let headers_str = core::str::from_utf8(header_bytes).map_err(|_| "Invalid header encoding")?;
+
+    let mut length = None;
+    for line in headers_str.split(CRLF_STR) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case(CONTENT_LENGTH) {
+            continue;
+        }
+        for part in value.split(',') {
+            let part = part.trim();
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return Err("Invalid Content-Length");
+            }
+            let part: usize = part.parse().map_err(|_| "Invalid Content-Length")?;
+            match length {
+                None => length = Some(part),
+                Some(existing) if existing == part => {}
+                Some(_) => return Err("Conflicting Content-Length"),
+            }
+        }
+    }
+    Ok(length)
+}
+
+/// Reject a response whose `Content-Length` is malformed or conflicting.
+///
+/// A chunked response is exempt: `Transfer-Encoding` takes precedence over
+/// `Content-Length` for the framing of the body.
+pub fn check_response_framing(data: &[u8]) -> Result<(), Error> {
+    let Some(headers_end) = protocol::find_double_crlf(data) else {
+        return Ok(());
+    };
+    if chunked(data) {
+        return Ok(());
+    }
+    check_content_length(&data[..headers_end])
+        .map(|_| ())
+        .map_err(Error::InvalidResponse)
+}
+
+/// How the body of a request is delimited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Framing {
+    /// No body: the request ends with its headers.
+    None,
+    /// A body of exactly this many bytes.
+    Length(usize),
+    /// A chunked body.
+    Chunked,
+}
+
+/// Why the framing of a request could not be determined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FramingError {
+    /// Malformed or contradictory framing headers (answer `400`).
+    Invalid(&'static str),
+    /// A transfer coding other than plain `chunked` (answer `501`).
+    UnsupportedCoding,
+}
+
+/// Determine how a request body is delimited from the raw request headers
+/// (without the final empty line).
+///
+/// `Transfer-Encoding: chunked` and `Content-Length` together are rejected,
+/// since a peer and an intermediary could disagree on where the request ends.
+/// Any transfer coding besides a single `chunked` is unsupported: the body
+/// would not be decoded, so it is not accepted.
+///
+/// # Errors
+///
+/// See [`FramingError`].
+pub fn request_framing(header_bytes: &[u8]) -> Result<Framing, FramingError> {
+    let headers_str = core::str::from_utf8(header_bytes)
+        .map_err(|_| FramingError::Invalid("Invalid request headers encoding"))?;
+    let length = check_content_length(header_bytes).map_err(FramingError::Invalid)?;
+
+    let Some(coding) = protocol::find_header_value(headers_str, TRANSFER_ENCODING) else {
+        return Ok(length.map_or(Framing::None, Framing::Length));
+    };
+    let mut codings = coding.split(',').map(str::trim).filter(|c| !c.is_empty());
+    match (codings.next(), codings.next()) {
+        (Some(only), None) if only.eq_ignore_ascii_case(CHUNKED) => {
+            if length.is_some() {
+                Err(FramingError::Invalid(
+                    "Both Transfer-Encoding and Content-Length",
+                ))
+            } else {
+                Ok(Framing::Chunked)
+            }
+        }
+        _ => Err(FramingError::UnsupportedCoding),
+    }
 }
 
 pub fn dechunk(buffer: &mut [u8], total_read: usize) -> Result<usize, Error> {
@@ -438,6 +558,142 @@ mod tests {
     }
 
     #[test]
+    fn test_build_req_sends_content_length_zero_for_bodyless_post_put_patch() {
+        for method in [HttpMethod::POST, HttpMethod::PUT, HttpMethod::PATCH] {
+            let req = build_req::<128>(method, "h", "/a", None, &[], None).unwrap();
+            assert!(req.contains("Content-Length: 0\r\n"), "{method:?}: {req}");
+        }
+        // Methods without request content send no length.
+        for method in [HttpMethod::GET, HttpMethod::HEAD, HttpMethod::DELETE] {
+            let req = build_req::<128>(method, "h", "/a", None, &[], None).unwrap();
+            assert!(!req.contains("Content-Length"), "{method:?}: {req}");
+        }
+        // An explicit length is not duplicated.
+        let headers = [HttpHeader::new("Content-Length", "0")];
+        let req = build_req::<128>(HttpMethod::POST, "h", "/a", None, &headers, None).unwrap();
+        assert_eq!(req.matches("Content-Length").count(), 1);
+    }
+
+    #[test]
+    fn test_check_content_length() {
+        let ok = |headers: &str| check_content_length(headers.as_bytes());
+        assert_eq!(ok("Host: h"), Ok(None));
+        assert_eq!(ok("Content-Length: 5"), Ok(Some(5)));
+        assert_eq!(ok("content-length:   5  "), Ok(Some(5)));
+        assert_eq!(ok("Host: h\r\nContent-Length: 0"), Ok(Some(0)));
+        // Identical repeats and lists are fine.
+        assert_eq!(ok("Content-Length: 5\r\nContent-Length: 5"), Ok(Some(5)));
+        assert_eq!(ok("Content-Length: 5, 5"), Ok(Some(5)));
+        // Other headers that merely contain the name are ignored.
+        assert_eq!(
+            ok("X-Content-Length: abc\r\nContent-Length: 7"),
+            Ok(Some(7))
+        );
+
+        for bad in [
+            "Content-Length: abc",
+            "Content-Length: +5",
+            "Content-Length: -1",
+            "Content-Length: 5 5",
+            "Content-Length: 0x10",
+            "Content-Length: ",
+            "Content-Length: 5,",
+            "Content-Length: 99999999999999999999999",
+        ] {
+            assert_eq!(ok(bad), Err("Invalid Content-Length"), "{bad}");
+        }
+        for conflict in [
+            "Content-Length: 5\r\nContent-Length: 6",
+            "Content-Length: 5, 6",
+            "Content-Length: 5\r\nX: y\r\nContent-Length: 05, 5, 7",
+        ] {
+            assert_eq!(
+                ok(conflict),
+                Err("Conflicting Content-Length"),
+                "{conflict}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_content_length_is_none_when_invalid() {
+        assert_eq!(content_length(b"Content-Length: 5"), Some(5));
+        assert_eq!(content_length(b"Content-Length: abc"), None);
+        assert_eq!(
+            content_length(b"Content-Length: 5\r\nContent-Length: 6"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_check_response_framing() {
+        assert!(
+            check_response_framing(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello").is_ok()
+        );
+        assert!(check_response_framing(b"HTTP/1.1 200 OK\r\nContent-Length: 5").is_ok());
+        assert!(matches!(
+            check_response_framing(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello"
+            ),
+            Err(Error::InvalidResponse("Conflicting Content-Length"))
+        ));
+        // Transfer-Encoding takes precedence over Content-Length.
+        assert!(
+            check_response_framing(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: abc\r\n\r\n"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_request_framing() {
+        let framing = |headers: &str| request_framing(headers.as_bytes());
+        assert_eq!(framing("GET / HTTP/1.1\r\nHost: h"), Ok(Framing::None));
+        assert_eq!(
+            framing("POST / HTTP/1.1\r\nContent-Length: 5"),
+            Ok(Framing::Length(5))
+        );
+        assert_eq!(
+            framing("POST / HTTP/1.1\r\nTransfer-Encoding: chunked"),
+            Ok(Framing::Chunked)
+        );
+        assert_eq!(
+            framing("POST / HTTP/1.1\r\ntransfer-encoding: Chunked"),
+            Ok(Framing::Chunked)
+        );
+    }
+
+    #[test]
+    fn test_request_framing_rejects_ambiguity() {
+        let framing = |headers: &str| request_framing(headers.as_bytes());
+        assert_eq!(
+            framing("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 5"),
+            Err(FramingError::Invalid(
+                "Both Transfer-Encoding and Content-Length"
+            ))
+        );
+        assert_eq!(
+            framing("POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 6"),
+            Err(FramingError::Invalid("Conflicting Content-Length"))
+        );
+        assert_eq!(
+            framing("POST / HTTP/1.1\r\nContent-Length: abc"),
+            Err(FramingError::Invalid("Invalid Content-Length"))
+        );
+        for coding in ["gzip", "gzip, chunked", "chunked, chunked", "identity", ""] {
+            assert_eq!(
+                framing(
+                    &heapless::format!(96; "POST / HTTP/1.1\r\nTransfer-Encoding: {coding}")
+                        .unwrap()
+                ),
+                Err(FramingError::UnsupportedCoding),
+                "{coding:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_build_req_rejects_host_injection() {
         for host in ["example.com\r\nX-Injected: 1", "exa mple.com", "h\n"] {
             assert!(
@@ -522,6 +778,20 @@ mod tests {
 
         assert_eq!(response.status_code, StatusCode::Ok);
         assert!(matches!(response.body, ResponseBody::Binary(b) if b == binary_body));
+    }
+
+    #[test]
+    fn test_parse_http_response_without_headers() {
+        // The status line's CRLF doubles as the start of the blank line.
+        let response = parse_resp(b"HTTP/1.1 204 No Content\r\n\r\n").expect("should parse");
+        assert_eq!(response.status_code, StatusCode::NoContent);
+        assert!(response.headers.is_empty());
+        assert_eq!(response.body, ResponseBody::Empty);
+
+        let response = parse_resp(b"HTTP/1.0 200 OK\r\n\r\nhello").expect("should parse");
+        assert_eq!(response.status_code, StatusCode::Ok);
+        assert!(response.headers.is_empty());
+        assert_eq!(response.body.as_str(), Some("hello"));
     }
 
     #[test]

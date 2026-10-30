@@ -279,6 +279,7 @@ impl<const RQ: usize> HttpClient<RQ> {
             retry_delay,
         )
         .await?;
+        codec::check_response_framing(&response_buffer[..total_read])?;
         let total_read = codec::dechunk(response_buffer, total_read)?;
         let response = codec::parse_resp(&response_buffer[..total_read])?;
         Ok((response, total_read))
@@ -673,6 +674,82 @@ mod tests {
 
         assert_eq!(response.status_code, StatusCode::NotModified);
         assert_eq!(response.body, ResponseBody::Empty);
+    }
+
+    #[test]
+    fn test_io_client_rejects_conflicting_content_length() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello";
+        let mut stream = MockStream::<128, 256>::new(raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+
+        let result = futures_lite::future::block_on(client.get(
+            &mut stream,
+            "example.com",
+            "/",
+            &[],
+            &mut buffer,
+        ));
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidResponse("Conflicting Content-Length"))
+        ));
+    }
+
+    #[test]
+    fn test_io_client_rejects_malformed_content_length() {
+        for value in ["abc", "+5", "-1", ""] {
+            let mut raw = heapless::Vec::<u8, 128>::new();
+            raw.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: ")
+                .unwrap();
+            raw.extend_from_slice(value.as_bytes()).unwrap();
+            raw.extend_from_slice(b"\r\n\r\nhello").unwrap();
+            let mut stream = MockStream::<128, 256>::new(&raw);
+            let client = HttpClient::new();
+            let mut buffer = [0; 128];
+
+            let result = futures_lite::future::block_on(client.get(
+                &mut stream,
+                "example.com",
+                "/",
+                &[],
+                &mut buffer,
+            ));
+
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::InvalidResponse("Invalid Content-Length"))
+                ),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_io_client_post_without_body_sends_content_length_zero() {
+        let response = b"HTTP/1.1 204 No Content\r\n\r\n";
+        let mut stream = MockStream::<128, 256>::new(response);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+
+        futures_lite::future::block_on(client.request(
+            &mut stream,
+            HttpClientRequest {
+                method: HttpMethod::POST,
+                host: "example.com",
+                path: "/trigger",
+                query: None,
+                headers: &[],
+                body: None,
+            },
+            &mut buffer,
+        ))
+        .unwrap();
+
+        let request = core::str::from_utf8(&stream.output).unwrap();
+        assert!(request.contains("Content-Length: 0\r\n"), "{request}");
     }
 
     #[test]

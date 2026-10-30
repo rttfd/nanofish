@@ -1,5 +1,5 @@
 use crate::{
-    codec,
+    codec::{self, Framing, FramingError},
     error::Error,
     handler::HttpHandler,
     header::{HttpHeader, headers::CONNECTION, mime_types},
@@ -127,6 +127,15 @@ where
         }
     };
 
+    // A chunked request body is decoded in place, so handlers see the payload.
+    let total_read = match codec::dechunk(&mut request_buffer, total_read) {
+        Ok(total_read) => total_read,
+        Err(error) => {
+            send_status::<S, MAX_RESPONSE_SIZE>(stream, StatusCode::BadRequest).await;
+            return Err(error);
+        }
+    };
+
     let request = match HttpRequest::try_from(&request_buffer[..total_read]) {
         Ok(request) => request,
         Err(error) => {
@@ -183,8 +192,11 @@ impl ReadFailure {
 
 /// Read one complete HTTP request (headers plus any `Content-Length` body).
 ///
-/// Requests without `Content-Length` are considered complete once the headers
-/// end; the peer is expected to close the connection after such a request.
+/// A body is delimited by `Content-Length` or by chunked transfer coding.
+/// Requests with neither are considered complete once the headers end; the
+/// peer is expected to close the connection after such a request. Chunked
+/// bodies are returned as received; the caller decodes them with
+/// [`codec::dechunk`].
 ///
 /// A declared `Content-Length` that cannot fit in `buf` is rejected as soon as
 /// the headers arrive, instead of reading until the buffer fills.
@@ -202,6 +214,7 @@ where
 {
     let mut total_read = 0;
     let mut header_end = None;
+    let mut framing = None;
 
     while total_read < buf.len() {
         let n = stream
@@ -220,28 +233,59 @@ where
         }
 
         if let Some(hdr_end) = header_end {
-            let Some(content_length) = codec::content_length(&buf[..hdr_end]) else {
-                // No Content-Length — headers are complete, no body expected
-                return Ok(total_read);
+            let framing = if let Some(framing) = framing {
+                framing
+            } else {
+                let found = codec::request_framing(&buf[..hdr_end]).map_err(framing_failure)?;
+                framing = Some(found);
+                found
             };
-            let needed = (hdr_end + DOUBLE_CRLF_LEN).saturating_add(content_length);
-            if needed > buf.len() {
-                return Err(ReadFailure::reply(
-                    Error::BufferOverflow,
-                    StatusCode::RequestEntityTooLarge,
-                ));
-            }
-            if total_read >= needed {
-                return Ok(total_read);
+            let body_start = hdr_end + DOUBLE_CRLF_LEN;
+            match framing {
+                // Headers are complete and no body is expected.
+                Framing::None => return Ok(total_read),
+                Framing::Length(content_length) => {
+                    let needed = body_start.saturating_add(content_length);
+                    if needed > buf.len() {
+                        return Err(ReadFailure::reply(
+                            Error::BufferOverflow,
+                            StatusCode::RequestEntityTooLarge,
+                        ));
+                    }
+                    if total_read >= needed {
+                        return Ok(total_read);
+                    }
+                }
+                Framing::Chunked => {
+                    if codec::chunked_body_complete(&buf[body_start..total_read]) {
+                        return Ok(total_read);
+                    }
+                }
             }
         }
     }
 
-    // The buffer filled up before the end of the headers.
-    Err(ReadFailure::reply(
-        Error::BufferOverflow,
-        StatusCode::RequestHeaderFieldsTooLarge,
-    ))
+    // The buffer filled up: with the headers if they never ended, otherwise
+    // with a chunked body of unknown length.
+    let status = if header_end.is_some() {
+        StatusCode::RequestEntityTooLarge
+    } else {
+        StatusCode::RequestHeaderFieldsTooLarge
+    };
+    Err(ReadFailure::reply(Error::BufferOverflow, status))
+}
+
+/// Map a request framing error to the response the peer should get.
+const fn framing_failure(error: FramingError) -> ReadFailure {
+    match error {
+        FramingError::Invalid(reason) => {
+            ReadFailure::reply(Error::InvalidResponse(reason), StatusCode::BadRequest)
+        }
+        FramingError::UnsupportedCoding => ReadFailure::reply(
+            Error::InvalidResponse("Unsupported transfer coding"),
+            StatusCode::NotImplemented,
+        ),
+    }
 }
 
 /// Best-effort plain-text error response; a failure to send it is ignored
@@ -531,6 +575,214 @@ mod tests {
 
         assert!(matches!(err, Error::BufferOverflow));
         assert_status(&stream.output, "413 Request Entity Too Large");
+    }
+
+    /// Reads at most `max` bytes at a time, like a slow peer.
+    struct SlowStream<const IN: usize, const OUT: usize> {
+        inner: MockStream<IN, OUT>,
+        max: usize,
+    }
+
+    impl<const IN: usize, const OUT: usize> ErrorType for SlowStream<IN, OUT> {
+        type Error = Infallible;
+    }
+
+    impl<const IN: usize, const OUT: usize> Read for SlowStream<IN, OUT> {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let n = buf.len().min(self.max);
+            self.inner.read(&mut buf[..n]).await
+        }
+    }
+
+    impl<const IN: usize, const OUT: usize> Write for SlowStream<IN, OUT> {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.inner.write(buf).await
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            self.inner.flush().await
+        }
+    }
+
+    /// Handler that reports whether the request body equals `hello`.
+    struct HelloBodyHandler;
+
+    impl HttpHandler for HelloBodyHandler {
+        async fn handle_request(
+            &mut self,
+            request: &HttpRequest<'_>,
+        ) -> Result<HttpResponse<'_>, Error> {
+            let body = if request.body == b"hello".as_slice() {
+                "body-ok"
+            } else {
+                "body-bad"
+            };
+            Ok(HttpResponse {
+                status_code: StatusCode::Ok,
+                headers: Vec::new(),
+                body: ResponseBody::Text(body),
+            })
+        }
+    }
+
+    const CHUNKED_POST: &[u8] = b"POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nhel\r\n2\r\nlo\r\n0\r\n\r\n";
+
+    #[test]
+    fn test_chunked_request_body_is_decoded() {
+        let mut stream = MockStream::<256, 512>::new(CHUNKED_POST);
+        let mut handler = HelloBodyHandler;
+
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 256, 512>(
+            &mut stream,
+            &mut handler,
+        ))
+        .unwrap();
+
+        let response = core::str::from_utf8(&stream.output).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with("body-ok"), "{response}");
+    }
+
+    #[test]
+    fn test_chunked_request_body_arriving_in_small_pieces() {
+        // Every read ends mid-frame at some point; the server must keep reading
+        // until the last chunk and its terminating line are in.
+        for max in [1, 2, 3, 5, 7] {
+            let mut stream = SlowStream {
+                inner: MockStream::<256, 512>::new(CHUNKED_POST),
+                max,
+            };
+            let mut handler = HelloBodyHandler;
+
+            futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 256, 512>(
+                &mut stream,
+                &mut handler,
+            ))
+            .unwrap();
+
+            let response = core::str::from_utf8(&stream.inner.output).unwrap();
+            assert!(response.ends_with("body-ok"), "max={max}: {response}");
+        }
+    }
+
+    #[test]
+    fn test_chunked_request_with_trailers() {
+        let request = b"POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nX-Sum: 1\r\n\r\n";
+        let mut stream = MockStream::<256, 512>::new(request);
+        let mut handler = HelloBodyHandler;
+
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 256, 512>(
+            &mut stream,
+            &mut handler,
+        ))
+        .unwrap();
+
+        let response = core::str::from_utf8(&stream.output).unwrap();
+        assert!(response.ends_with("body-ok"), "{response}");
+    }
+
+    #[test]
+    fn test_chunked_request_larger_than_buffer_gets_413() {
+        // 100 bytes of chunk data cannot fit a 128-byte buffer with the headers.
+        let mut raw = Vec::<u8, 256>::new();
+        raw.extend_from_slice(
+            b"POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n64\r\n",
+        )
+        .unwrap();
+        for _ in 0..100 {
+            raw.push(b'a').unwrap();
+        }
+        raw.extend_from_slice(b"\r\n0\r\n\r\n").unwrap();
+        let mut stream = MockStream::<256, 512>::new(&raw);
+        let mut handler = HelloBodyHandler;
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::BufferOverflow));
+        assert_status(&stream.output, "413 Request Entity Too Large");
+    }
+
+    #[test]
+    fn test_malformed_chunked_request_gets_400() {
+        let request = b"POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n";
+        let mut stream = MockStream::<256, 512>::new(request);
+        let mut handler = HelloBodyHandler;
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 256, 512>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidResponse("Invalid chunk size")));
+        assert_status(&stream.output, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_ambiguous_request_framing_gets_400() {
+        for request in [
+            &b"POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n"[..],
+            b"POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello!",
+            b"POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: abc\r\n\r\nhello",
+            b"POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: +5\r\n\r\nhello",
+        ] {
+            let mut stream = MockStream::<256, 512>::new(request);
+            let mut handler = HelloBodyHandler;
+
+            let err = futures_lite::future::block_on(
+                handle_http_connection_with_sizes::<_, _, 256, 512>(&mut stream, &mut handler),
+            )
+            .unwrap_err();
+
+            assert!(matches!(err, Error::InvalidResponse(_)));
+            assert_status(&stream.output, "400 Bad Request");
+        }
+    }
+
+    #[test]
+    fn test_unsupported_transfer_coding_gets_501() {
+        for coding in ["gzip", "gzip, chunked", "deflate"] {
+            let mut request = Vec::<u8, 256>::new();
+            request
+                .extend_from_slice(b"POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: ")
+                .unwrap();
+            request.extend_from_slice(coding.as_bytes()).unwrap();
+            request
+                .extend_from_slice(b"\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
+                .unwrap();
+            let mut stream = MockStream::<256, 512>::new(&request);
+            let mut handler = HelloBodyHandler;
+
+            let err =
+                futures_lite::future::block_on(
+                    handle_http_connection_with_sizes::<_, _, 256, 512>(&mut stream, &mut handler),
+                )
+                .unwrap_err();
+
+            assert!(
+                matches!(err, Error::InvalidResponse("Unsupported transfer coding")),
+                "{coding}"
+            );
+            assert_status(&stream.output, "501 Not Implemented");
+        }
+    }
+
+    #[test]
+    fn test_repeated_identical_content_length_is_accepted() {
+        let request = b"POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello";
+        let mut stream = MockStream::<256, 512>::new(request);
+        let mut handler = HelloBodyHandler;
+
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 256, 512>(
+            &mut stream,
+            &mut handler,
+        ))
+        .unwrap();
+
+        let response = core::str::from_utf8(&stream.output).unwrap();
+        assert!(response.ends_with("body-ok"), "{response}");
     }
 
     #[test]
