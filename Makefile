@@ -97,6 +97,21 @@ test-all: ## Run tests on all feature combinations
 		cargo +$(RUST_VERSION) test --features "$$features" || exit 1; \
 	done
 
+BASELINE ?= main
+BENCH ?=
+
+.PHONY: bench
+bench: ## Run the benchmarks (BENCH=name runs a subset)
+	cargo +$(RUST_VERSION) bench --bench http -- $(BENCH)
+
+.PHONY: bench-save
+bench-save: ## Save the benchmarks as BASELINE (default main)
+	cargo +$(RUST_VERSION) bench --bench http -- --save-baseline $(BASELINE) $(BENCH)
+
+.PHONY: bench-compare
+bench-compare: ## Compare the benchmarks with BASELINE (default main)
+	cargo +$(RUST_VERSION) bench --bench http -- --baseline $(BASELINE) $(BENCH)
+
 .PHONY: build
 build: ## Build the crate
 	cargo +$(RUST_VERSION) build
