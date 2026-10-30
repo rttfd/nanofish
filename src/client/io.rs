@@ -378,6 +378,7 @@ where
     let mut total_read = 0;
     let mut retries = max_retries;
     let mut saw_eof = false;
+    let mut scan = codec::ResponseScan::new(method);
 
     while total_read < response_buffer.len() && retries > 0 {
         match stream.read(&mut response_buffer[total_read..]).await {
@@ -387,7 +388,7 @@ where
             }
             Ok(n) => {
                 total_read += n;
-                if codec::response_complete(method, &response_buffer[..total_read]) {
+                if scan.is_complete(&response_buffer[..total_read]) {
                     return Ok(total_read);
                 }
             }
@@ -405,12 +406,12 @@ where
         return Err(Error::NoResponse);
     }
 
-    if codec::response_complete(method, &response_buffer[..total_read]) {
+    if scan.is_complete(&response_buffer[..total_read]) {
         return Ok(total_read);
     }
 
     if saw_eof {
-        if codec::declares_length(&response_buffer[..total_read]) {
+        if scan.declares_length() {
             return Err(Error::InvalidResponse("Incomplete response body"));
         }
         // No length was declared: connection close delimits the body.

@@ -212,6 +212,7 @@ where
     let mut total_read = 0;
     let mut header_end = None;
     let mut framing = None;
+    let mut chunk_scan = codec::ChunkScan::default();
 
     while total_read < buf.len() {
         let n = stream
@@ -254,7 +255,7 @@ where
                     }
                 }
                 Framing::Chunked => {
-                    if codec::chunked_body_complete(&buf[body_start..total_read]) {
+                    if chunk_scan.advance(&buf[body_start..total_read]) {
                         return Ok(total_read);
                     }
                 }

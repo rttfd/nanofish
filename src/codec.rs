@@ -175,6 +175,7 @@ pub fn build_req<const RQ: usize>(
     Ok(req)
 }
 
+#[cfg(test)]
 pub fn complete(data: &[u8]) -> bool {
     let headers_end = match protocol::find_double_crlf(data) {
         Some(pos) => pos + DOUBLE_CRLF_LEN,
@@ -195,6 +196,7 @@ pub fn complete(data: &[u8]) -> bool {
 /// carry a body, even when their headers advertise a `Content-Length` or
 /// chunked encoding, so they are complete once the headers end. Everything else
 /// follows [`complete`].
+#[cfg(test)]
 pub fn response_complete(method: HttpMethod, data: &[u8]) -> bool {
     if protocol::find_double_crlf(data).is_none() {
         return false;
@@ -225,47 +227,189 @@ fn status_code(data: &[u8]) -> Option<u16> {
 /// also appear in chunk data or at the end of a header block (`Age: 0`).
 /// Malformed framing counts as complete so that [`dechunk`] reports the error
 /// instead of the read loop waiting for bytes that will never make it valid.
+///
+/// This stateless form is the reference for [`ChunkScan`], which the read loops
+/// use to avoid rescanning a growing buffer after every read.
+#[cfg(test)]
 pub fn chunked_body_complete(body: &[u8]) -> bool {
-    let mut pos = 0;
-    loop {
-        let Some(line_len) = protocol::find_crlf(&body[pos..]) else {
-            return false;
-        };
-        let size = core::str::from_utf8(&body[pos..pos + line_len])
-            .ok()
-            .and_then(|line| line.split(';').next())
-            .and_then(|size| usize::from_str_radix(size.trim(), 16).ok());
-        let Some(size) = size else {
-            return true;
-        };
+    ChunkScan::default().advance(body)
+}
 
-        let data_start = pos + line_len + CRLF_LEN;
-        if size == 0 {
-            return trailers_complete(&body[data_start..]);
-        }
+/// Incremental version of [`chunked_body_complete`].
+///
+/// It remembers how far the framing was walked, so checking a buffer after
+/// each read costs only the newly arrived bytes instead of rescanning the
+/// whole body (quadratic for many small reads).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ChunkScan {
+    /// Start of the first frame (chunk-size line or trailer line) not yet
+    /// fully seen.
+    pos: usize,
+    /// Past the last chunk: only trailer lines and the final empty line remain.
+    trailers: bool,
+}
 
-        // Chunk data is followed by its own CRLF.
-        let Some(next) = data_start
-            .checked_add(size)
-            .and_then(|end| end.checked_add(CRLF_LEN))
-        else {
-            return true;
-        };
-        if next > body.len() {
-            return false;
+impl ChunkScan {
+    /// Walk the framing in `body` (everything after the headers, from its
+    /// start) as far as it goes; `true` once the body is complete or its
+    /// framing is malformed.
+    pub fn advance(&mut self, body: &[u8]) -> bool {
+        loop {
+            let Some(line_len) = protocol::find_crlf(&body[self.pos..]) else {
+                return false;
+            };
+            if self.trailers {
+                if line_len == 0 {
+                    self.pos += CRLF_LEN;
+                    return true;
+                }
+                self.pos += line_len + CRLF_LEN;
+                continue;
+            }
+
+            let size = core::str::from_utf8(&body[self.pos..self.pos + line_len])
+                .ok()
+                .and_then(|line| line.split(';').next())
+                .and_then(|size| usize::from_str_radix(size.trim(), 16).ok());
+            let Some(size) = size else {
+                return true;
+            };
+
+            let data_start = self.pos + line_len + CRLF_LEN;
+            if size == 0 {
+                self.pos = data_start;
+                self.trailers = true;
+                continue;
+            }
+
+            // Chunk data is followed by its own CRLF.
+            let Some(next) = data_start
+                .checked_add(size)
+                .and_then(|end| end.checked_add(CRLF_LEN))
+            else {
+                return true;
+            };
+            if next > body.len() {
+                return false;
+            }
+            self.pos = next;
         }
-        pos = next;
     }
 }
 
-/// Whether the (possibly empty) trailer section after the last chunk has
-/// arrived, i.e. the terminating empty line is present.
-fn trailers_complete(mut rest: &[u8]) -> bool {
-    loop {
-        match protocol::find_crlf(rest) {
-            None => return false,
-            Some(0) => return true,
-            Some(line_len) => rest = &rest[line_len + CRLF_LEN..],
+/// How the end of a response is determined.
+#[derive(Debug, Clone, Copy)]
+enum ResponseEnd {
+    /// The headers are not complete yet.
+    Pending,
+    /// No body: complete at the end of the headers.
+    Headers,
+    /// A body of this many bytes.
+    Length(usize),
+    /// A chunked body.
+    Chunked(ChunkScan),
+    /// No declared length: the connection close ends the body.
+    Close,
+}
+
+/// How the body of a response is delimited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyFraming {
+    /// No body: the response ends with its headers.
+    None,
+    /// A body of exactly this many bytes.
+    Length(usize),
+    /// A chunked body.
+    Chunked,
+    /// No declared length: the connection close ends the body.
+    UntilClose,
+}
+
+/// Determine how the body of the response to a `method` request is delimited,
+/// from the raw response head (status line and headers, including the final
+/// empty line).
+pub fn response_framing(method: HttpMethod, head: &[u8]) -> BodyFraming {
+    if bodyless(method, head) {
+        BodyFraming::None
+    } else if chunked(head) {
+        BodyFraming::Chunked
+    } else if let Some(length) = content_length(head) {
+        BodyFraming::Length(length)
+    } else {
+        BodyFraming::UntilClose
+    }
+}
+
+/// Tracks whether a growing response buffer holds a complete response.
+///
+/// [`response_complete`] re-derives everything from scratch on each call. A
+/// `ResponseScan` finds the end of the headers and decides how the body is
+/// delimited once, then only looks at new bytes, so it can be asked after every
+/// read at constant cost per byte.
+#[derive(Debug, Clone, Copy)]
+pub struct ResponseScan {
+    method: HttpMethod,
+    /// Where to resume looking for the end of the headers.
+    searched: usize,
+    headers_end: usize,
+    end: ResponseEnd,
+}
+
+impl ResponseScan {
+    /// Start scanning the response to a `method` request.
+    pub const fn new(method: HttpMethod) -> Self {
+        Self {
+            method,
+            searched: 0,
+            headers_end: 0,
+            end: ResponseEnd::Pending,
+        }
+    }
+
+    /// Whether `data`, everything read so far, holds a complete response.
+    ///
+    /// `data` must only ever grow between calls.
+    pub fn is_complete(&mut self, data: &[u8]) -> bool {
+        if matches!(self.end, ResponseEnd::Pending) {
+            // A terminator split across reads starts up to 3 bytes back.
+            let from = self.searched.saturating_sub(DOUBLE_CRLF_LEN - 1);
+            match protocol::find_double_crlf(&data[from..]) {
+                None => {
+                    self.searched = data.len();
+                    return false;
+                }
+                Some(pos) => {
+                    self.headers_end = from + pos + DOUBLE_CRLF_LEN;
+                    self.end = self.classify(data);
+                }
+            }
+        }
+
+        let body = &data[self.headers_end..];
+        match &mut self.end {
+            ResponseEnd::Pending | ResponseEnd::Close => false,
+            ResponseEnd::Headers => true,
+            ResponseEnd::Length(length) => body.len() >= *length,
+            ResponseEnd::Chunked(scan) => scan.advance(body),
+        }
+    }
+
+    /// Whether the headers declared where the body ends (a length, chunked
+    /// framing, or no body). Without that, only the connection closing ends
+    /// the response.
+    pub const fn declares_length(&self) -> bool {
+        matches!(
+            self.end,
+            ResponseEnd::Headers | ResponseEnd::Length(_) | ResponseEnd::Chunked(_)
+        )
+    }
+
+    fn classify(&self, data: &[u8]) -> ResponseEnd {
+        match response_framing(self.method, &data[..self.headers_end]) {
+            BodyFraming::None => ResponseEnd::Headers,
+            BodyFraming::Chunked => ResponseEnd::Chunked(ChunkScan::default()),
+            BodyFraming::Length(length) => ResponseEnd::Length(length),
+            BodyFraming::UntilClose => ResponseEnd::Close,
         }
     }
 }
@@ -274,6 +418,7 @@ fn trailers_complete(mut rest: &[u8]) -> bool {
 /// or chunked transfer encoding.
 ///
 /// Responses without either use connection close to delimit the body.
+#[cfg(test)]
 pub fn declares_length(data: &[u8]) -> bool {
     let headers_end = match protocol::find_double_crlf(data) {
         Some(pos) => pos + DOUBLE_CRLF_LEN,
@@ -938,6 +1083,96 @@ mod tests {
 
         let full = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
         assert!(response_complete(HttpMethod::GET, full));
+    }
+
+    /// Feed `raw` to a scan in pieces of `step` bytes; the index of the first
+    /// prefix that completes it, if any.
+    fn first_complete(method: HttpMethod, raw: &[u8], step: usize) -> Option<usize> {
+        let mut scan = ResponseScan::new(method);
+        let mut end = 0;
+        while end < raw.len() {
+            end = (end + step).min(raw.len());
+            if scan.is_complete(&raw[..end]) {
+                return Some(end);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_response_scan_matches_stateless_check_for_every_split() {
+        let responses: [&[u8]; 7] = [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nAge: 0\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nab0\r\n\r\n\r\n0\r\nX-Sum: 1\r\n\r\n",
+            b"HTTP/1.1 204 No Content\r\n\r\n",
+            b"HTTP/1.1 304 Not Modified\r\nContent-Length: 9\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nuntil close",
+        ];
+        for raw in responses {
+            // The earliest prefix the stateless check accepts.
+            let expected = (1..=raw.len()).find(|&n| response_complete(HttpMethod::GET, &raw[..n]));
+            for step in [1, 2, 3, 5, 64] {
+                let got = first_complete(HttpMethod::GET, raw, step);
+                // Coarser steps can only skip past the exact prefix.
+                match (expected, got) {
+                    (None, None) => {}
+                    (Some(e), Some(g)) => assert!(g >= e && g < e + step, "{raw:?} step {step}"),
+                    other => panic!("{raw:?} step {step}: {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_response_scan_head_response_is_complete_at_headers() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n";
+        assert_eq!(first_complete(HttpMethod::HEAD, raw, 1), Some(raw.len()));
+        assert_eq!(first_complete(HttpMethod::GET, raw, 1), None);
+    }
+
+    #[test]
+    fn test_response_scan_declares_length() {
+        let mut scan = ResponseScan::new(HttpMethod::GET);
+        assert!(!scan.declares_length());
+        assert!(!scan.is_complete(b"HTTP/1.1 200 OK\r\nContent-Len"));
+        assert!(!scan.declares_length());
+        assert!(!scan.is_complete(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe"));
+        assert!(scan.declares_length());
+
+        let mut scan = ResponseScan::new(HttpMethod::GET);
+        assert!(!scan.is_complete(b"HTTP/1.1 200 OK\r\n\r\nbody"));
+        assert!(!scan.declares_length());
+    }
+
+    #[test]
+    fn test_response_scan_header_terminator_split_across_reads() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        // Cut inside the final CRLFCRLF at every position.
+        for cut in raw.len() - 3..raw.len() {
+            let mut scan = ResponseScan::new(HttpMethod::GET);
+            assert!(!scan.is_complete(&raw[..cut]));
+            assert!(scan.is_complete(raw), "cut {cut}");
+        }
+    }
+
+    #[test]
+    fn test_chunk_scan_resumes_across_calls() {
+        let body = b"3\r\nabc\r\n4;ext=1\r\nwxyz\r\n0\r\nT: v\r\n\r\n";
+        for step in 1..=body.len() {
+            let mut scan = ChunkScan::default();
+            let mut end = 0;
+            let mut done = false;
+            while end < body.len() {
+                end = (end + step).min(body.len());
+                done = scan.advance(&body[..end]);
+                if done {
+                    break;
+                }
+            }
+            assert!(done && end == body.len(), "step {step}");
+        }
     }
 
     #[test]
