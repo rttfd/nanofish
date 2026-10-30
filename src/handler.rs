@@ -8,7 +8,10 @@ use crate::{
 use heapless::Vec;
 
 /// Trait for handling HTTP requests
-#[allow(async_fn_in_trait)]
+#[expect(
+    async_fn_in_trait,
+    reason = "no_std embedded executors are single-threaded, so no `Send` bound is wanted"
+)]
 pub trait HttpHandler {
     /// Handle an incoming HTTP request and return a response
     async fn handle_request(

@@ -11,7 +11,10 @@ use heapless::Vec;
 /// The body arrives in pieces no larger than the response buffer, already
 /// decoded: a chunked body is delivered as its payload, without chunk framing.
 /// A sink can write to flash, feed a parser or a hash, and so on.
-#[allow(async_fn_in_trait)]
+#[expect(
+    async_fn_in_trait,
+    reason = "no_std embedded executors are single-threaded, so no `Send` bound is wanted"
+)]
 pub trait BodySink {
     /// Called once, when the status line and headers have been read and
     /// before any body data.

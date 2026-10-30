@@ -450,7 +450,10 @@ fn write_decimal_to_buffer<const N: usize>(
     let mut i = 0;
 
     while num > 0 {
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a decimal digit is below 10"
+        )]
         {
             digits[i] = (num % 10) as u8 + b'0';
         }

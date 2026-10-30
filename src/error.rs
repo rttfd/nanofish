@@ -72,8 +72,10 @@ impl From<embedded_tls::TlsError> for Error {
 
 impl Error {
     /// Wrap a transport I/O error, keeping its [`embedded_io_async::ErrorKind`].
-    // Taken by value so it can be passed straight to `map_err`.
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "taken by value so it can be passed straight to `map_err`"
+    )]
     pub(crate) fn io<E: embedded_io_async::Error>(error: E) -> Self {
         Self::TcpError(error.kind())
     }

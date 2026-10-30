@@ -258,7 +258,10 @@ fn chunk_size_line(len: usize, out: &mut [u8; 18]) -> &[u8] {
 /// Use it instead of [`HttpHandler`](crate::HttpHandler) for responses that
 /// are large or produced incrementally, such as files read from flash, sensor
 /// logs or server-sent events.
-#[allow(async_fn_in_trait)]
+#[expect(
+    async_fn_in_trait,
+    reason = "no_std embedded executors are single-threaded, so no `Send` bound is wanted"
+)]
 pub trait StreamingHandler {
     /// Answer `request` through `response`.
     ///
@@ -416,7 +419,10 @@ mod tests {
     struct Scripted(Scenario);
 
     impl StreamingHandler for Scripted {
-        #[allow(clippy::too_many_lines)]
+        #[expect(
+            clippy::too_many_lines,
+            reason = "one scripted step per response, kept in order for readability"
+        )]
         async fn handle<S: Write, const HEAD_SIZE: usize>(
             &mut self,
             _request: &HttpRequest<'_>,
