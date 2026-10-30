@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-31
+
 ### Added
 
 - Criterion benchmarks for response parsing, request serving and the encoders (`make bench`, `make bench-save`, `make bench-compare`), and a `profiling` build profile for `samply` and `cargo flamegraph`.
@@ -410,7 +412,8 @@ HttpResponseBuilder::new()
 - Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, and CONNECT methods.
 - Configurable client options (retries, timeouts, delays).
 
-[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/rttfd/nanofish/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/rttfd/nanofish/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/rttfd/nanofish/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/rttfd/nanofish/compare/v0.12.0...v0.12.1
