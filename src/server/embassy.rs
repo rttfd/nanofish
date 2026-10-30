@@ -26,6 +26,13 @@ pub struct ServerTimeouts {
     pub read_timeout: TimeoutDuration,
     /// Maximum time a request handler may run per request.
     pub handler_timeout: TimeoutDuration,
+    /// Maximum total time one connection may take, from accept to the end of
+    /// the response.
+    ///
+    /// `read_timeout` only fires on inactivity, so a client that sends one
+    /// byte just under that interval can otherwise keep a connection (and the
+    /// server's single socket) busy indefinitely.
+    pub connection_timeout: TimeoutDuration,
 }
 
 impl Default for ServerTimeouts {
@@ -34,6 +41,7 @@ impl Default for ServerTimeouts {
             accept_timeout: TimeoutDuration::from_secs(10),
             read_timeout: TimeoutDuration::from_secs(30),
             handler_timeout: TimeoutDuration::from_secs(60),
+            connection_timeout: TimeoutDuration::from_secs(120),
         }
     }
 }
@@ -45,11 +53,13 @@ impl ServerTimeouts {
         accept_timeout: TimeoutDuration,
         read_timeout: TimeoutDuration,
         handler_timeout: TimeoutDuration,
+        connection_timeout: TimeoutDuration,
     ) -> Self {
         Self {
             accept_timeout,
             read_timeout,
             handler_timeout,
+            connection_timeout,
         }
     }
 }
@@ -95,11 +105,37 @@ impl<
     ///
     /// **Important**: This server only accepts plain HTTP connections.
     /// HTTPS/TLS is not supported by the server (only by the client).
+    ///
+    /// Connections are handled one at a time on a single socket. To serve
+    /// several clients at once, run this method in several tasks: each task
+    /// owns its socket and buffers, and all of them accept on the same port.
     #[expect(clippy::future_not_send)]
     pub async fn serve<H>(&mut self, stack: Stack<'_>, mut handler: H) -> !
     where
         H: HttpHandler,
     {
+        let handler_timeout = self.timeouts.handler_timeout;
+        self.serve_connections(stack, async |socket| {
+            let mut handler = TimeoutHandler {
+                inner: &mut handler,
+                timeout: handler_timeout,
+            };
+            handle_http_connection_with_sizes::<_, _, REQ_SIZE, MAX_RESPONSE_SIZE>(
+                socket,
+                &mut handler,
+            )
+            .await
+        })
+        .await
+    }
+
+    /// Accept connections forever, running `connection` on each.
+    #[expect(clippy::future_not_send)]
+    async fn serve_connections(
+        &self,
+        stack: Stack<'_>,
+        mut connection: impl AsyncFnMut(&mut TcpSocket<'_>) -> Result<(), Error>,
+    ) -> ! {
         info!("HTTP server started on port {}", self.port);
 
         let mut rx_buffer = [0; RX_SIZE];
@@ -122,18 +158,18 @@ impl<
                 self.timeouts.read_timeout.as_millis(),
             )));
 
-            let mut handler = TimeoutHandler {
-                inner: &mut handler,
-                timeout: self.timeouts.handler_timeout,
-            };
-
-            if let Err(e) = handle_http_connection_with_sizes::<_, _, REQ_SIZE, MAX_RESPONSE_SIZE>(
-                &mut socket,
-                &mut handler,
+            match with_timeout(
+                Duration::from_millis(self.timeouts.connection_timeout.as_millis()),
+                connection(&mut socket),
             )
             .await
             {
-                error!("Error handling request: {:?}", e);
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => error!("Error handling request: {:?}", e),
+                Err(_) => {
+                    warn!("Connection timed out");
+                    socket.abort();
+                }
             }
 
             socket.close();
@@ -205,6 +241,10 @@ mod tests {
             server.timeouts.handler_timeout,
             TimeoutDuration::from_secs(60)
         );
+        assert_eq!(
+            server.timeouts.connection_timeout,
+            TimeoutDuration::from_secs(120)
+        );
 
         let server: SmallEmbassyHttpServer = EmbassyHttpServer::new(3000);
         assert_eq!(server.port, 3000);
@@ -223,6 +263,7 @@ mod tests {
             TimeoutDuration::from_secs(5),
             TimeoutDuration::from_secs(15),
             TimeoutDuration::from_secs(45),
+            TimeoutDuration::from_secs(90),
         );
         assert_eq!(
             custom_timeouts.accept_timeout,
@@ -232,6 +273,10 @@ mod tests {
         assert_eq!(
             custom_timeouts.handler_timeout,
             TimeoutDuration::from_secs(45)
+        );
+        assert_eq!(
+            custom_timeouts.connection_timeout,
+            TimeoutDuration::from_secs(90)
         );
 
         // Test server with custom timeouts

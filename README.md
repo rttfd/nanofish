@@ -633,7 +633,7 @@ You can customize how long the server waits for different operations:
 ```rust,ignore
 use nanofish::{DefaultEmbassyHttpServer, ServerTimeouts, TimeoutDuration};
 
-// Default timeouts: 10s accept, 30s read, 60s handler
+// Default timeouts: 10s accept, 30s read, 60s handler, 120s per connection
 let server = DefaultEmbassyHttpServer::new(80);
 
 // Custom timeouts
@@ -641,7 +641,9 @@ let timeouts = ServerTimeouts::new(
     TimeoutDuration::from_secs(5),   // 5 seconds to accept new connections
     TimeoutDuration::from_secs(15),  // 15 seconds of socket inactivity while
                                      // reading/writing a request
-    TimeoutDuration::from_secs(30)   // 30 seconds for your handler to process requests
+    TimeoutDuration::from_secs(30),  // 30 seconds for your handler to process requests
+    TimeoutDuration::from_secs(60),  // 60 seconds in total per connection, however
+                                     // slowly the peer trickles data
 );
 let server = DefaultEmbassyHttpServer::with_timeouts(80, timeouts);
 ```
