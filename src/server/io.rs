@@ -2,7 +2,7 @@ use crate::{
     codec,
     error::Error,
     handler::HttpHandler,
-    header::{HttpHeader, mime_types},
+    header::{HttpHeader, headers::CONNECTION, mime_types},
     protocol::{self, DOUBLE_CRLF_LEN},
     request::HttpRequest,
     response::{HttpResponse, ResponseBody},
@@ -72,6 +72,13 @@ pub type SmallHttpServer = HttpServer<SMALL_REQUEST_SIZE, SMALL_RESPONSE_SIZE>;
 ///
 /// Returns an error if stream IO fails, request parsing fails, handler execution
 /// fails, or response serialization exceeds the configured response buffer.
+///
+/// Where the peer can still be answered, it first gets an error response:
+/// `400` for a malformed request, `413` for a body that does not fit the
+/// request buffer, `431` for headers that do not fit, and `500` when the
+/// handler fails or its response cannot be serialized. The original error is
+/// still returned. Nothing is sent when the stream itself failed or the peer
+/// closed the connection mid-request.
 pub async fn handle_http_connection<S, H>(stream: &mut S, handler: &mut H) -> Result<(), Error>
 where
     S: Read + Write,
@@ -89,6 +96,13 @@ where
 ///
 /// Returns an error if stream IO fails, request parsing fails, handler execution
 /// fails, or response serialization exceeds the configured response buffer.
+///
+/// Where the peer can still be answered, it first gets an error response:
+/// `400` for a malformed request, `413` for a body that does not fit the
+/// request buffer, `431` for headers that do not fit, and `500` when the
+/// handler fails or its response cannot be serialized. The original error is
+/// still returned. Nothing is sent when the stream itself failed or the peer
+/// closed the connection mid-request.
 pub async fn handle_http_connection_with_sizes<
     S,
     H,
@@ -103,9 +117,24 @@ where
     H: HttpHandler,
 {
     let mut request_buffer = [0; REQ_SIZE];
-    let total_read = read_request(stream, &mut request_buffer).await?;
+    let total_read = match read_request(stream, &mut request_buffer).await {
+        Ok(total_read) => total_read,
+        Err(failure) => {
+            if let Some(status) = failure.reply {
+                send_status::<S, MAX_RESPONSE_SIZE>(stream, status).await;
+            }
+            return Err(failure.error);
+        }
+    };
 
-    let request = HttpRequest::try_from(&request_buffer[..total_read])?;
+    let request = match HttpRequest::try_from(&request_buffer[..total_read]) {
+        Ok(request) => request,
+        Err(error) => {
+            send_status::<S, MAX_RESPONSE_SIZE>(stream, StatusCode::BadRequest).await;
+            return Err(error);
+        }
+    };
+
     let response = handler.handle_request(&request).await.map_or_else(
         |_| {
             text_error::<MAX_RESPONSE_SIZE>(
@@ -114,7 +143,16 @@ where
             )
         },
         |response| response.build_bytes::<MAX_RESPONSE_SIZE>(),
-    )?;
+    );
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            // The response could not be serialized (for example an invalid
+            // header or a body larger than the response buffer).
+            send_status::<S, MAX_RESPONSE_SIZE>(stream, StatusCode::InternalServerError).await;
+            return Err(error);
+        }
+    };
 
     stream
         .write_all(&response)
@@ -123,34 +161,57 @@ where
     stream.flush().await.map_err(|_| Error::TcpError)
 }
 
+/// Why a request could not be read, and the status to answer with, if any.
+struct ReadFailure {
+    error: Error,
+    reply: Option<StatusCode>,
+}
+
+impl ReadFailure {
+    /// The peer cannot (or need not) be answered.
+    const fn silent(error: Error) -> Self {
+        Self { error, reply: None }
+    }
+
+    const fn reply(error: Error, status: StatusCode) -> Self {
+        Self {
+            error,
+            reply: Some(status),
+        }
+    }
+}
+
 /// Read one complete HTTP request (headers plus any `Content-Length` body).
 ///
 /// Requests without `Content-Length` are considered complete once the headers
 /// end; the peer is expected to close the connection after such a request.
+///
+/// A declared `Content-Length` that cannot fit in `buf` is rejected as soon as
+/// the headers arrive, instead of reading until the buffer fills.
 ///
 /// # Errors
 ///
 /// - [`Error::TcpError`] if the stream fails.
 /// - [`Error::InvalidResponse`] if the peer closes the connection before the
 ///   request headers (or a declared body) are complete.
-/// - [`Error::BufferOverflow`] if `buf` fills before the request is complete.
-async fn read_request<S>(stream: &mut S, buf: &mut [u8]) -> Result<usize, Error>
+/// - [`Error::BufferOverflow`] if the request does not fit in `buf`, answered
+///   with `413` when the headers were read and `431` when they were not.
+async fn read_request<S>(stream: &mut S, buf: &mut [u8]) -> Result<usize, ReadFailure>
 where
     S: Read,
 {
     let mut total_read = 0;
     let mut header_end = None;
-    let mut saw_eof = false;
-    let mut request_complete = false;
 
     while total_read < buf.len() {
         let n = stream
             .read(&mut buf[total_read..])
             .await
-            .map_err(|_| Error::TcpError)?;
+            .map_err(|_| ReadFailure::silent(Error::TcpError))?;
         if n == 0 {
-            saw_eof = true;
-            break;
+            return Err(ReadFailure::silent(Error::InvalidResponse(
+                "Incomplete request",
+            )));
         }
         total_read += n;
 
@@ -159,27 +220,41 @@ where
         }
 
         if let Some(hdr_end) = header_end {
-            let body_start = hdr_end + DOUBLE_CRLF_LEN;
-            if let Some(content_length) = codec::content_length(&buf[..hdr_end]) {
-                if total_read >= body_start.saturating_add(content_length) {
-                    request_complete = true;
-                    break;
-                }
-            } else {
+            let Some(content_length) = codec::content_length(&buf[..hdr_end]) else {
                 // No Content-Length — headers are complete, no body expected
-                request_complete = true;
-                break;
+                return Ok(total_read);
+            };
+            let needed = (hdr_end + DOUBLE_CRLF_LEN).saturating_add(content_length);
+            if needed > buf.len() {
+                return Err(ReadFailure::reply(
+                    Error::BufferOverflow,
+                    StatusCode::RequestEntityTooLarge,
+                ));
+            }
+            if total_read >= needed {
+                return Ok(total_read);
             }
         }
     }
 
-    if request_complete {
-        return Ok(total_read);
+    // The buffer filled up before the end of the headers.
+    Err(ReadFailure::reply(
+        Error::BufferOverflow,
+        StatusCode::RequestHeaderFieldsTooLarge,
+    ))
+}
+
+/// Best-effort plain-text error response; a failure to send it is ignored
+/// because the caller already has an error to report.
+async fn send_status<S, const MAX_RESPONSE_SIZE: usize>(stream: &mut S, status: StatusCode)
+where
+    S: Write,
+{
+    if let Ok(response) = text_error::<MAX_RESPONSE_SIZE>(status, status.text())
+        && stream.write_all(&response).await.is_ok()
+    {
+        let _ = stream.flush().await;
     }
-    if saw_eof {
-        return Err(Error::InvalidResponse("Incomplete request"));
-    }
-    Err(Error::BufferOverflow)
 }
 
 fn text_error<const MAX_RESPONSE_SIZE: usize>(
@@ -188,6 +263,7 @@ fn text_error<const MAX_RESPONSE_SIZE: usize>(
 ) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error> {
     let mut headers = Vec::new();
     let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
+    let _ = headers.push(HttpHeader::new(CONNECTION, "close"));
     let resp = HttpResponse {
         status_code: status,
         headers,
@@ -338,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn test_response_header_injection_is_not_sent() {
+    fn test_response_header_injection_gets_500() {
         let request = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let mut stream = MockStream::<128, 512>::new(request);
         let mut handler = ReflectHandler;
@@ -349,7 +425,10 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, Error::HeaderError("Invalid header value")));
-        assert!(stream.output.is_empty());
+        // The injected header never reaches the peer; it gets a 500 instead.
+        let response = core::str::from_utf8(&stream.output).unwrap();
+        assert!(response.starts_with("HTTP/1.1 500 Internal Server Error\r\n"));
+        assert!(!response.contains("Set-Cookie"));
     }
 
     #[test]
@@ -361,7 +440,7 @@ mod tests {
         let mut handler = BodyCheckHandler;
 
         let err = futures_lite::future::block_on(
-            handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+            handle_http_connection_with_sizes::<_, _, 256, 512>(&mut stream, &mut handler),
         )
         .unwrap_err();
 
@@ -402,7 +481,7 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, Error::BufferOverflow));
-        assert!(stream.output.is_empty());
+        assert_status(&stream.output, "431 Request Header Fields Too Large");
     }
 
     #[test]
@@ -418,6 +497,155 @@ mod tests {
         )
         .unwrap_err();
 
+        assert!(matches!(err, Error::BufferOverflow));
+        assert_status(&stream.output, "413 Request Entity Too Large");
+    }
+
+    /// Assert that `output` is an error response with the given status text
+    /// that tells the peer the connection is closing.
+    fn assert_status(output: &[u8], status: &str) {
+        let response = core::str::from_utf8(output).unwrap();
+        assert!(
+            response.starts_with(
+                heapless::format!(64; "HTTP/1.1 {status}\r\n")
+                    .unwrap()
+                    .as_str()
+            ),
+            "{response}"
+        );
+        assert!(response.contains("Connection: close\r\n"), "{response}");
+    }
+
+    #[test]
+    fn test_content_length_larger_than_buffer_is_rejected_early() {
+        // Only the headers have arrived, but the declared body can never fit
+        // in the 128-byte request buffer.
+        let request = b"POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 1000\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(request);
+        let mut handler = BodyCheckHandler;
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::BufferOverflow));
+        assert_status(&stream.output, "413 Request Entity Too Large");
+    }
+
+    #[test]
+    fn test_malformed_request_gets_400() {
+        for request in [
+            &b"GARBAGE\r\n\r\n"[..],
+            b"FETCH / HTTP/1.1\r\nHost: h\r\n\r\n",
+            b"GET\r\n\r\n",
+        ] {
+            let mut stream = MockStream::<128, 512>::new(request);
+            let mut handler = SimpleHandler;
+
+            let err =
+                futures_lite::future::block_on(
+                    handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+                )
+                .unwrap_err();
+
+            assert!(matches!(err, Error::InvalidResponse(_)));
+            assert_status(&stream.output, "400 Bad Request");
+        }
+    }
+
+    /// Handler that always fails.
+    struct FailingHandler;
+
+    impl HttpHandler for FailingHandler {
+        async fn handle_request(
+            &mut self,
+            _request: &HttpRequest<'_>,
+        ) -> Result<HttpResponse<'_>, Error> {
+            Err(Error::NoResponse)
+        }
+    }
+
+    #[test]
+    fn test_handler_error_gets_500() {
+        let request = b"GET / HTTP/1.1\r\nHost: h\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(request);
+        let mut handler = FailingHandler;
+
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut handler,
+        ))
+        .unwrap();
+
+        assert_status(&stream.output, "500 Internal Server Error");
+    }
+
+    #[test]
+    fn test_oversized_response_and_error_response_return_error() {
+        // The `GET /` page does not fit a 64-byte response buffer and neither
+        // does the 500, so nothing is sent but the error is still returned.
+        let request = b"GET / HTTP/1.1\r\nHost: h\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(request);
+        let mut handler = SimpleHandler;
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 64>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::BufferOverflow));
+        assert!(stream.output.is_empty());
+    }
+
+    #[test]
+    fn test_oversized_response_gets_500() {
+        // The page is too large for a 160-byte response buffer, but the short
+        // 500 response fits.
+        let request = b"GET / HTTP/1.1\r\nHost: h\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(request);
+        let mut handler = LargeBodyHandler;
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 160>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::BufferOverflow));
+        assert_status(&stream.output, "500 Internal Server Error");
+    }
+
+    /// Handler whose response is larger than a small response buffer.
+    struct LargeBodyHandler;
+
+    impl HttpHandler for LargeBodyHandler {
+        async fn handle_request(
+            &mut self,
+            _request: &HttpRequest<'_>,
+        ) -> Result<HttpResponse<'_>, Error> {
+            Ok(HttpResponse {
+                status_code: StatusCode::Ok,
+                headers: Vec::new(),
+                body: ResponseBody::Text(
+                    "0123456789012345678901234567890123456789012345678901234567890123456789\
+                     0123456789012345678901234567890123456789012345678901234567890123456789",
+                ),
+            })
+        }
+    }
+
+    #[test]
+    fn test_stream_failure_gets_no_response() {
+        // A broken stream cannot be answered: nothing is written.
+        let mut stream = MockStream::<128, 512>::new(b"");
+        let mut handler = SimpleHandler;
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
         assert!(matches!(err, Error::InvalidResponse("Incomplete request")));
+        assert!(stream.output.is_empty());
     }
 }

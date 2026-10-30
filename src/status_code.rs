@@ -78,6 +78,8 @@ pub enum StatusCode {
     RequestedRangeNotSatisfiable = 416,
     /// 417 Expectation Failed: The server cannot meet the requirements of the Expect request-header field.
     ExpectationFailed = 417,
+    /// 431 Request Header Fields Too Large: The server refuses the request because its header fields, individually or together, are too large.
+    RequestHeaderFieldsTooLarge = 431,
 
     // 5xx Server Error
     /// 500 Internal Server Error: The server has encountered a situation it doesn't know how to handle.
@@ -135,6 +137,7 @@ impl StatusCode {
             Self::UnsupportedMediaType => 415,
             Self::RequestedRangeNotSatisfiable => 416,
             Self::ExpectationFailed => 417,
+            Self::RequestHeaderFieldsTooLarge => 431,
             Self::InternalServerError => 500,
             Self::NotImplemented => 501,
             Self::BadGateway => 502,
@@ -186,6 +189,7 @@ impl StatusCode {
             Self::UnsupportedMediaType => "Unsupported Media Type",
             Self::RequestedRangeNotSatisfiable => "Requested Range Not Satisfiable",
             Self::ExpectationFailed => "Expectation Failed",
+            Self::RequestHeaderFieldsTooLarge => "Request Header Fields Too Large",
             // 5xx
             Self::InternalServerError => "Internal Server Error",
             Self::NotImplemented => "Not Implemented",
@@ -256,6 +260,7 @@ impl From<u16> for StatusCode {
             415 => Self::UnsupportedMediaType,
             416 => Self::RequestedRangeNotSatisfiable,
             417 => Self::ExpectationFailed,
+            431 => Self::RequestHeaderFieldsTooLarge,
             500 => Self::InternalServerError,
             501 => Self::NotImplemented,
             502 => Self::BadGateway,

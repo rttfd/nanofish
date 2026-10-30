@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The server now answers requests it rejects instead of silently closing the connection: `400 Bad Request` for a malformed request line or headers, `413 Request Entity Too Large` for a body that does not fit the request buffer, `431 Request Header Fields Too Large` for headers that do not fit, and `500 Internal Server Error` when the handler's response cannot be serialized (an invalid header or a response larger than the response buffer). `handle_http_connection()` and `HttpServer::handle_connection()` still return the original error. Nothing is sent when the stream itself fails or the peer closes the connection mid-request. These responses carry `Connection: close`.
+- The server rejects a request whose `Content-Length` cannot fit in the request buffer as soon as the headers arrive, instead of reading until the buffer fills. It now reports `BufferOverflow` where it used to report `InvalidResponse("Incomplete request")` when the peer closed first.
+- Added `StatusCode::RequestHeaderFieldsTooLarge` (431). **BREAKING** for exhaustive matches on `StatusCode`, and `StatusCode::from(431)` now returns it instead of `Other(431)`.
 - **BREAKING**: `HttpEndpoint::path` no longer includes the query string, and is always non-empty and starts with `/`. The query is in the new `HttpEndpoint::query: Option<&str>` field (without the leading `?`). `parse_endpoint("http://host/a?x=1")` now yields path `/a` and query `x=1`, and `http://host?x=1` yields path `/` and query `x=1`. Code that passed `endpoint.path` on as the request path must also pass `endpoint.query`.
 - **BREAKING**: `HttpClientRequest` has a new `query: Option<&str>` field, sent after `path` as `?query`. Set it to `None` when the query is already part of `path`, which is still accepted.
 
