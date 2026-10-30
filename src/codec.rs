@@ -101,6 +101,7 @@ pub fn parse_body<'b>(headers: &[HttpHeader<'_>], body_data: &'b [u8]) -> Respon
 /// - [`Error::HeaderError`] if a header name is not a valid token or a value
 ///   contains control characters such as CR or LF.
 /// - [`Error::BufferOverflow`] if the request does not fit in `RQ` bytes.
+#[cfg(test)]
 pub fn build_req<const RQ: usize>(
     method: HttpMethod,
     host: &str,
@@ -108,6 +109,20 @@ pub fn build_req<const RQ: usize>(
     query: Option<&str>,
     headers: &[HttpHeader<'_>],
     body: Option<&[u8]>,
+) -> Result<String<RQ>, Error> {
+    build_req_with(method, host, path, query, headers, body, false)
+}
+
+/// Like [`build_req`]. With `keep_alive`, no `Connection: close` is sent, so an
+/// HTTP/1.1 server keeps the connection open for another request.
+pub fn build_req_with<const RQ: usize>(
+    method: HttpMethod,
+    host: &str,
+    path: &str,
+    query: Option<&str>,
+    headers: &[HttpHeader<'_>],
+    body: Option<&[u8]>,
+    keep_alive: bool,
 ) -> Result<String<RQ>, Error> {
     // Anything that could end the request line or a header early would let
     // the caller's data inject headers or whole requests.
@@ -171,7 +186,11 @@ pub fn build_req<const RQ: usize>(
         try_push!(req.push_str(CRLF_STR));
     }
 
-    try_push!(req.push_str(CONNECTION_CLOSE_END));
+    if keep_alive {
+        try_push!(req.push_str(CRLF_STR));
+    } else {
+        try_push!(req.push_str(CONNECTION_CLOSE_END));
+    }
     Ok(req)
 }
 

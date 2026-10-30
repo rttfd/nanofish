@@ -37,9 +37,11 @@ pub mod smoltcp;
 pub mod status_code;
 
 #[cfg(feature = "embassy")]
-pub use client::{DefaultEmbassyHttpClient, EmbassyHttpClient, SmallEmbassyHttpClient};
 pub use client::{
-    DefaultHttpClient, HttpClient, HttpClientRequest, RequestBuilder, SmallHttpClient,
+    DefaultEmbassyHttpClient, EmbassyHttpClient, EmbassyHttpSession, SmallEmbassyHttpClient,
+};
+pub use client::{
+    DefaultHttpClient, Exchange, HttpClient, HttpClientRequest, RequestBuilder, SmallHttpClient,
 };
 #[cfg(feature = "tls")]
 pub use client::{DefaultHttpTlsClient, HttpTlsClient, SmallHttpTlsClient, TlsVerification};

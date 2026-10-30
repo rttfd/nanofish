@@ -16,9 +16,12 @@ mod tls;
 
 pub use builder::RequestBuilder;
 #[cfg(feature = "embassy")]
-pub use embassy::{DefaultEmbassyHttpClient, EmbassyHttpClient, SmallEmbassyHttpClient};
+pub use embassy::{
+    DefaultEmbassyHttpClient, EmbassyHttpClient, EmbassyHttpSession, SmallEmbassyHttpClient,
+};
 pub use io::{
-    DefaultHttpClient, HttpClient, HttpClientRequest, HttpEndpoint, SmallHttpClient, parse_endpoint,
+    DefaultHttpClient, Exchange, HttpClient, HttpClientRequest, HttpEndpoint, SmallHttpClient,
+    parse_endpoint,
 };
 #[cfg(feature = "tls")]
 pub use tls::{DefaultHttpTlsClient, HttpTlsClient, SmallHttpTlsClient, TlsVerification};
