@@ -7,8 +7,10 @@ use crate::{
     protocol::{DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT},
     response::HttpResponse,
 };
+use core::fmt::Write as _;
 use core::future::Future;
 use embedded_io_async::{Read, Write};
+use heapless::String;
 
 use crate::client::{DEFAULT_REQUEST_SIZE, SMALL_REQUEST_SIZE};
 
@@ -20,17 +22,64 @@ pub struct HttpEndpoint<'a> {
     pub host: &'a str,
     /// Explicit or default port.
     pub port: u16,
-    /// Request path, defaulting to `/`.
+    /// Request path without the query string. Always starts with `/`; a URL
+    /// without a path yields `/`.
     pub path: &'a str,
+    /// Query string without the leading `?`, if the URL has one. It is
+    /// `Some("")` for a URL that ends in a bare `?`.
+    pub query: Option<&'a str>,
+}
+
+impl HttpEndpoint<'_> {
+    /// Build the value for the `Host` header of a request to this endpoint.
+    ///
+    /// This is the host, followed by `:port` unless the port is the default
+    /// for the scheme (80 for `http`, 443 for `https`). A request to
+    /// `http://example.com:8080/` must send `Host: example.com:8080`, otherwise
+    /// virtual-host routing and generated redirects point at the wrong port.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BufferOverflow`] if the value does not fit in `N` bytes.
+    pub fn host_header<const N: usize>(&self) -> Result<String<N>, Error> {
+        let mut value = String::new();
+        value
+            .push_str(self.host)
+            .map_err(|_| Error::BufferOverflow)?;
+        if self.port != default_port(self.scheme) {
+            write!(value, ":{}", self.port).map_err(|_| Error::BufferOverflow)?;
+        }
+        Ok(value)
+    }
+}
+
+/// Default port for a URL scheme.
+fn default_port(scheme: &str) -> u16 {
+    if scheme == "https" {
+        DEFAULT_HTTPS_PORT
+    } else {
+        DEFAULT_HTTP_PORT
+    }
 }
 
 /// Parse an HTTP or HTTPS URL into endpoint metadata.
 ///
+/// The path and query are returned separately, so `http://host?x=1` yields the
+/// path `/` and the query `x=1`. The URL fragment (`#...`) is dropped, since
+/// it is never sent to the server. IPv6 hosts keep their brackets, as in
+/// `[::1]`. A port is optional; an empty one (`host:`) means the default for
+/// the scheme.
+///
 /// # Errors
 ///
-/// Returns [`Error::InvalidUrl`] if the endpoint does not start with `http://` or `https://`.
+/// Returns [`Error::InvalidUrl`] if the endpoint:
+///
+/// - does not start with `http://` or `https://`,
+/// - has an empty host or a malformed IPv6 host,
+/// - has a port that is not in `1..=65535`, or
+/// - contains user information (`user@host`), which is not supported.
 pub fn parse_endpoint(endpoint: &str) -> Result<HttpEndpoint<'_>, Error> {
-    let (scheme, host_port) = if let Some(rest) = endpoint.strip_prefix("http://") {
+    let (scheme, rest) = if let Some(rest) = endpoint.strip_prefix("http://") {
         ("http", rest)
     } else if let Some(rest) = endpoint.strip_prefix("https://") {
         ("https", rest)
@@ -38,27 +87,63 @@ pub fn parse_endpoint(endpoint: &str) -> Result<HttpEndpoint<'_>, Error> {
         return Err(Error::InvalidUrl);
     };
 
-    let host = host_port.split('/').next().ok_or(Error::InvalidUrl)?;
-    let path = &host_port[host.len()..];
+    // The fragment is client-side only and must not reach the request target.
+    let rest = rest.split_once('#').map_or(rest, |(before, _)| before);
+    let (authority, target) = rest.split_at(rest.find(['/', '?']).unwrap_or(rest.len()));
+    if authority.contains('@') {
+        return Err(Error::InvalidUrl);
+    }
+    let (path, query) = target
+        .split_once('?')
+        .map_or((target, None), |(path, query)| (path, Some(query)));
     let path = if path.is_empty() { "/" } else { path };
 
-    let default_port = if scheme == "https" {
-        DEFAULT_HTTPS_PORT
-    } else {
-        DEFAULT_HTTP_PORT
-    };
-    let (host, port) = host.rfind(':').map_or((host, default_port), |colon_pos| {
-        host[colon_pos + 1..]
-            .parse::<u16>()
-            .map_or((host, default_port), |port| (&host[..colon_pos], port))
-    });
+    let (host, port) = split_host_port(authority, default_port(scheme))?;
 
     Ok(HttpEndpoint {
         scheme,
         host,
         port,
         path,
+        query,
     })
+}
+
+/// Split a URL authority into host and port, using `default_port` when the
+/// port is absent or empty.
+fn split_host_port(authority: &str, default_port: u16) -> Result<(&str, u16), Error> {
+    let (host, port) = if authority.starts_with('[') {
+        let close = authority.find(']').ok_or(Error::InvalidUrl)?;
+        let (host, rest) = authority.split_at(close + 1);
+        if host == "[]" {
+            return Err(Error::InvalidUrl);
+        }
+        let port = if rest.is_empty() {
+            None
+        } else {
+            Some(rest.strip_prefix(':').ok_or(Error::InvalidUrl)?)
+        };
+        (host, port)
+    } else {
+        // An unbracketed host with more than one `:` ends up with a port
+        // that does not parse, which rejects bare IPv6 addresses.
+        authority
+            .split_once(':')
+            .map_or((authority, None), |(host, port)| (host, Some(port)))
+    };
+
+    if host.is_empty() {
+        return Err(Error::InvalidUrl);
+    }
+    let port = match port.filter(|port| !port.is_empty()) {
+        None => default_port,
+        Some(port) => port
+            .parse::<u16>()
+            .ok()
+            .filter(|&port| port != 0)
+            .ok_or(Error::InvalidUrl)?,
+    };
+    Ok((host, port))
 }
 
 /// Request metadata for [`HttpClient`].
@@ -66,9 +151,18 @@ pub struct HttpClientRequest<'a> {
     /// HTTP method to send.
     pub method: HttpMethod,
     /// Host value used for the HTTP `Host` header.
+    ///
+    /// Include the port when it is not the default for the scheme; see
+    /// [`HttpEndpoint::host_header`].
     pub host: &'a str,
-    /// Request target, for example `/`, `/api`, or `/api?limit=10`.
+    /// Request path, for example `/` or `/api`. It may also carry the query
+    /// (`/api?limit=10`) when `query` is `None`.
     pub path: &'a str,
+    /// Query string without the leading `?`, sent after `path` when present.
+    ///
+    /// Together with `path` this is the request target; use
+    /// [`HttpEndpoint::path`] and [`HttpEndpoint::query`] for a parsed URL.
+    pub query: Option<&'a str>,
     /// Additional request headers.
     pub headers: &'a [HttpHeader<'a>],
     /// Optional request body.
@@ -158,6 +252,7 @@ impl<const RQ: usize> HttpClient<RQ> {
             request.method,
             request.host,
             request.path,
+            request.query,
             request.headers,
             request.body,
         )?;
@@ -178,11 +273,13 @@ impl<const RQ: usize> HttpClient<RQ> {
 
         let total_read = read_response(
             stream,
+            request.method,
             response_buffer,
             self.options.max_retries,
             retry_delay,
         )
         .await?;
+        codec::check_response_framing(&response_buffer[..total_read])?;
         let total_read = codec::dechunk(response_buffer, total_read)?;
         let response = codec::parse_resp(&response_buffer[..total_read])?;
         Ok((response, total_read))
@@ -210,6 +307,7 @@ impl<const RQ: usize> HttpClient<RQ> {
                 method: HttpMethod::GET,
                 host,
                 path,
+                query: None,
                 headers,
                 body: None,
             },
@@ -241,6 +339,7 @@ impl<const RQ: usize> HttpClient<RQ> {
                 method: HttpMethod::POST,
                 host,
                 path,
+                query: None,
                 headers,
                 body: Some(body),
             },
@@ -254,7 +353,9 @@ impl<const RQ: usize> HttpClient<RQ> {
 ///
 /// `retry_delay` is awaited between retries. A response is complete once its
 /// headers plus `Content-Length` body bytes or the chunked terminator arrive;
-/// a body without either is delimited by connection close.
+/// a body without either is delimited by connection close. Responses to `HEAD`
+/// requests and `1xx`, `204` and `304` responses have no body and are complete
+/// at the end of the headers.
 ///
 /// # Errors
 ///
@@ -266,6 +367,7 @@ impl<const RQ: usize> HttpClient<RQ> {
 ///   complete.
 async fn read_response<S, D, Fut>(
     stream: &mut S,
+    method: HttpMethod,
     response_buffer: &mut [u8],
     max_retries: usize,
     retry_delay: D,
@@ -287,7 +389,7 @@ where
             }
             Ok(n) => {
                 total_read += n;
-                if codec::complete(&response_buffer[..total_read]) {
+                if codec::response_complete(method, &response_buffer[..total_read]) {
                     return Ok(total_read);
                 }
             }
@@ -305,7 +407,7 @@ where
         return Err(Error::NoResponse);
     }
 
-    if codec::complete(&response_buffer[..total_read]) {
+    if codec::response_complete(method, &response_buffer[..total_read]) {
         return Ok(total_read);
     }
 
@@ -505,6 +607,152 @@ mod tests {
     }
 
     #[test]
+    fn test_io_client_head_response_without_body() {
+        // HEAD advertises the body length but never sends the body.
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100\r\n\r\n";
+        let mut stream = MockStream::<128, 256>::new(raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+
+        let (response, total) = futures_lite::future::block_on(client.request(
+            &mut stream,
+            HttpClientRequest {
+                method: HttpMethod::HEAD,
+                host: "example.com",
+                path: "/",
+                query: None,
+                headers: &[],
+                body: None,
+            },
+            &mut buffer,
+        ))
+        .unwrap();
+
+        assert_eq!(total, raw.len());
+        assert_eq!(response.status_code, StatusCode::Ok);
+        assert_eq!(response.content_length(), Some(100));
+        assert_eq!(response.body, ResponseBody::Empty);
+    }
+
+    #[test]
+    fn test_io_client_head_response_over_get_is_incomplete() {
+        // The same bytes are a truncated response to a GET.
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n";
+        let mut stream = MockStream::<128, 256>::new(raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+
+        let result = futures_lite::future::block_on(client.get(
+            &mut stream,
+            "example.com",
+            "/",
+            &[],
+            &mut buffer,
+        ));
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidResponse("Incomplete response body"))
+        ));
+    }
+
+    #[test]
+    fn test_io_client_not_modified_with_content_length() {
+        let raw = b"HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\nETag: \"x\"\r\n\r\n";
+        let mut stream = MockStream::<128, 256>::new(raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+
+        let (response, _) = futures_lite::future::block_on(client.get(
+            &mut stream,
+            "example.com",
+            "/",
+            &[],
+            &mut buffer,
+        ))
+        .unwrap();
+
+        assert_eq!(response.status_code, StatusCode::NotModified);
+        assert_eq!(response.body, ResponseBody::Empty);
+    }
+
+    #[test]
+    fn test_io_client_rejects_conflicting_content_length() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello";
+        let mut stream = MockStream::<128, 256>::new(raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+
+        let result = futures_lite::future::block_on(client.get(
+            &mut stream,
+            "example.com",
+            "/",
+            &[],
+            &mut buffer,
+        ));
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidResponse("Conflicting Content-Length"))
+        ));
+    }
+
+    #[test]
+    fn test_io_client_rejects_malformed_content_length() {
+        for value in ["abc", "+5", "-1", ""] {
+            let mut raw = heapless::Vec::<u8, 128>::new();
+            raw.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: ")
+                .unwrap();
+            raw.extend_from_slice(value.as_bytes()).unwrap();
+            raw.extend_from_slice(b"\r\n\r\nhello").unwrap();
+            let mut stream = MockStream::<128, 256>::new(&raw);
+            let client = HttpClient::new();
+            let mut buffer = [0; 128];
+
+            let result = futures_lite::future::block_on(client.get(
+                &mut stream,
+                "example.com",
+                "/",
+                &[],
+                &mut buffer,
+            ));
+
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::InvalidResponse("Invalid Content-Length"))
+                ),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_io_client_post_without_body_sends_content_length_zero() {
+        let response = b"HTTP/1.1 204 No Content\r\n\r\n";
+        let mut stream = MockStream::<128, 256>::new(response);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+
+        futures_lite::future::block_on(client.request(
+            &mut stream,
+            HttpClientRequest {
+                method: HttpMethod::POST,
+                host: "example.com",
+                path: "/trigger",
+                query: None,
+                headers: &[],
+                body: None,
+            },
+            &mut buffer,
+        ))
+        .unwrap();
+
+        let request = core::str::from_utf8(&stream.output).unwrap();
+        assert!(request.contains("Content-Length: 0\r\n"), "{request}");
+    }
+
+    #[test]
     fn test_io_client_close_delimited_response() {
         // No Content-Length and not chunked: connection close delimits the body.
         let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello";
@@ -563,7 +811,8 @@ mod tests {
         assert_eq!(endpoint.scheme, "https");
         assert_eq!(endpoint.host, "example.com");
         assert_eq!(endpoint.port, 8443);
-        assert_eq!(endpoint.path, "/api?x=1");
+        assert_eq!(endpoint.path, "/api");
+        assert_eq!(endpoint.query, Some("x=1"));
     }
 
     #[test]
@@ -576,6 +825,242 @@ mod tests {
         let endpoint = parse_endpoint("http://[::1]").unwrap();
         assert_eq!(endpoint.host, "[::1]");
         assert_eq!(endpoint.port, DEFAULT_HTTP_PORT);
+    }
+
+    #[test]
+    fn test_host_header_omits_default_port() {
+        let endpoint = parse_endpoint("http://example.com/x").unwrap();
+        assert_eq!(
+            endpoint.host_header::<64>().unwrap().as_str(),
+            "example.com"
+        );
+
+        let endpoint = parse_endpoint("https://example.com:443/x").unwrap();
+        assert_eq!(
+            endpoint.host_header::<64>().unwrap().as_str(),
+            "example.com"
+        );
+
+        // An explicit default port is the same as no port.
+        let endpoint = parse_endpoint("http://example.com:80").unwrap();
+        assert_eq!(
+            endpoint.host_header::<64>().unwrap().as_str(),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn test_host_header_includes_non_default_port() {
+        let endpoint = parse_endpoint("http://example.com:8080/x").unwrap();
+        assert_eq!(
+            endpoint.host_header::<64>().unwrap().as_str(),
+            "example.com:8080"
+        );
+
+        // The default port of one scheme is not the default of the other.
+        let endpoint = parse_endpoint("https://example.com:80").unwrap();
+        assert_eq!(
+            endpoint.host_header::<64>().unwrap().as_str(),
+            "example.com:80"
+        );
+        let endpoint = parse_endpoint("http://example.com:443").unwrap();
+        assert_eq!(
+            endpoint.host_header::<64>().unwrap().as_str(),
+            "example.com:443"
+        );
+
+        let endpoint = parse_endpoint("http://[::1]:8080/x").unwrap();
+        assert_eq!(endpoint.host_header::<64>().unwrap().as_str(), "[::1]:8080");
+    }
+
+    #[test]
+    fn test_host_header_overflow() {
+        let endpoint = parse_endpoint("http://example.com:8080").unwrap();
+        // "example.com" fits, ":8080" does not.
+        assert!(matches!(
+            endpoint.host_header::<13>(),
+            Err(Error::BufferOverflow)
+        ));
+        assert!(matches!(
+            endpoint.host_header::<5>(),
+            Err(Error::BufferOverflow)
+        ));
+        assert!(endpoint.host_header::<16>().is_ok());
+    }
+
+    #[test]
+    fn test_io_client_sends_host_header_with_port() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let mut stream = MockStream::<128, 256>::new(response);
+        let client = HttpClient::new();
+        let mut buffer = [0; 64];
+        let endpoint = parse_endpoint("http://example.com:8080/status").unwrap();
+        let host = endpoint.host_header::<64>().unwrap();
+
+        futures_lite::future::block_on(client.get(
+            &mut stream,
+            &host,
+            endpoint.path,
+            &[],
+            &mut buffer,
+        ))
+        .unwrap();
+
+        let request = core::str::from_utf8(&stream.output).unwrap();
+        assert!(request.starts_with("GET /status HTTP/1.1\r\nHost: example.com:8080\r\n"));
+    }
+
+    #[test]
+    fn test_parse_endpoint_strips_fragment() {
+        let endpoint = parse_endpoint("http://example.com/a?x=1#top").unwrap();
+        assert_eq!(endpoint.host, "example.com");
+        assert_eq!(endpoint.path, "/a");
+        assert_eq!(endpoint.query, Some("x=1"));
+
+        let endpoint = parse_endpoint("http://example.com#top").unwrap();
+        assert_eq!(endpoint.host, "example.com");
+        assert_eq!(endpoint.path, "/");
+
+        let endpoint = parse_endpoint("http://example.com:8080#top/not-a-path").unwrap();
+        assert_eq!(endpoint.port, 8080);
+        assert_eq!(endpoint.path, "/");
+    }
+
+    #[test]
+    fn test_parse_endpoint_splits_path_and_query() {
+        // A query without a path used to end up in the host name.
+        let endpoint = parse_endpoint("http://example.com?x=1").unwrap();
+        assert_eq!(endpoint.host, "example.com");
+        assert_eq!(endpoint.path, "/");
+        assert_eq!(endpoint.query, Some("x=1"));
+
+        let endpoint = parse_endpoint("http://example.com:8080?x=1#f").unwrap();
+        assert_eq!(endpoint.host, "example.com");
+        assert_eq!(endpoint.port, 8080);
+        assert_eq!(endpoint.path, "/");
+        assert_eq!(endpoint.query, Some("x=1"));
+
+        let endpoint = parse_endpoint("http://example.com/?x=1&y=2").unwrap();
+        assert_eq!(endpoint.path, "/");
+        assert_eq!(endpoint.query, Some("x=1&y=2"));
+
+        let endpoint = parse_endpoint("http://[::1]:8080/a/b?q=a?b").unwrap();
+        assert_eq!(endpoint.path, "/a/b");
+        assert_eq!(endpoint.query, Some("q=a?b"));
+    }
+
+    #[test]
+    fn test_parse_endpoint_without_query() {
+        let endpoint = parse_endpoint("http://example.com").unwrap();
+        assert_eq!(endpoint.query, None);
+
+        let endpoint = parse_endpoint("http://example.com/a/b").unwrap();
+        assert_eq!(endpoint.path, "/a/b");
+        assert_eq!(endpoint.query, None);
+
+        // A bare `?` is an empty query, kept so the request target round-trips.
+        let endpoint = parse_endpoint("http://example.com/a?").unwrap();
+        assert_eq!(endpoint.path, "/a");
+        assert_eq!(endpoint.query, Some(""));
+    }
+
+    #[test]
+    fn test_io_client_sends_endpoint_path_and_query() {
+        for (url, target) in [
+            ("http://example.com?x=1", "GET /?x=1 HTTP/1.1\r\n"),
+            ("http://example.com/", "GET / HTTP/1.1\r\n"),
+            (
+                "http://example.com/a/b?x=1&y=2",
+                "GET /a/b?x=1&y=2 HTTP/1.1\r\n",
+            ),
+            ("http://example.com/a?", "GET /a? HTTP/1.1\r\n"),
+        ] {
+            let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+            let mut stream = MockStream::<128, 256>::new(response);
+            let client = HttpClient::new();
+            let mut buffer = [0; 64];
+            let endpoint = parse_endpoint(url).unwrap();
+
+            futures_lite::future::block_on(client.request(
+                &mut stream,
+                HttpClientRequest {
+                    method: HttpMethod::GET,
+                    host: endpoint.host,
+                    path: endpoint.path,
+                    query: endpoint.query,
+                    headers: &[],
+                    body: None,
+                },
+                &mut buffer,
+            ))
+            .unwrap();
+
+            let request = core::str::from_utf8(&stream.output).unwrap();
+            assert!(request.starts_with(target), "{url}: {request}");
+        }
+    }
+
+    #[test]
+    fn test_parse_endpoint_invalid_port() {
+        for url in [
+            "http://example.com:abc",
+            "http://example.com:99999",
+            "http://example.com:0",
+            "http://example.com:80:81",
+            "http://example.com:-1/x",
+            "http://[::1]:abc",
+        ] {
+            assert!(
+                matches!(parse_endpoint(url), Err(Error::InvalidUrl)),
+                "{url}"
+            );
+        }
+
+        // An empty port means the default port.
+        let endpoint = parse_endpoint("http://example.com:/x").unwrap();
+        assert_eq!(endpoint.host, "example.com");
+        assert_eq!(endpoint.port, DEFAULT_HTTP_PORT);
+        let endpoint = parse_endpoint("https://[::1]:").unwrap();
+        assert_eq!(endpoint.host, "[::1]");
+        assert_eq!(endpoint.port, DEFAULT_HTTPS_PORT);
+
+        let endpoint = parse_endpoint("http://example.com:65535").unwrap();
+        assert_eq!(endpoint.port, 65535);
+    }
+
+    #[test]
+    fn test_parse_endpoint_invalid_host() {
+        for url in [
+            "http://",
+            "http:///path",
+            "http://:80",
+            "http://?x=1",
+            "http://#f",
+            "http://[]",
+            "http://[::1",
+            "http://[::1]x",
+            "http://[::1]:80:81",
+            // A bare IPv6 address must be bracketed.
+            "http://::1/",
+        ] {
+            assert!(
+                matches!(parse_endpoint(url), Err(Error::InvalidUrl)),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_endpoint_user_info_is_rejected() {
+        for url in [
+            "http://user@example.com/",
+            "http://user:secret@example.com:8080/x",
+        ] {
+            assert!(
+                matches!(parse_endpoint(url), Err(Error::InvalidUrl)),
+                "{url}"
+            );
+        }
     }
 
     #[test]
@@ -672,6 +1157,7 @@ mod tests {
                 method: HttpMethod::GET,
                 host: "example.com",
                 path: "/",
+                query: None,
                 headers: &[],
                 body: None,
             },
@@ -704,6 +1190,7 @@ mod tests {
                 method: HttpMethod::GET,
                 host: "example.com",
                 path: "/",
+                query: None,
                 headers: &[],
                 body: None,
             },
