@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-30
+
 ### Added
 
 - `RequestBuilder`: a fluent builder for the method, headers and body of a request (`header`, `authorization`, `json`, `form`, `body`), sent with `HttpClient::send`, `HttpTlsClient::send` or `EmbassyHttpClient::send`. Adding more than 16 headers is reported as `BufferOverflow` before anything is sent. `post_json` is a shorthand on the generic and Embassy clients.
