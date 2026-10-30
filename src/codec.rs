@@ -5,9 +5,8 @@ use crate::{
     header::{HttpHeader, headers::CONTENT_LENGTH, headers::CONTENT_TYPE},
     method::HttpMethod,
     protocol::{
-        self, CHUNKED, CHUNKED_END_MARKER, CONNECTION_CLOSE_END, CRLF_LEN, CRLF_STR,
-        DOUBLE_CRLF_LEN, HEADER_SEPARATOR, HTTP_VERSION_LINE_SUFFIX, MAX_HEADERS,
-        TRANSFER_ENCODING,
+        self, CHUNKED, CONNECTION_CLOSE_END, CRLF_LEN, CRLF_STR, DOUBLE_CRLF_LEN, HEADER_SEPARATOR,
+        HTTP_VERSION_LINE_SUFFIX, MAX_HEADERS, TRANSFER_ENCODING,
     },
     response::{HttpResponse, ResponseBody},
     status_code::StatusCode,
@@ -137,13 +136,63 @@ pub fn complete(data: &[u8]) -> bool {
     };
 
     if chunked(data) {
-        return data
-            .windows(CHUNKED_END_MARKER.len())
-            .any(|w| w == CHUNKED_END_MARKER);
+        return chunked_body_complete(&data[headers_end..]);
     }
 
     content_length(&data[..headers_end])
         .is_some_and(|content_length| data.len().saturating_sub(headers_end) >= content_length)
+}
+
+/// Whether `body` holds a whole chunked body: every chunk, the last (zero
+/// size) chunk, any trailers and the final empty line.
+///
+/// The chunk framing is walked rather than searched for `0\r\n\r\n`, which can
+/// also appear in chunk data or at the end of a header block (`Age: 0`).
+/// Malformed framing counts as complete so that [`dechunk`] reports the error
+/// instead of the read loop waiting for bytes that will never make it valid.
+fn chunked_body_complete(body: &[u8]) -> bool {
+    let mut pos = 0;
+    loop {
+        let Some(line_len) = protocol::find_crlf(&body[pos..]) else {
+            return false;
+        };
+        let size = core::str::from_utf8(&body[pos..pos + line_len])
+            .ok()
+            .and_then(|line| line.split(';').next())
+            .and_then(|size| usize::from_str_radix(size.trim(), 16).ok());
+        let Some(size) = size else {
+            return true;
+        };
+
+        let data_start = pos + line_len + CRLF_LEN;
+        if size == 0 {
+            return trailers_complete(&body[data_start..]);
+        }
+
+        // Chunk data is followed by its own CRLF.
+        let Some(next) = data_start
+            .checked_add(size)
+            .and_then(|end| end.checked_add(CRLF_LEN))
+        else {
+            return true;
+        };
+        if next > body.len() {
+            return false;
+        }
+        pos = next;
+    }
+}
+
+/// Whether the (possibly empty) trailer section after the last chunk has
+/// arrived, i.e. the terminating empty line is present.
+fn trailers_complete(mut rest: &[u8]) -> bool {
+    loop {
+        match protocol::find_crlf(rest) {
+            None => return false,
+            Some(0) => return true,
+            Some(line_len) => rest = &rest[line_len + CRLF_LEN..],
+        }
+    }
 }
 
 /// Whether a response declares an explicit body length via `Content-Length`
@@ -332,6 +381,80 @@ mod tests {
         let complete_data =
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
         assert!(complete(complete_data));
+    }
+
+    #[test]
+    fn test_chunked_complete_header_ending_in_zero() {
+        // `Age: 0\r\n\r\n` ends in the bytes `0\r\n\r\n`, but that is the end of
+        // the headers, not the last chunk.
+        let headers_only = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nAge: 0\r\n\r\n";
+        assert!(!complete(headers_only));
+
+        let partial = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nAge: 0\r\n\r\n5\r\nhello\r\n";
+        assert!(!complete(partial));
+
+        let full =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nAge: 0\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        assert!(complete(full));
+    }
+
+    #[test]
+    fn test_chunked_complete_marker_inside_chunk_data() {
+        // The 7 data bytes `ab0\r\n\r\n` contain the last-chunk marker.
+        let partial = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nab0\r\n\r\n\r\n";
+        assert!(!complete(partial));
+
+        let full = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nab0\r\n\r\n\r\n0\r\n\r\n";
+        assert!(complete(full));
+
+        let mut buf = [0u8; 128];
+        buf[..full.len()].copy_from_slice(full);
+        let new_len = dechunk(&mut buf, full.len()).expect("should decode chunked");
+        let response = parse_resp(&buf[..new_len]).expect("should parse dechunked response");
+        assert_eq!(response.body.as_str(), Some("ab0\r\n\r\n"));
+    }
+
+    #[test]
+    fn test_chunked_complete_partial_framing() {
+        let head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let cases: [&[u8]; 5] = [
+            b"",                  // nothing yet
+            b"5",                 // size line unfinished
+            b"5\r\nhello",        // chunk data CRLF missing
+            b"5\r\nhello\r\n0\r\n", // last chunk without terminating line
+            b"5\r\nhello\r\n0\r\nX-Sum: 1\r\n", // trailer without terminating line
+        ];
+        for body in cases {
+            let mut data = heapless::Vec::<u8, 128>::new();
+            data.extend_from_slice(head).unwrap();
+            data.extend_from_slice(body).unwrap();
+            assert!(!complete(&data), "{body:?} should be incomplete");
+        }
+    }
+
+    #[test]
+    fn test_chunked_complete_with_trailers() {
+        let data = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nX-Sum: 1\r\n\r\n";
+        assert!(complete(data));
+    }
+
+    #[test]
+    fn test_chunked_complete_malformed_framing_is_complete() {
+        // Malformed framing must not make the read loop wait: `dechunk`
+        // reports the error.
+        let bad_size = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n";
+        assert!(complete(bad_size));
+
+        let mut buf = [0u8; 128];
+        buf[..bad_size.len()].copy_from_slice(bad_size);
+        assert!(matches!(
+            dechunk(&mut buf, bad_size.len()),
+            Err(Error::InvalidResponse("Invalid chunk size"))
+        ));
+
+        let overflow =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nhello\r\n";
+        assert!(complete(overflow));
     }
 
     #[test]

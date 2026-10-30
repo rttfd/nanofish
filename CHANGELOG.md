@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Chunked responses are no longer cut short or left hanging. The client decided a chunked response was complete by searching the buffer for `0\r\n\r\n`, which also matches the end of a header block ending in `0` (such as `Age: 0`) and chunk data containing that sequence, so reading stopped early and the body came back empty or truncated. Completion now follows the chunk framing, and trailers after the last chunk are handled. Malformed framing is reported by `dechunk` instead of stalling the read.
 - Chunked response decoding no longer panics on a chunk size close to `usize::MAX`: the chunk end offset overflowed (a panic in debug builds, an invalid slice range in release builds), letting a malicious or buggy server crash the client. Such responses now return `InvalidResponse`.
 
 ## [0.13.0] - 2026-09-01
