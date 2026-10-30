@@ -20,6 +20,14 @@ pub mod headers {
     pub const X_API_KEY: &str = "X-API-Key";
     /// Accept-Encoding header
     pub const ACCEPT_ENCODING: &str = "Accept-Encoding";
+    /// Transfer-Encoding header
+    pub const TRANSFER_ENCODING: &str = "Transfer-Encoding";
+    /// `ETag` header
+    pub const ETAG: &str = "ETag";
+    /// If-None-Match header
+    pub const IF_NONE_MATCH: &str = "If-None-Match";
+    /// Location header
+    pub const LOCATION: &str = "Location";
 }
 
 /// Common MIME types for Content-Type header values
@@ -96,6 +104,19 @@ impl<'a> HttpHeader<'a> {
     #[must_use]
     pub const fn accept(value: &'a str) -> Self {
         Self::new(headers::ACCEPT, value)
+    }
+
+    /// Create an `ETag` header. `value` is the quoted entity tag, for example
+    /// `"\"v1\""`.
+    #[must_use]
+    pub const fn etag(value: &'a str) -> Self {
+        Self::new(headers::ETAG, value)
+    }
+
+    /// Create an If-None-Match header
+    #[must_use]
+    pub const fn if_none_match(value: &'a str) -> Self {
+        Self::new(headers::IF_NONE_MATCH, value)
     }
 
     /// Create an X-API-Key header
