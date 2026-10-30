@@ -60,11 +60,23 @@ fn default_port(scheme: &str) -> u16 {
 
 /// Parse an HTTP or HTTPS URL into endpoint metadata.
 ///
+/// The URL fragment (`#...`) is dropped, since it is never sent to the server.
+/// IPv6 hosts keep their brackets, as in `[::1]`. A port is optional; an empty
+/// one (`host:`) means the default for the scheme.
+///
 /// # Errors
 ///
-/// Returns [`Error::InvalidUrl`] if the endpoint does not start with `http://` or `https://`.
+/// Returns [`Error::InvalidUrl`] if the endpoint:
+///
+/// - does not start with `http://` or `https://`,
+/// - has an empty host or a malformed IPv6 host,
+/// - has a port that is not in `1..=65535`,
+/// - contains user information (`user@host`), which is not supported, or
+/// - has a query but no path (`http://host?x=1`). Write `http://host/?x=1`
+///   instead: the query cannot be borrowed into a request target that starts
+///   with `/` without a buffer.
 pub fn parse_endpoint(endpoint: &str) -> Result<HttpEndpoint<'_>, Error> {
-    let (scheme, host_port) = if let Some(rest) = endpoint.strip_prefix("http://") {
+    let (scheme, rest) = if let Some(rest) = endpoint.strip_prefix("http://") {
         ("http", rest)
     } else if let Some(rest) = endpoint.strip_prefix("https://") {
         ("https", rest)
@@ -72,16 +84,15 @@ pub fn parse_endpoint(endpoint: &str) -> Result<HttpEndpoint<'_>, Error> {
         return Err(Error::InvalidUrl);
     };
 
-    let host = host_port.split('/').next().ok_or(Error::InvalidUrl)?;
-    let path = &host_port[host.len()..];
+    // The fragment is client-side only and must not reach the request target.
+    let rest = rest.split_once('#').map_or(rest, |(before, _)| before);
+    let (authority, path) = rest.split_at(rest.find(['/', '?']).unwrap_or(rest.len()));
+    if path.starts_with('?') || authority.contains('@') {
+        return Err(Error::InvalidUrl);
+    }
     let path = if path.is_empty() { "/" } else { path };
 
-    let default_port = default_port(scheme);
-    let (host, port) = host.rfind(':').map_or((host, default_port), |colon_pos| {
-        host[colon_pos + 1..]
-            .parse::<u16>()
-            .map_or((host, default_port), |port| (&host[..colon_pos], port))
-    });
+    let (host, port) = split_host_port(authority, default_port(scheme))?;
 
     Ok(HttpEndpoint {
         scheme,
@@ -89,6 +100,43 @@ pub fn parse_endpoint(endpoint: &str) -> Result<HttpEndpoint<'_>, Error> {
         port,
         path,
     })
+}
+
+/// Split a URL authority into host and port, using `default_port` when the
+/// port is absent or empty.
+fn split_host_port(authority: &str, default_port: u16) -> Result<(&str, u16), Error> {
+    let (host, port) = if authority.starts_with('[') {
+        let close = authority.find(']').ok_or(Error::InvalidUrl)?;
+        let (host, rest) = authority.split_at(close + 1);
+        if host == "[]" {
+            return Err(Error::InvalidUrl);
+        }
+        let port = if rest.is_empty() {
+            None
+        } else {
+            Some(rest.strip_prefix(':').ok_or(Error::InvalidUrl)?)
+        };
+        (host, port)
+    } else {
+        // An unbracketed host with more than one `:` ends up with a port
+        // that does not parse, which rejects bare IPv6 addresses.
+        authority
+            .split_once(':')
+            .map_or((authority, None), |(host, port)| (host, Some(port)))
+    };
+
+    if host.is_empty() {
+        return Err(Error::InvalidUrl);
+    }
+    let port = match port.filter(|port| !port.is_empty()) {
+        None => default_port,
+        Some(port) => port
+            .parse::<u16>()
+            .ok()
+            .filter(|&port| port != 0)
+            .ok_or(Error::InvalidUrl)?,
+    };
+    Ok((host, port))
 }
 
 /// Request metadata for [`HttpClient`].
@@ -687,14 +735,23 @@ mod tests {
     #[test]
     fn test_host_header_omits_default_port() {
         let endpoint = parse_endpoint("http://example.com/x").unwrap();
-        assert_eq!(endpoint.host_header::<64>().unwrap().as_str(), "example.com");
+        assert_eq!(
+            endpoint.host_header::<64>().unwrap().as_str(),
+            "example.com"
+        );
 
         let endpoint = parse_endpoint("https://example.com:443/x").unwrap();
-        assert_eq!(endpoint.host_header::<64>().unwrap().as_str(), "example.com");
+        assert_eq!(
+            endpoint.host_header::<64>().unwrap().as_str(),
+            "example.com"
+        );
 
         // An explicit default port is the same as no port.
         let endpoint = parse_endpoint("http://example.com:80").unwrap();
-        assert_eq!(endpoint.host_header::<64>().unwrap().as_str(), "example.com");
+        assert_eq!(
+            endpoint.host_header::<64>().unwrap().as_str(),
+            "example.com"
+        );
     }
 
     #[test]
@@ -756,6 +813,97 @@ mod tests {
 
         let request = core::str::from_utf8(&stream.output).unwrap();
         assert!(request.starts_with("GET /status HTTP/1.1\r\nHost: example.com:8080\r\n"));
+    }
+
+    #[test]
+    fn test_parse_endpoint_strips_fragment() {
+        let endpoint = parse_endpoint("http://example.com/a?x=1#top").unwrap();
+        assert_eq!(endpoint.host, "example.com");
+        assert_eq!(endpoint.path, "/a?x=1");
+
+        let endpoint = parse_endpoint("http://example.com#top").unwrap();
+        assert_eq!(endpoint.host, "example.com");
+        assert_eq!(endpoint.path, "/");
+
+        let endpoint = parse_endpoint("http://example.com:8080#top/not-a-path").unwrap();
+        assert_eq!(endpoint.port, 8080);
+        assert_eq!(endpoint.path, "/");
+    }
+
+    #[test]
+    fn test_parse_endpoint_query_without_path_is_rejected() {
+        // This used to put `?x=1` into the host.
+        for url in ["http://example.com?x=1", "http://example.com:8080?x=1#f"] {
+            assert!(
+                matches!(parse_endpoint(url), Err(Error::InvalidUrl)),
+                "{url}"
+            );
+        }
+        let endpoint = parse_endpoint("http://example.com/?x=1").unwrap();
+        assert_eq!(endpoint.path, "/?x=1");
+    }
+
+    #[test]
+    fn test_parse_endpoint_invalid_port() {
+        for url in [
+            "http://example.com:abc",
+            "http://example.com:99999",
+            "http://example.com:0",
+            "http://example.com:80:81",
+            "http://example.com:-1/x",
+            "http://[::1]:abc",
+        ] {
+            assert!(
+                matches!(parse_endpoint(url), Err(Error::InvalidUrl)),
+                "{url}"
+            );
+        }
+
+        // An empty port means the default port.
+        let endpoint = parse_endpoint("http://example.com:/x").unwrap();
+        assert_eq!(endpoint.host, "example.com");
+        assert_eq!(endpoint.port, DEFAULT_HTTP_PORT);
+        let endpoint = parse_endpoint("https://[::1]:").unwrap();
+        assert_eq!(endpoint.host, "[::1]");
+        assert_eq!(endpoint.port, DEFAULT_HTTPS_PORT);
+
+        let endpoint = parse_endpoint("http://example.com:65535").unwrap();
+        assert_eq!(endpoint.port, 65535);
+    }
+
+    #[test]
+    fn test_parse_endpoint_invalid_host() {
+        for url in [
+            "http://",
+            "http:///path",
+            "http://:80",
+            "http://?x=1",
+            "http://#f",
+            "http://[]",
+            "http://[::1",
+            "http://[::1]x",
+            "http://[::1]:80:81",
+            // A bare IPv6 address must be bracketed.
+            "http://::1/",
+        ] {
+            assert!(
+                matches!(parse_endpoint(url), Err(Error::InvalidUrl)),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_endpoint_user_info_is_rejected() {
+        for url in [
+            "http://user@example.com/",
+            "http://user:secret@example.com:8080/x",
+        ] {
+            assert!(
+                matches!(parse_endpoint(url), Err(Error::InvalidUrl)),
+                "{url}"
+            );
+        }
     }
 
     #[test]

@@ -419,7 +419,8 @@ mod tests {
         let headers_only = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nAge: 0\r\n\r\n";
         assert!(!complete(headers_only));
 
-        let partial = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nAge: 0\r\n\r\n5\r\nhello\r\n";
+        let partial =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nAge: 0\r\n\r\n5\r\nhello\r\n";
         assert!(!complete(partial));
 
         let full =
@@ -433,7 +434,8 @@ mod tests {
         let partial = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nab0\r\n\r\n\r\n";
         assert!(!complete(partial));
 
-        let full = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nab0\r\n\r\n\r\n0\r\n\r\n";
+        let full =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nab0\r\n\r\n\r\n0\r\n\r\n";
         assert!(complete(full));
 
         let mut buf = [0u8; 128];
@@ -447,10 +449,10 @@ mod tests {
     fn test_chunked_complete_partial_framing() {
         let head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
         let cases: [&[u8]; 5] = [
-            b"",                  // nothing yet
-            b"5",                 // size line unfinished
-            b"5\r\nhello",        // chunk data CRLF missing
-            b"5\r\nhello\r\n0\r\n", // last chunk without terminating line
+            b"",                                // nothing yet
+            b"5",                               // size line unfinished
+            b"5\r\nhello",                      // chunk data CRLF missing
+            b"5\r\nhello\r\n0\r\n",             // last chunk without terminating line
             b"5\r\nhello\r\n0\r\nX-Sum: 1\r\n", // trailer without terminating line
         ];
         for body in cases {
