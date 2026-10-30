@@ -200,7 +200,10 @@ pub fn dechunk(buffer: &mut [u8], total_read: usize) -> Result<usize, Error> {
         }
 
         let chunk_data_start = chunk_line_end + CRLF_LEN;
-        let chunk_data_end = chunk_data_start + chunk_size;
+        // A hostile chunk size must not overflow the offset arithmetic.
+        let chunk_data_end = chunk_data_start
+            .checked_add(chunk_size)
+            .ok_or(Error::InvalidResponse("Invalid chunk size"))?;
         if chunk_data_end > total_read {
             return Err(Error::InvalidResponse("Incomplete chunked body"));
         }
@@ -402,6 +405,28 @@ mod tests {
 
         let new_len = dechunk(&mut buf, raw.len()).expect("should pass through");
         assert_eq!(new_len, raw.len());
+    }
+
+    #[test]
+    fn test_dechunk_chunk_size_overflow_is_rejected() {
+        // Sizes near `usize::MAX` must be rejected instead of overflowing the
+        // chunk end offset (panic in debug, wrapped slice range in release).
+        for size in ["ffffffffffffffff", "fffffffffffffff0", "7fffffffffffffff"] {
+            let mut raw = heapless::Vec::<u8, 128>::new();
+            raw.extend_from_slice(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .unwrap();
+            raw.extend_from_slice(size.as_bytes()).unwrap();
+            raw.extend_from_slice(b"\r\nhello\r\n0\r\n\r\n").unwrap();
+            let mut buf = [0u8; 128];
+            buf[..raw.len()].copy_from_slice(&raw);
+
+            let result = dechunk(&mut buf, raw.len());
+
+            assert!(
+                matches!(result, Err(Error::InvalidResponse(_))),
+                "chunk size {size} should be rejected"
+            );
+        }
     }
 
     #[test]
