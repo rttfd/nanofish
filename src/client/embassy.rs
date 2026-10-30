@@ -1,3 +1,4 @@
+use crate::client::builder::RequestBuilder;
 use crate::client::io::{
     HttpClient as BaseHttpClient, HttpClientRequest, HttpEndpoint, parse_endpoint,
 };
@@ -342,6 +343,48 @@ impl<
         .await;
 
         result
+    }
+
+    /// Send a request described by a [`RequestBuilder`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BufferOverflow`] if the builder was given too many
+    /// headers, otherwise the same errors as [`EmbassyHttpClient::request`].
+    #[expect(clippy::future_not_send)]
+    pub async fn send<'b>(
+        &self,
+        endpoint: &str,
+        builder: &RequestBuilder<'_>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        builder.check()?;
+        self.request(
+            builder.method(),
+            endpoint,
+            builder.headers(),
+            builder.body_bytes(),
+            response_buffer,
+        )
+        .await
+    }
+
+    /// Convenience method for making a POST request with a JSON body. Adds
+    /// `Content-Type: application/json`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`EmbassyHttpClient::send`].
+    #[expect(clippy::future_not_send)]
+    pub async fn post_json<'b>(
+        &self,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        json: &str,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        let builder = RequestBuilder::post().headers_from(headers).json(json);
+        self.send(endpoint, &builder, response_buffer).await
     }
 
     /// Convenience method for making a PATCH request

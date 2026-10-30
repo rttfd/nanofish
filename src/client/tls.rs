@@ -1,5 +1,6 @@
 use core::future::Future;
 
+use crate::client::builder::RequestBuilder;
 use crate::client::io::{HttpClient, HttpClientRequest};
 use crate::client::{DEFAULT_REQUEST_SIZE, SMALL_REQUEST_SIZE};
 use crate::{error::Error, options::HttpClientOptions, response::HttpResponse};
@@ -143,6 +144,43 @@ impl<'a, RNG, const RQ: usize, const TLS_READ: usize, const TLS_WRITE: usize>
         self.request_with_retry_delay(stream, server_name, request, response_buffer, || {
             core::future::ready(())
         })
+        .await
+    }
+
+    /// Send a request described by a [`RequestBuilder`] over an
+    /// already-connected stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BufferOverflow`] if the builder was given too many
+    /// headers, otherwise the same errors as [`HttpTlsClient::request`].
+    #[expect(clippy::future_not_send)]
+    pub async fn send<'b, S>(
+        &mut self,
+        stream: S,
+        server_name: &str,
+        path: &str,
+        builder: &RequestBuilder<'_>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error>
+    where
+        S: Read + Write,
+        RNG: embedded_tls::CryptoRngCore,
+    {
+        builder.check()?;
+        self.request(
+            stream,
+            server_name,
+            HttpClientRequest {
+                method: builder.method(),
+                host: server_name,
+                path,
+                query: None,
+                headers: builder.headers(),
+                body: builder.body_bytes(),
+            },
+            response_buffer,
+        )
         .await
     }
 

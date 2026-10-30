@@ -38,7 +38,9 @@ pub mod status_code;
 
 #[cfg(feature = "embassy")]
 pub use client::{DefaultEmbassyHttpClient, EmbassyHttpClient, SmallEmbassyHttpClient};
-pub use client::{DefaultHttpClient, HttpClient, HttpClientRequest, SmallHttpClient};
+pub use client::{
+    DefaultHttpClient, HttpClient, HttpClientRequest, RequestBuilder, SmallHttpClient,
+};
 #[cfg(feature = "tls")]
 pub use client::{DefaultHttpTlsClient, HttpTlsClient, SmallHttpTlsClient, TlsVerification};
 pub use client::{HttpEndpoint, parse_endpoint};

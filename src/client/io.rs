@@ -1,4 +1,5 @@
 use crate::{
+    client::builder::RequestBuilder,
     codec,
     error::Error,
     header::HttpHeader,
@@ -280,6 +281,65 @@ impl<const RQ: usize> HttpClient<RQ> {
         let total_read = codec::dechunk(response_buffer, total_read)?;
         let response = codec::parse_resp(&response_buffer[..total_read])?;
         Ok((response, total_read))
+    }
+
+    /// Send a request described by a [`RequestBuilder`] over an already-connected
+    /// stream.
+    ///
+    /// `path` may carry a query string (`/api?limit=10`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BufferOverflow`] if the builder was given too many
+    /// headers, otherwise the same errors as [`HttpClient::request`].
+    pub async fn send<'b, S>(
+        &self,
+        stream: &mut S,
+        host: &str,
+        path: &str,
+        builder: &RequestBuilder<'_>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error>
+    where
+        S: Read + Write,
+    {
+        builder.check()?;
+        self.request(
+            stream,
+            HttpClientRequest {
+                method: builder.method(),
+                host,
+                path,
+                query: None,
+                headers: builder.headers(),
+                body: builder.body_bytes(),
+            },
+            response_buffer,
+        )
+        .await
+    }
+
+    /// Convenience method for making a POST request with a JSON body over an
+    /// already-connected stream. Adds `Content-Type: application/json`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpClient::send`].
+    pub async fn post_json<'b, S>(
+        &self,
+        stream: &mut S,
+        host: &str,
+        path: &str,
+        headers: &[HttpHeader<'_>],
+        json: &str,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error>
+    where
+        S: Read + Write,
+    {
+        let builder = RequestBuilder::post().headers_from(headers).json(json);
+        self.send(stream, host, path, &builder, response_buffer)
+            .await
     }
 
     /// Convenience method for making a GET request over an already-connected stream.
@@ -749,6 +809,108 @@ mod tests {
 
         let request = core::str::from_utf8(&stream.output).unwrap();
         assert!(request.contains("Content-Length: 0\r\n"), "{request}");
+    }
+
+    #[test]
+    fn test_io_client_send_with_request_builder() {
+        let response = b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(response);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+        let token = crate::encode::bearer_auth::<32>("abc").unwrap();
+        let builder = RequestBuilder::put()
+            .authorization(&token)
+            .header("X-Request-Id", "7")
+            .json(r#"{"on":true}"#);
+
+        let (response, _) = futures_lite::future::block_on(client.send(
+            &mut stream,
+            "example.com",
+            "/led/3?fade=1",
+            &builder,
+            &mut buffer,
+        ))
+        .unwrap();
+
+        assert_eq!(response.status_code, StatusCode::Created);
+        let request = core::str::from_utf8(&stream.output).unwrap();
+        assert!(request.starts_with("PUT /led/3?fade=1 HTTP/1.1\r\nHost: example.com\r\n"));
+        assert!(request.contains("Authorization: Bearer abc\r\n"));
+        assert!(request.contains("X-Request-Id: 7\r\n"));
+        assert!(request.contains("Content-Type: application/json\r\n"));
+        assert!(request.contains("Content-Length: 11\r\n"));
+        assert!(request.ends_with(r#"{"on":true}"#));
+    }
+
+    #[test]
+    fn test_io_client_send_rejects_too_many_headers() {
+        let mut stream = MockStream::<128, 512>::new(b"");
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+        let mut builder = RequestBuilder::get();
+        for _ in 0..=crate::protocol::MAX_HEADERS {
+            builder = builder.header("X-A", "b");
+        }
+
+        let result = futures_lite::future::block_on(client.send(
+            &mut stream,
+            "example.com",
+            "/",
+            &builder,
+            &mut buffer,
+        ));
+
+        assert!(matches!(result, Err(Error::BufferOverflow)));
+        // Nothing was sent.
+        assert!(stream.output.is_empty());
+    }
+
+    #[test]
+    fn test_io_client_post_json() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let mut stream = MockStream::<128, 512>::new(response);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+
+        futures_lite::future::block_on(client.post_json(
+            &mut stream,
+            "example.com",
+            "/rpc",
+            &[HttpHeader::new("X-Trace", "1")],
+            r#"{"a":1}"#,
+            &mut buffer,
+        ))
+        .unwrap();
+
+        let request = core::str::from_utf8(&stream.output).unwrap();
+        assert!(request.starts_with("POST /rpc HTTP/1.1\r\n"));
+        assert!(request.contains("X-Trace: 1\r\n"));
+        assert!(request.contains("Content-Type: application/json\r\n"));
+        assert!(request.ends_with(r#"{"a":1}"#));
+    }
+
+    #[test]
+    fn test_io_client_send_form_body() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(response);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+        let mut form = crate::encode::QueryBuilder::<64>::new();
+        form.pair("name", "A B").unwrap().pair("k", "v&w").unwrap();
+        let builder = RequestBuilder::post().form(form.as_bytes());
+
+        futures_lite::future::block_on(client.send(
+            &mut stream,
+            "example.com",
+            "/f",
+            &builder,
+            &mut buffer,
+        ))
+        .unwrap();
+
+        let request = core::str::from_utf8(&stream.output).unwrap();
+        assert!(request.contains("Content-Type: application/x-www-form-urlencoded\r\n"));
+        assert!(request.ends_with("name=A%20B&k=v%26w"));
     }
 
     #[test]
