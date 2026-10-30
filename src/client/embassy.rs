@@ -6,6 +6,7 @@ use crate::{
     error::Error, header::HttpHeader, method::HttpMethod, options::HttpClientOptions,
     response::HttpResponse,
 };
+use core::future::Future;
 use embassy_net::{
     Stack,
     dns::{self, DnsSocket},
@@ -191,36 +192,18 @@ impl<
         }
     }
 
-    /// Resolve a hostname to an IP address, trying IPv4 (A) first then IPv6 (AAAA).
-    #[expect(clippy::future_not_send)]
-    async fn resolve_host(stack: Stack<'_>, host: &str) -> Result<embassy_net::IpAddress, Error> {
-        let dns_socket = DnsSocket::new(stack);
-
-        // Try A (IPv4) first — most common on embedded networks
-        if let Ok(addrs) = dns_socket.query(host, dns::DnsQueryType::A).await
-            && let Some(&addr) = addrs.first()
-        {
-            return Ok(addr);
-        }
-
-        // Fall back to AAAA (IPv6)
-        let addrs = dns_socket.query(host, dns::DnsQueryType::Aaaa).await?;
-        addrs.first().copied().ok_or(Error::IpAddressEmpty)
-    }
-
-    /// Make HTTPS request over TLS with zero-copy response handling
+    /// Connect to `endpoint` over TLS, run `operation` on the connection, and
+    /// close it.
     #[cfg(feature = "tls")]
     #[expect(clippy::future_not_send)]
-    async fn make_https_request<'b>(
+    async fn with_https_connection<R>(
         &self,
-        method: HttpMethod,
         endpoint: &HttpEndpoint<'_>,
-        headers: &[HttpHeader<'_>],
-        body: Option<&[u8]>,
-        response_buffer: &'b mut [u8],
-    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        operation: impl AsyncFnOnce(
+            &mut TlsConnection<'_, TcpSocket<'_>, Aes128GcmSha256>,
+        ) -> Result<R, Error>,
+    ) -> Result<R, Error> {
         let (host, port) = (endpoint.host, endpoint.port);
-        let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
         let mut rx_buffer = [0; TCP_RX];
         let mut tx_buffer = [0; TCP_TX];
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
@@ -228,7 +211,7 @@ impl<
             self.options.socket_timeout.as_millis(),
         )));
 
-        let ip_addr = Self::resolve_host(*self.stack, host).await?;
+        let ip_addr = resolve_host(*self.stack, host).await?;
         let remote_endpoint = (ip_addr, port);
 
         socket
@@ -252,26 +235,7 @@ impl<
         ))
         .await?;
 
-        let client = BaseHttpClient::<RQ>::with_options(self.options);
-        let result = client
-            .request_with_retry_delay(
-                &mut tls,
-                HttpClientRequest {
-                    method,
-                    host: &host_header,
-                    path: endpoint.path,
-                    query: endpoint.query,
-                    headers,
-                    body,
-                },
-                response_buffer,
-                || {
-                    Timer::after(embassy_time::Duration::from_millis(
-                        self.options.retry_delay.as_millis(),
-                    ))
-                },
-            )
-            .await;
+        let result = operation(&mut tls).await;
 
         if let Err((_, e)) = tls.close().await {
             debug!("Error closing TLS connection: {:?}", Error::from(e));
@@ -285,18 +249,15 @@ impl<
         result
     }
 
-    /// Make HTTP request with zero-copy response handling
+    /// Connect to `endpoint` over plain TCP, run `operation` on the socket,
+    /// and close it.
     #[expect(clippy::future_not_send)]
-    async fn make_http_request<'b>(
+    async fn with_http_connection<R>(
         &self,
-        method: HttpMethod,
         endpoint: &HttpEndpoint<'_>,
-        headers: &[HttpHeader<'_>],
-        body: Option<&[u8]>,
-        response_buffer: &'b mut [u8],
-    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        operation: impl AsyncFnOnce(&mut TcpSocket<'_>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
         let (host, port) = (endpoint.host, endpoint.port);
-        let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
         let mut rx_buffer = [0; TCP_RX];
         let mut tx_buffer = [0; TCP_TX];
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
@@ -304,7 +265,7 @@ impl<
             self.options.socket_timeout.as_millis(),
         )));
 
-        let ip_addr = Self::resolve_host(*self.stack, host).await?;
+        let ip_addr = resolve_host(*self.stack, host).await?;
         let remote_endpoint = (ip_addr, port);
 
         socket
@@ -315,26 +276,7 @@ impl<
                 Error::from(e)
             })?;
 
-        let client = BaseHttpClient::<RQ>::with_options(self.options);
-        let result = client
-            .request_with_retry_delay(
-                &mut socket,
-                HttpClientRequest {
-                    method,
-                    host: &host_header,
-                    path: endpoint.path,
-                    query: endpoint.query,
-                    headers,
-                    body,
-                },
-                response_buffer,
-                || {
-                    Timer::after(embassy_time::Duration::from_millis(
-                        self.options.retry_delay.as_millis(),
-                    ))
-                },
-            )
-            .await;
+        let result = operation(&mut socket).await;
 
         socket.close();
         Timer::after(embassy_time::Duration::from_millis(
@@ -343,6 +285,78 @@ impl<
         .await;
 
         result
+    }
+
+    /// The delay between read retries, as a future.
+    fn retry_delay(&self) -> impl Future<Output = ()> {
+        Timer::after(embassy_time::Duration::from_millis(
+            self.options.retry_delay.as_millis(),
+        ))
+    }
+
+    /// Make HTTPS request over TLS with zero-copy response handling
+    #[cfg(feature = "tls")]
+    #[expect(clippy::future_not_send)]
+    async fn make_https_request<'b>(
+        &self,
+        method: HttpMethod,
+        endpoint: &HttpEndpoint<'_>,
+        headers: &[HttpHeader<'_>],
+        body: Option<&[u8]>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
+        let client = BaseHttpClient::<RQ>::with_options(self.options);
+        self.with_https_connection(endpoint, async |tls| {
+            client
+                .request_with_retry_delay(
+                    tls,
+                    HttpClientRequest {
+                        method,
+                        host: &host_header,
+                        path: endpoint.path,
+                        query: endpoint.query,
+                        headers,
+                        body,
+                    },
+                    response_buffer,
+                    || self.retry_delay(),
+                )
+                .await
+        })
+        .await
+    }
+
+    /// Make HTTP request with zero-copy response handling
+    #[expect(clippy::future_not_send)]
+    async fn make_http_request<'b>(
+        &self,
+        method: HttpMethod,
+        endpoint: &HttpEndpoint<'_>,
+        headers: &[HttpHeader<'_>],
+        body: Option<&[u8]>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
+        let client = BaseHttpClient::<RQ>::with_options(self.options);
+        self.with_http_connection(endpoint, async |socket| {
+            client
+                .request_with_retry_delay(
+                    socket,
+                    HttpClientRequest {
+                        method,
+                        host: &host_header,
+                        path: endpoint.path,
+                        query: endpoint.query,
+                        headers,
+                        body,
+                    },
+                    response_buffer,
+                    || self.retry_delay(),
+                )
+                .await
+        })
+        .await
     }
 
     /// Send a request described by a [`RequestBuilder`].
@@ -693,6 +707,23 @@ impl RngCore for XorShift32Rng {
 
 #[cfg(feature = "tls")]
 impl CryptoRng for XorShift32Rng {}
+
+/// Resolve a hostname to an IP address, trying IPv4 (A) first then IPv6 (AAAA).
+#[expect(clippy::future_not_send)]
+async fn resolve_host(stack: Stack<'_>, host: &str) -> Result<embassy_net::IpAddress, Error> {
+    let dns_socket = DnsSocket::new(stack);
+
+    // Try A (IPv4) first — most common on embedded networks
+    if let Ok(addrs) = dns_socket.query(host, dns::DnsQueryType::A).await
+        && let Some(&addr) = addrs.first()
+    {
+        return Ok(addr);
+    }
+
+    // Fall back to AAAA (IPv6)
+    let addrs = dns_socket.query(host, dns::DnsQueryType::Aaaa).await?;
+    addrs.first().copied().ok_or(Error::IpAddressEmpty)
+}
 
 #[cfg(test)]
 mod tests {
