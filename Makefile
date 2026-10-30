@@ -99,6 +99,13 @@ build-release: ## Build in release mode
 doc: ## Generate documentation
 	cargo +$(RUST_VERSION) doc --no-deps
 
+.PHONY: doc-check
+doc-check: ## Check documentation builds without warnings on all feature combinations
+	@for features in "" "embassy" "smoltcp" "tls" "embassy,tls" "smoltcp,tls" "embassy,smoltcp,tls,log" "embassy,tls,defmt"; do \
+		echo "Checking docs with features: $$features"; \
+		RUSTDOCFLAGS="-D warnings" cargo +$(RUST_VERSION) doc --no-deps --features "$$features" || exit 1; \
+	done
+
 .PHONY: doc-open
 doc-open: ## Generate and open documentation
 	cargo +$(RUST_VERSION) doc --no-deps --open
@@ -108,7 +115,7 @@ clean: ## Clean build artifacts
 	cargo clean
 
 .PHONY: ci
-ci: fmt-check clippy-all test-all ## Run all CI checks
+ci: fmt-check clippy-all test-all doc-check ## Run all CI checks
 
 .PHONY: pre-commit
 pre-commit: fmt clippy-all test-all ## Run pre-commit checks

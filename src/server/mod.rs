@@ -3,6 +3,7 @@
 #[cfg(feature = "embassy")]
 mod embassy;
 mod io;
+mod stream;
 
 #[cfg(feature = "embassy")]
 pub use embassy::{
@@ -10,5 +11,9 @@ pub use embassy::{
 };
 pub use io::{
     DefaultHttpServer, HttpServer, SmallHttpServer, handle_http_connection,
-    handle_http_connection_with_sizes,
+    handle_http_connection_with_sizes, serve_http_connection_with_sizes,
+};
+pub use stream::{
+    BodyLength, ResponseWriter, StreamingHandler, handle_http_stream_connection,
+    handle_http_stream_connection_with_sizes,
 };

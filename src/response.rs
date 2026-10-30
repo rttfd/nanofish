@@ -3,6 +3,7 @@ use crate::{
     error::Error,
     header::headers::{CONTENT_LENGTH, CONTENT_TYPE},
     header::mime_types,
+    method::HttpMethod,
     protocol::{
         CRLF, HEADER_SEPARATOR, HTTP_VERSION_PREFIX, MAX_HEADERS, is_valid_header_name,
         is_valid_header_value,
@@ -68,6 +69,7 @@ impl ResponseBody<'_> {
 /// This struct represents the response received from an HTTP server.
 /// It contains the status code, headers, and the response body which can be
 /// either text or binary data using zero-copy references.
+#[derive(Debug)]
 pub struct HttpResponse<'a> {
     /// The HTTP status code (e.g., 200 for OK, 404 for Not Found)
     pub status_code: StatusCode,
@@ -132,6 +134,28 @@ impl HttpResponse<'_> {
         push_slice(&mut bytes, self.body.as_bytes())?;
 
         Ok(bytes)
+    }
+
+    /// Build HTTP response bytes for a response to a `method` request.
+    ///
+    /// Identical to [`HttpResponse::build_bytes`], except that the response to
+    /// a `HEAD` request keeps the headers (including the `Content-Length` of
+    /// the body a `GET` would have returned) and drops the body.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpResponse::build_bytes`].
+    pub fn build_bytes_for<const MAX_RESPONSE_SIZE: usize>(
+        &self,
+        method: HttpMethod,
+    ) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error> {
+        if method == HttpMethod::HEAD {
+            let mut bytes = Vec::new();
+            self.write_head_bytes::<MAX_RESPONSE_SIZE>(&mut bytes, true)?;
+            Ok(bytes)
+        } else {
+            self.build_bytes()
+        }
     }
 
     /// Build HTTP response bytes without the body.
@@ -279,6 +303,20 @@ impl<'a> HttpResponseBuilder<'a> {
                 .push(HttpHeader::new(header.name, header.value))
                 .map_err(|_| Error::BufferOverflow)?;
         }
+        Ok(self)
+    }
+
+    /// Add an `ETag` header. `etag` is the quoted entity tag, for example
+    /// `"\"v1\""`. Pair it with [`HttpRequest::if_none_match`](crate::HttpRequest::if_none_match)
+    /// to answer repeat requests with `304 Not Modified`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferOverflow` if headers buffer is full.
+    pub fn etag(mut self, etag: &'a str) -> Result<Self, Error> {
+        self.headers
+            .push(HttpHeader::etag(etag))
+            .map_err(|_| Error::BufferOverflow)?;
         Ok(self)
     }
 
@@ -494,6 +532,39 @@ mod tests {
             response.build_bytes::<256>(),
             Err(Error::HeaderError(_))
         ));
+    }
+
+    #[test]
+    fn test_build_bytes_for_head_drops_body_keeps_length() {
+        let response = HttpResponseBuilder::new()
+            .json(r#"{"a":1}"#)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let get = response.build_bytes_for::<256>(HttpMethod::GET).unwrap();
+        assert!(get.ends_with(b"\r\n\r\n{\"a\":1}"));
+
+        let head = response.build_bytes_for::<256>(HttpMethod::HEAD).unwrap();
+        let text = core::str::from_utf8(&head).unwrap();
+        assert!(text.contains("Content-Length: 7\r\n"), "{text}");
+        assert!(text.ends_with("\r\n\r\n"), "{text}");
+        assert!(!text.contains('{'), "{text}");
+    }
+
+    #[test]
+    fn test_builder_etag_and_not_modified() {
+        let response = HttpResponseBuilder::new()
+            .status(StatusCode::NotModified)
+            .etag("\"v1\"")
+            .unwrap()
+            .build()
+            .unwrap();
+        let bytes = response.build_bytes::<128>().unwrap();
+        assert_eq!(
+            bytes.as_slice(),
+            b"HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\n\r\n"
+        );
     }
 
     #[test]

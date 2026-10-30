@@ -25,7 +25,11 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 - **SSE-Friendly Headers** - `text/event-stream`, `Cache-Control`, and `Connection` helpers for streaming endpoints
 - **Optional TLS Support** - HTTPS client support with embedded-tls when enabled (server is HTTP-only)
 - **Optional Logging** - Choose between `defmt` or `log` for diagnostics, or disable both for zero overhead
-- **Timeout & Retry Support** - Built-in handling for network issues
+- **Timeout & Retry Support** - Built-in handling for network issues, plus optional overall request deadlines
+- **Streaming Bodies** - Download large responses through a small buffer into a `BodySink`, and send large or incremental responses with a `ResponseWriter`
+- **Request Builder & Encoders** - `RequestBuilder`, JSON/form helpers, percent-encoding, Base64 and `Authorization` header builders, with no allocation
+- **Keep-Alive & Redirects** - Reusable connections (`EmbassyHttpSession`, `HttpClient::exchange`, server keep-alive) and opt-in, bounded redirect following
+- **Server Helpers** - Path parameters (`/led/:id`), `ETag`/`304` handling, chunked request bodies and proper error responses
 - **Proxy Compatible** - Works behind reverse proxies (e.g. Traefik) that may strip or modify `Content-Length` headers
 - **DNS Resolution** - Automatic hostname resolution with IPv4/IPv6 dual-stack support
 
@@ -633,7 +637,7 @@ You can customize how long the server waits for different operations:
 ```rust,ignore
 use nanofish::{DefaultEmbassyHttpServer, ServerTimeouts, TimeoutDuration};
 
-// Default timeouts: 10s accept, 30s read, 60s handler
+// Default timeouts: 10s accept, 30s read, 60s handler, 120s per connection
 let server = DefaultEmbassyHttpServer::new(80);
 
 // Custom timeouts
@@ -641,7 +645,9 @@ let timeouts = ServerTimeouts::new(
     TimeoutDuration::from_secs(5),   // 5 seconds to accept new connections
     TimeoutDuration::from_secs(15),  // 15 seconds of socket inactivity while
                                      // reading/writing a request
-    TimeoutDuration::from_secs(30)   // 30 seconds for your handler to process requests
+    TimeoutDuration::from_secs(30),  // 30 seconds for your handler to process requests
+    TimeoutDuration::from_secs(60),  // 60 seconds in total per connection, however
+                                     // slowly the peer trickles data
 );
 let server = DefaultEmbassyHttpServer::with_timeouts(80, timeouts);
 ```
@@ -699,10 +705,172 @@ The `SimpleHandler` provides:
 - `GET /health` → JSON status response  
 - Everything else → 404 Not Found
 
+# Ergonomics and Performance
+
+## Building Requests
+
+`RequestBuilder` collects the method, headers and body; `send` adds the destination. The `encode`
+module builds query strings, form bodies and `Authorization` values without allocating.
+
+```rust,ignore
+use nanofish::{HttpClient, RequestBuilder};
+use nanofish::encode::{QueryBuilder, bearer_auth};
+
+async fn toggle<S>(stream: &mut S) -> Result<(), nanofish::Error>
+where
+    S: embedded_io_async::Read + embedded_io_async::Write,
+{
+    let client = HttpClient::new();
+    let mut buffer = [0u8; 1024];
+
+    let token = bearer_auth::<64>("s3cret")?;
+    let mut query = QueryBuilder::<64>::new();
+    query.pair("fade", "1")?.pair("name", "front door")?;
+    let path = heapless::format!(128; "/led/3?{}", query.as_str()).map_err(|_| nanofish::Error::BufferOverflow)?;
+
+    let request = RequestBuilder::put().authorization(&token).json(r#"{"on":true}"#);
+    let (response, _) = client.send(stream, "example.com", &path, &request, &mut buffer).await?;
+    Ok(())
+}
+```
+
+`post_json` is a shorthand for the common case, and `basic_auth`, `percent_encode` and
+`base64_encode` are available as well.
+
+## Following Redirects
+
+Redirects are returned to the caller by default. Set `max_redirects` and the Embassy clients follow
+`301`, `302`, `303`, `307` and `308` for you, reusing the response buffer:
+
+```rust,ignore
+use nanofish::{DefaultEmbassyHttpClient, HttpClientOptions};
+
+let client = DefaultEmbassyHttpClient::with_options(
+    stack,
+    HttpClientOptions { max_redirects: 3, ..HttpClientOptions::default() },
+);
+```
+
+A `POST` answered by `301`, `302` or `303` is repeated as a `GET`; `Authorization` and `Cookie`
+headers are dropped when a redirect leaves the original origin; a redirect from `https` to `http`
+is refused. `total_timeout` bounds the whole chain.
+
+## Streaming Large Responses
+
+`request_streaming` hands the body to a `BodySink` as it arrives, so the buffer only has to hold the
+status line and headers plus one piece of the body. A chunked body is decoded on the fly.
+
+```rust,ignore
+use nanofish::{BodySink, Error, HttpResponse};
+
+struct Flash { written: usize }
+
+impl BodySink for Flash {
+    async fn head(&mut self, response: &HttpResponse<'_>) -> Result<(), Error> {
+        // Refuse anything but a complete image before touching flash.
+        if response.status_code != nanofish::StatusCode::Ok {
+            return Err(Error::InvalidResponse("unexpected status"));
+        }
+        Ok(())
+    }
+
+    async fn chunk(&mut self, data: &[u8]) -> Result<(), Error> {
+        // write `data` at `self.written`, then:
+        self.written += data.len();
+        Ok(())
+    }
+}
+
+let mut buffer = [0u8; 1024];
+let streamed = client
+    .request_streaming(HttpMethod::GET, "http://example.com/firmware.bin", &[], None, &mut buffer, &mut sink)
+    .await?;
+```
+
+A response that is cut short is an error, never a silent partial download.
+
+## Reusing Connections
+
+`EmbassyHttpClient` opens a connection per request. An `EmbassyHttpSession` connects once and keeps
+the socket open while the server does, reconnecting by itself (and repeating safe requests once)
+when the server dropped it:
+
+```rust,ignore
+use nanofish::{EmbassyHttpSession, HttpClientOptions, HttpMethod};
+
+let mut session = EmbassyHttpSession::<1024>::connect(
+    stack, &mut rx, &mut tx, "http://sensor-hub.local", HttpClientOptions::default(),
+).await?;
+let (response, _) = session.request(HttpMethod::GET, "/api/temperature", &[], None, &mut buffer).await?;
+let (response, _) = session.request(HttpMethod::GET, "/api/humidity", &[], None, &mut buffer).await?;
+```
+
+Without Embassy, `HttpClient::exchange(stream, request, buffer, keep_alive)` tells you whether the
+stream can carry another request.
+
+## Verified HTTPS on Embassy
+
+`EmbassyHttpClient::request` does not verify server certificates. To verify (or pin) them while
+still using Embassy for DNS and TCP, give `request_with_tls` an `HttpTlsClient::verified` client:
+
+```rust,ignore
+let mut tls = DefaultHttpTlsClient::verified(rng, &mut verifier);
+let (response, _) = client
+    .request_with_tls(&mut tls, HttpMethod::GET, "https://example.com/", &[], None, &mut buffer)
+    .await?;
+```
+
+Any `TlsVerifier` works, including your own that compares the certificate with a pinned one.
+
+## Server: Routes, Conditional Requests, Streaming
+
+```rust,ignore
+impl HttpHandler for Api {
+    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, Error> {
+        if let Some(params) = request.match_path::<2>("/led/:id") {
+            let id = params.get("id");
+            // ...
+        }
+        if request.if_none_match("\"v7\"") {
+            return HttpResponseBuilder::new().status(StatusCode::NotModified).etag("\"v7\"")?.build();
+        }
+        HttpResponseBuilder::new().etag("\"v7\"")?.text("hello").build()
+    }
+}
+```
+
+`HEAD` requests get their headers without the body, and malformed or oversized requests are answered
+with `400`, `413`, `431` or `501` instead of a silent close. Chunked request bodies are decoded
+before your handler runs.
+
+For responses that are large or produced incrementally, implement `StreamingHandler` and write
+through a `ResponseWriter`; run it with `EmbassyHttpServer::serve_streaming`:
+
+```rust,ignore
+impl StreamingHandler for Log {
+    async fn handle<S: Write, const HEAD_SIZE: usize>(
+        &mut self,
+        _request: &HttpRequest<'_>,
+        response: &mut ResponseWriter<'_, S, HEAD_SIZE>,
+    ) -> Result<(), Error> {
+        response.send_head(StatusCode::Ok, &[HttpHeader::content_type(mime_types::TEXT)], BodyLength::Unknown).await?;
+        for line in self.lines() {
+            response.write(line).await?;   // sent as a chunk
+        }
+        Ok(()) // finished for you
+    }
+}
+```
+
+`EmbassyHttpServer::with_keep_alive(n)` serves up to `n` requests per connection. A connection that
+sits idle keeps the server's socket busy until `read_timeout` expires, so lower that timeout when
+enabling it, and note that one socket serves one client at a time. To serve several clients at once,
+run `serve` in several tasks: each owns its socket and buffers and all accept on the same port.
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for a full list of changes across all versions.
 
 ## License
 
-[MIT](license)
+[MIT](https://github.com/rttfd/nanofish/blob/main/LICENSE)

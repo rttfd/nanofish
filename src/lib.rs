@@ -12,6 +12,8 @@ pub mod protocol;
 
 /// HTTP client ports and adapters.
 pub mod client;
+/// Percent-encoding, Base64 and `Authorization` header builders.
+pub mod encode;
 /// Error types for HTTP operations.
 pub mod error;
 /// HTTP request handlers and traits.
@@ -35,8 +37,12 @@ pub mod smoltcp;
 pub mod status_code;
 
 #[cfg(feature = "embassy")]
-pub use client::{DefaultEmbassyHttpClient, EmbassyHttpClient, SmallEmbassyHttpClient};
-pub use client::{DefaultHttpClient, HttpClient, HttpClientRequest, SmallHttpClient};
+pub use client::{
+    DefaultEmbassyHttpClient, EmbassyHttpClient, EmbassyHttpSession, SmallEmbassyHttpClient,
+};
+pub use client::{
+    DefaultHttpClient, Exchange, HttpClient, HttpClientRequest, RequestBuilder, SmallHttpClient,
+};
 #[cfg(feature = "tls")]
 pub use client::{DefaultHttpTlsClient, HttpTlsClient, SmallHttpTlsClient, TlsVerification};
 pub use client::{HttpEndpoint, parse_endpoint};
@@ -45,15 +51,19 @@ pub use handler::{HttpHandler, SimpleHandler};
 pub use header::{HttpHeader, headers, mime_types};
 pub use method::HttpMethod;
 pub use options::{HttpClientOptions, TimeoutDuration};
-pub use request::{HttpRequest, QueryPair, QueryPairs, QueryValues, percent_decode};
-pub use response::{HttpResponse, ResponseBody};
+pub use request::{
+    HttpRequest, PathParams, QueryPair, QueryPairs, QueryValues, etag_matches, match_path,
+    percent_decode,
+};
+pub use response::{HttpResponse, HttpResponseBuilder, ResponseBody};
+pub use server::{
+    BodyLength, DefaultHttpServer, HttpServer, ResponseWriter, SmallHttpServer, StreamingHandler,
+    handle_http_connection, handle_http_connection_with_sizes, handle_http_stream_connection,
+    handle_http_stream_connection_with_sizes, serve_http_connection_with_sizes,
+};
 #[cfg(feature = "embassy")]
 pub use server::{
     DefaultEmbassyHttpServer, EmbassyHttpServer, ServerTimeouts, SmallEmbassyHttpServer,
-};
-pub use server::{
-    DefaultHttpServer, HttpServer, SmallHttpServer, handle_http_connection,
-    handle_http_connection_with_sizes,
 };
 #[cfg(feature = "smoltcp")]
 pub use smoltcp::{SmolTcpError, SmolTcpStream};

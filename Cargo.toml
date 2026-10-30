@@ -10,6 +10,10 @@ license = "MIT"
 keywords = ["no_std", "embedded", "async", "http_client", "http_server"]
 authors = ["rttf <contact@rttf.dev>"]
 
+[package.metadata.docs.rs]
+# `defmt` and `log` cannot be enabled together, so document with `log`.
+features = ["embassy", "smoltcp", "tls", "log"]
+
 [features]
 default = []
 embassy = ["dep:embassy-net", "dep:embassy-time"]

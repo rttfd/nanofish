@@ -2,7 +2,12 @@ use crate::{
     codec::{self, Framing, FramingError},
     error::Error,
     handler::HttpHandler,
-    header::{HttpHeader, headers::CONNECTION, mime_types},
+    header::{
+        HttpHeader,
+        headers::{CONNECTION, CONTENT_LENGTH},
+        mime_types,
+    },
+    method::HttpMethod,
     protocol::{self, DOUBLE_CRLF_LEN},
     request::HttpRequest,
     response::{HttpResponse, ResponseBody},
@@ -11,8 +16,8 @@ use crate::{
 use embedded_io_async::{Read, Write};
 use heapless::Vec;
 
-const DEFAULT_REQUEST_SIZE: usize = 4096;
-const DEFAULT_RESPONSE_SIZE: usize = 4096;
+pub(super) const DEFAULT_REQUEST_SIZE: usize = 4096;
+pub(super) const DEFAULT_RESPONSE_SIZE: usize = 4096;
 const SMALL_REQUEST_SIZE: usize = 1024;
 const SMALL_RESPONSE_SIZE: usize = 1024;
 
@@ -117,32 +122,8 @@ where
     H: HttpHandler,
 {
     let mut request_buffer = [0; REQ_SIZE];
-    let total_read = match read_request(stream, &mut request_buffer).await {
-        Ok(total_read) => total_read,
-        Err(failure) => {
-            if let Some(status) = failure.reply {
-                send_status::<S, MAX_RESPONSE_SIZE>(stream, status).await;
-            }
-            return Err(failure.error);
-        }
-    };
-
-    // A chunked request body is decoded in place, so handlers see the payload.
-    let total_read = match codec::dechunk(&mut request_buffer, total_read) {
-        Ok(total_read) => total_read,
-        Err(error) => {
-            send_status::<S, MAX_RESPONSE_SIZE>(stream, StatusCode::BadRequest).await;
-            return Err(error);
-        }
-    };
-
-    let request = match HttpRequest::try_from(&request_buffer[..total_read]) {
-        Ok(request) => request,
-        Err(error) => {
-            send_status::<S, MAX_RESPONSE_SIZE>(stream, StatusCode::BadRequest).await;
-            return Err(error);
-        }
-    };
+    let (request, _) =
+        receive_request::<S, MAX_RESPONSE_SIZE>(stream, &mut request_buffer, false).await?;
 
     let response = handler.handle_request(&request).await.map_or_else(
         |_| {
@@ -151,7 +132,7 @@ where
                 "Internal Server Error",
             )
         },
-        |response| response.build_bytes::<MAX_RESPONSE_SIZE>(),
+        |response| response.build_bytes_for::<MAX_RESPONSE_SIZE>(request.method),
     );
     let response = match response {
         Ok(response) => response,
@@ -163,11 +144,198 @@ where
         }
     };
 
-    stream
-        .write_all(&response)
-        .await
-        .map_err(|_| Error::TcpError)?;
-    stream.flush().await.map_err(|_| Error::TcpError)
+    stream.write_all(&response).await.map_err(Error::io)?;
+    stream.flush().await.map_err(Error::io)
+}
+
+/// Serve up to `max_requests` requests on one connection (HTTP/1.1
+/// keep-alive).
+///
+/// Each request is answered like [`handle_http_connection_with_sizes`]. The
+/// connection stays open for the next request while the client allows it and
+/// the response could be framed: the loop ends when the client sent
+/// `Connection: close`, spoke `HTTP/1.0`, sent bytes of a further request
+/// before the response (pipelining is not supported), after `max_requests`
+/// requests, after any error, or when the client closes or stalls the idle
+/// connection. The response then carries `Connection: close`, and responses
+/// without a body get an explicit `Content-Length: 0`.
+///
+/// While the connection waits for the next request it occupies the server, so
+/// pair this with a short idle timeout on the stream and a small
+/// `max_requests`, or run several server tasks.
+///
+/// # Errors
+///
+/// Returns the same errors as [`handle_http_connection_with_sizes`]; a client
+/// that simply goes away between requests is not an error.
+pub async fn serve_http_connection_with_sizes<
+    S,
+    H,
+    const REQ_SIZE: usize,
+    const MAX_RESPONSE_SIZE: usize,
+>(
+    stream: &mut S,
+    handler: &mut H,
+    max_requests: usize,
+) -> Result<(), Error>
+where
+    S: Read + Write,
+    H: HttpHandler,
+{
+    let mut request_buffer = [0; REQ_SIZE];
+    let mut served = 0;
+    loop {
+        let (request, pipelined) =
+            match receive_request::<S, MAX_RESPONSE_SIZE>(stream, &mut request_buffer, served > 0)
+                .await
+            {
+                Ok(received) => received,
+                Err(Error::NoResponse) if served > 0 => return Ok(()),
+                Err(error) => return Err(error),
+            };
+        served += 1;
+        let close_requested = pipelined || served >= max_requests || !is_persistent(&request);
+
+        let (response, close) = match handler.handle_request(&request).await {
+            Ok(response) => {
+                match persistent_response::<MAX_RESPONSE_SIZE>(
+                    &response,
+                    request.method,
+                    close_requested,
+                ) {
+                    Ok(built) => built,
+                    Err(error) => {
+                        send_status::<S, MAX_RESPONSE_SIZE>(
+                            stream,
+                            StatusCode::InternalServerError,
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                }
+            }
+            Err(_) => (
+                text_error::<MAX_RESPONSE_SIZE>(
+                    StatusCode::InternalServerError,
+                    "Internal Server Error",
+                )?,
+                true,
+            ),
+        };
+
+        stream.write_all(&response).await.map_err(Error::io)?;
+        stream.flush().await.map_err(Error::io)?;
+        if close {
+            return Ok(());
+        }
+    }
+}
+
+/// Whether the client allows the connection to stay open after this request.
+fn is_persistent(request: &HttpRequest<'_>) -> bool {
+    request.version.eq_ignore_ascii_case("HTTP/1.1")
+        && !has_connection_token(request.header(CONNECTION), "close")
+}
+
+/// Whether a `Connection` header value lists `token`.
+fn has_connection_token(value: Option<&str>, token: &str) -> bool {
+    value.is_some_and(|value| {
+        value
+            .split(',')
+            .any(|candidate| candidate.trim().eq_ignore_ascii_case(token))
+    })
+}
+
+/// Serialize `response` for a connection that stays open unless `close`.
+///
+/// Returns the bytes and whether the connection must be closed afterwards.
+/// A response that must end the connection says `Connection: close`; one that
+/// keeps it open needs a length, so an empty body gets `Content-Length: 0`
+/// (except for statuses that never have a body).
+fn persistent_response<const MAX_RESPONSE_SIZE: usize>(
+    response: &HttpResponse<'_>,
+    method: HttpMethod,
+    close: bool,
+) -> Result<(Vec<u8, MAX_RESPONSE_SIZE>, bool), Error> {
+    let handler_closes = response.headers.iter().any(|h| {
+        h.name.eq_ignore_ascii_case(CONNECTION) && has_connection_token(Some(h.value), "close")
+    });
+    let mut close = close || handler_closes;
+
+    let mut headers = response.headers.clone();
+    if close && !handler_closes && headers.push(HttpHeader::new(CONNECTION, "close")).is_err() {
+        // No room to announce it; the connection still closes.
+        close = true;
+    }
+    let has_length = headers
+        .iter()
+        .any(|h| h.name.eq_ignore_ascii_case(CONTENT_LENGTH));
+    let bodyless_status = matches!(response.status_code.as_u16(), 100..=199 | 204 | 304);
+    if !close
+        && !has_length
+        && !bodyless_status
+        && response.body.is_empty()
+        && headers.push(HttpHeader::new(CONTENT_LENGTH, "0")).is_err()
+    {
+        // Without a length the end of the body is the end of the connection.
+        close = true;
+    }
+
+    let framed = HttpResponse {
+        status_code: response.status_code,
+        headers,
+        body: response.body,
+    };
+    Ok((framed.build_bytes_for::<MAX_RESPONSE_SIZE>(method)?, close))
+}
+
+/// Read, decode and parse one request into `buffer`.
+///
+/// A malformed or oversized request is answered with the matching error
+/// status (see [`handle_http_connection_with_sizes`]) before the error is
+/// returned. A chunked body is decoded in place, so the request's body is the
+/// payload.
+///
+/// Besides the request this returns whether bytes of another request followed
+/// it (pipelining), which makes the connection unfit for reuse.
+///
+/// With `allow_idle`, a connection that is closed or fails before sending a
+/// single byte is reported as [`Error::NoResponse`] instead of a read error,
+/// for the wait between requests on a persistent connection.
+pub(super) async fn receive_request<'b, S, const MAX_RESPONSE_SIZE: usize>(
+    stream: &mut S,
+    buffer: &'b mut [u8],
+    allow_idle: bool,
+) -> Result<(HttpRequest<'b>, bool), Error>
+where
+    S: Read + Write,
+{
+    let (total_read, pipelined) = match read_request(stream, buffer, allow_idle).await {
+        Ok(read) => read,
+        Err(failure) => {
+            if let Some(status) = failure.reply {
+                send_status::<S, MAX_RESPONSE_SIZE>(stream, status).await;
+            }
+            return Err(failure.error);
+        }
+    };
+
+    let total_read = match codec::dechunk(buffer, total_read) {
+        Ok(total_read) => total_read,
+        Err(error) => {
+            send_status::<S, MAX_RESPONSE_SIZE>(stream, StatusCode::BadRequest).await;
+            return Err(error);
+        }
+    };
+
+    let buffer: &'b [u8] = buffer;
+    match HttpRequest::try_from(&buffer[..total_read]) {
+        Ok(request) => Ok((request, pipelined)),
+        Err(error) => {
+            send_status::<S, MAX_RESPONSE_SIZE>(stream, StatusCode::BadRequest).await;
+            Err(error)
+        }
+    }
 }
 
 /// Why a request could not be read, and the status to answer with, if any.
@@ -208,24 +376,33 @@ impl ReadFailure {
 ///   request headers (or a declared body) are complete.
 /// - [`Error::BufferOverflow`] if the request does not fit in `buf`, answered
 ///   with `413` when the headers were read and `431` when they were not.
-async fn read_request<S>(stream: &mut S, buf: &mut [u8]) -> Result<usize, ReadFailure>
+async fn read_request<S>(
+    stream: &mut S,
+    buf: &mut [u8],
+    allow_idle: bool,
+) -> Result<(usize, bool), ReadFailure>
 where
     S: Read,
 {
     let mut total_read = 0;
     let mut header_end = None;
     let mut framing = None;
+    let mut chunk_scan = codec::ChunkScan::default();
 
     while total_read < buf.len() {
-        let n = stream
-            .read(&mut buf[total_read..])
-            .await
-            .map_err(|_| ReadFailure::silent(Error::TcpError))?;
-        if n == 0 {
-            return Err(ReadFailure::silent(Error::InvalidResponse(
-                "Incomplete request",
-            )));
-        }
+        let n = match stream.read(&mut buf[total_read..]).await {
+            // A connection that is idle between requests is just closed.
+            Ok(0) | Err(_) if allow_idle && total_read == 0 => {
+                return Err(ReadFailure::silent(Error::NoResponse));
+            }
+            Ok(0) => {
+                return Err(ReadFailure::silent(Error::InvalidResponse(
+                    "Incomplete request",
+                )));
+            }
+            Ok(n) => n,
+            Err(error) => return Err(ReadFailure::silent(Error::io(error))),
+        };
         total_read += n;
 
         if header_end.is_none() {
@@ -243,7 +420,7 @@ where
             let body_start = hdr_end + DOUBLE_CRLF_LEN;
             match framing {
                 // Headers are complete and no body is expected.
-                Framing::None => return Ok(total_read),
+                Framing::None => return Ok((total_read, total_read > body_start)),
                 Framing::Length(content_length) => {
                     let needed = body_start.saturating_add(content_length);
                     if needed > buf.len() {
@@ -253,12 +430,12 @@ where
                         ));
                     }
                     if total_read >= needed {
-                        return Ok(total_read);
+                        return Ok((total_read, total_read > needed));
                     }
                 }
                 Framing::Chunked => {
-                    if codec::chunked_body_complete(&buf[body_start..total_read]) {
-                        return Ok(total_read);
+                    if chunk_scan.advance(&buf[body_start..total_read]) {
+                        return Ok((total_read, total_read > body_start + chunk_scan.end()));
                     }
                 }
             }
@@ -290,8 +467,10 @@ const fn framing_failure(error: FramingError) -> ReadFailure {
 
 /// Best-effort plain-text error response; a failure to send it is ignored
 /// because the caller already has an error to report.
-async fn send_status<S, const MAX_RESPONSE_SIZE: usize>(stream: &mut S, status: StatusCode)
-where
+pub(super) async fn send_status<S, const MAX_RESPONSE_SIZE: usize>(
+    stream: &mut S,
+    status: StatusCode,
+) where
     S: Write,
 {
     if let Ok(response) = text_error::<MAX_RESPONSE_SIZE>(status, status.text())
@@ -783,6 +962,332 @@ mod tests {
 
         let response = core::str::from_utf8(&stream.output).unwrap();
         assert!(response.ends_with("body-ok"), "{response}");
+    }
+
+    #[test]
+    fn test_head_request_gets_headers_without_body() {
+        let request = b"HEAD /health HTTP/1.1\r\nHost: h\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(request);
+        let mut handler = SimpleHandler;
+
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut handler,
+        ))
+        .unwrap();
+
+        let response = core::str::from_utf8(&stream.output).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("Content-Length: 15\r\n"), "{response}");
+        assert!(response.ends_with("\r\n\r\n"), "{response}");
+    }
+
+    /// Handler that answers `304` when the client's `ETag` is current.
+    struct EtagHandler;
+
+    impl HttpHandler for EtagHandler {
+        async fn handle_request(
+            &mut self,
+            request: &HttpRequest<'_>,
+        ) -> Result<HttpResponse<'_>, Error> {
+            let builder = crate::HttpResponseBuilder::new();
+            if request.if_none_match("\"v1\"") {
+                builder
+                    .status(StatusCode::NotModified)
+                    .etag("\"v1\"")?
+                    .build()
+            } else {
+                builder.etag("\"v1\"")?.text("body").build()
+            }
+        }
+    }
+
+    #[test]
+    fn test_conditional_get_with_etag() {
+        let cached = b"GET / HTTP/1.1\r\nHost: h\r\nIf-None-Match: \"v1\"\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(cached);
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut EtagHandler,
+        ))
+        .unwrap();
+        let response = core::str::from_utf8(&stream.output).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 304 Not Modified\r\n"),
+            "{response}"
+        );
+        assert!(!response.contains("body"));
+
+        let fresh = b"GET / HTTP/1.1\r\nHost: h\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(fresh);
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut EtagHandler,
+        ))
+        .unwrap();
+        let response = core::str::from_utf8(&stream.output).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(response.ends_with("body"));
+    }
+
+    /// A client that sends its next request only after the server answered
+    /// the previous one, and closes the connection after the last.
+    struct ClientStream<'r, const OUT: usize> {
+        requests: &'r [&'r [u8]],
+        next: usize,
+        readable: std::vec::Vec<u8>,
+        /// Where each delivered request ends in `readable`.
+        ends: std::vec::Vec<usize>,
+        read_pos: usize,
+        output: Vec<u8, OUT>,
+    }
+
+    impl<'r, const OUT: usize> ClientStream<'r, OUT> {
+        fn new(requests: &'r [&'r [u8]]) -> Self {
+            Self {
+                requests,
+                next: 1,
+                readable: requests[0].to_vec(),
+                ends: std::vec![requests[0].len()],
+                read_pos: 0,
+                output: Vec::new(),
+            }
+        }
+
+        fn output(&self) -> &str {
+            core::str::from_utf8(&self.output).unwrap()
+        }
+
+        /// Number of requests the server read completely.
+        fn consumed(&self) -> usize {
+            self.ends
+                .iter()
+                .filter(|&&end| end <= self.read_pos)
+                .count()
+        }
+    }
+
+    impl<const OUT: usize> ErrorType for ClientStream<'_, OUT> {
+        type Error = Infallible;
+    }
+
+    impl<const OUT: usize> Read for ClientStream<'_, OUT> {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let available = &self.readable[self.read_pos..];
+            let n = buf.len().min(available.len());
+            buf[..n].copy_from_slice(&available[..n]);
+            self.read_pos += n;
+            Ok(n)
+        }
+    }
+
+    impl<const OUT: usize> Write for ClientStream<'_, OUT> {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.output.extend_from_slice(buf).unwrap();
+            Ok(buf.len())
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            // The response is complete: the client sends its next request.
+            if self.read_pos == self.readable.len()
+                && let Some(request) = self.requests.get(self.next)
+            {
+                self.readable.extend_from_slice(request);
+                self.ends.push(self.readable.len());
+                self.next += 1;
+            }
+            Ok(())
+        }
+    }
+
+    /// Handler with a route per keep-alive behavior.
+    struct KeepAliveHandler;
+
+    impl HttpHandler for KeepAliveHandler {
+        async fn handle_request(
+            &mut self,
+            request: &HttpRequest<'_>,
+        ) -> Result<HttpResponse<'_>, Error> {
+            let builder = crate::HttpResponseBuilder::new();
+            match request.route_path() {
+                "/" => builder.text("hi").build(),
+                "/empty" => builder.build(),
+                "/204" => builder.status(StatusCode::NoContent).build(),
+                "/close" => builder.header("Connection", "Close")?.text("bye").build(),
+                "/echo" => builder
+                    .text(match request.body {
+                        b"hello" => "got-hello",
+                        b"abc" => "got-abc",
+                        _ => "got-other",
+                    })
+                    .build(),
+                _ => Err(Error::NoResponse),
+            }
+        }
+    }
+
+    const GET_ROOT: &[u8] = b"GET / HTTP/1.1\r\nHost: h\r\n\r\n";
+
+    fn serve_keep_alive<const OUT: usize>(
+        requests: &[&[u8]],
+        max_requests: usize,
+    ) -> (Result<(), Error>, usize, std::string::String) {
+        let mut stream = ClientStream::<OUT>::new(requests);
+        let result =
+            futures_lite::future::block_on(serve_http_connection_with_sizes::<_, _, 256, 256>(
+                &mut stream,
+                &mut KeepAliveHandler,
+                max_requests,
+            ));
+        let output = stream.output().into();
+        (result, stream.consumed(), output)
+    }
+
+    #[test]
+    fn test_keep_alive_serves_several_requests_on_one_connection() {
+        let (result, consumed, output) =
+            serve_keep_alive::<1024>(&[GET_ROOT, GET_ROOT, GET_ROOT], 10);
+        result.unwrap();
+        assert_eq!(consumed, 3);
+        assert_eq!(output.matches("HTTP/1.1 200 OK\r\n").count(), 3);
+        assert_eq!(output.matches("hi").count(), 3);
+        // Nothing asks the client to close while the connection stays open.
+        assert!(!output.contains("Connection:"), "{output}");
+    }
+
+    #[test]
+    fn test_keep_alive_ends_when_the_client_asks_to_close() {
+        let close = b"GET / HTTP/1.1\r\nHost: h\r\nConnection: keep-alive, Close\r\n\r\n";
+        let (result, consumed, output) = serve_keep_alive::<1024>(&[GET_ROOT, close, GET_ROOT], 10);
+        result.unwrap();
+        // The third request is never read.
+        assert_eq!(consumed, 2);
+        assert_eq!(output.matches("HTTP/1.1 200 OK\r\n").count(), 2);
+        assert_eq!(output.matches("Connection: close\r\n").count(), 1);
+        assert!(output.ends_with("hi"));
+    }
+
+    #[test]
+    fn test_keep_alive_request_limit() {
+        let (result, consumed, output) =
+            serve_keep_alive::<1024>(&[GET_ROOT, GET_ROOT, GET_ROOT], 2);
+        result.unwrap();
+        assert_eq!(consumed, 2);
+        assert_eq!(output.matches("HTTP/1.1 200 OK\r\n").count(), 2);
+        // Only the last response announces the close.
+        let last = output.rsplit("HTTP/1.1 200 OK\r\n").next().unwrap();
+        assert!(last.contains("Connection: close\r\n"), "{output}");
+        assert_eq!(output.matches("Connection: close").count(), 1);
+    }
+
+    #[test]
+    fn test_keep_alive_closes_for_http10() {
+        let http10 = b"GET / HTTP/1.0\r\nHost: h\r\n\r\n";
+        let (result, consumed, output) = serve_keep_alive::<1024>(&[http10, GET_ROOT], 10);
+        result.unwrap();
+        assert_eq!(consumed, 1);
+        assert!(output.contains("Connection: close\r\n"));
+    }
+
+    #[test]
+    fn test_keep_alive_does_not_support_pipelining() {
+        // Two requests in the same read: answer the first, then close.
+        let pipelined: [&[u8]; 1] =
+            [b"GET / HTTP/1.1\r\nHost: h\r\n\r\nGET / HTTP/1.1\r\nHost: h\r\n\r\n"];
+        let (result, _, output) = serve_keep_alive::<1024>(&pipelined, 10);
+        result.unwrap();
+        assert_eq!(output.matches("HTTP/1.1 200 OK\r\n").count(), 1);
+        assert!(output.contains("Connection: close\r\n"));
+    }
+
+    #[test]
+    fn test_keep_alive_frames_empty_bodies() {
+        let request =
+            |path: &str| std::format!("GET {path} HTTP/1.1\r\nHost: h\r\n\r\n").into_bytes();
+        let empty = request("/empty");
+        let no_content = request("/204");
+        let (result, _, output) = serve_keep_alive::<1024>(&[&empty, &no_content, GET_ROOT], 10);
+        result.unwrap();
+        let (first, rest) = output.split_once("HTTP/1.1 204").unwrap();
+        // A 200 without a body must say so, or the client would wait for close.
+        assert!(first.contains("Content-Length: 0\r\n"), "{output}");
+        // A 204 never has a body or a length.
+        let (second, _) = rest.split_once("HTTP/1.1 200").unwrap();
+        assert!(!second.contains("Content-Length"), "{output}");
+    }
+
+    #[test]
+    fn test_keep_alive_respects_handler_connection_close() {
+        let close = b"GET /close HTTP/1.1\r\nHost: h\r\n\r\n";
+        let (result, consumed, output) = serve_keep_alive::<1024>(&[close, GET_ROOT], 10);
+        result.unwrap();
+        assert_eq!(consumed, 1);
+        // Not announced twice.
+        assert_eq!(
+            output
+                .to_ascii_lowercase()
+                .matches("connection: close")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_keep_alive_handler_error_ends_the_connection() {
+        let fail = b"GET /nope HTTP/1.1\r\nHost: h\r\n\r\n";
+        let (result, consumed, output) = serve_keep_alive::<1024>(&[fail, GET_ROOT], 10);
+        result.unwrap();
+        assert_eq!(consumed, 1);
+        assert!(output.starts_with("HTTP/1.1 500 Internal Server Error\r\n"));
+        assert!(output.contains("Connection: close\r\n"));
+    }
+
+    #[test]
+    fn test_keep_alive_bodies_do_not_leak_into_the_next_request() {
+        let post = b"POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello";
+        let chunked = b"POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n";
+        let (result, consumed, output) = serve_keep_alive::<1024>(&[post, chunked, GET_ROOT], 10);
+        result.unwrap();
+        assert_eq!(consumed, 3);
+        assert_eq!(output.matches("HTTP/1.1 200 OK\r\n").count(), 3);
+        assert!(output.contains("\r\n\r\ngot-hello"), "{output}");
+        assert!(output.contains("\r\n\r\ngot-abc"), "{output}");
+        assert!(!output.contains("got-other"), "{output}");
+        assert!(output.ends_with("hi"));
+    }
+
+    #[test]
+    fn test_keep_alive_head_request() {
+        let head = b"HEAD / HTTP/1.1\r\nHost: h\r\n\r\n";
+        let (result, consumed, output) = serve_keep_alive::<1024>(&[head, GET_ROOT], 10);
+        result.unwrap();
+        assert_eq!(consumed, 2);
+        let (first, second) = output.split_once("\r\n\r\n").unwrap();
+        assert!(first.contains("Content-Length: 2"), "{output}");
+        // No body after the HEAD response; the next response follows at once.
+        assert!(second.starts_with("HTTP/1.1 200 OK"), "{output}");
+    }
+
+    #[test]
+    fn test_keep_alive_first_request_must_arrive() {
+        let mut stream = MockStream::<8, 64>::new(b"");
+        let err =
+            futures_lite::future::block_on(serve_http_connection_with_sizes::<_, _, 128, 128>(
+                &mut stream,
+                &mut KeepAliveHandler,
+                10,
+            ))
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidResponse("Incomplete request")));
+    }
+
+    #[test]
+    fn test_keep_alive_errors_are_still_answered() {
+        let bad: [&[u8]; 2] = [GET_ROOT, b"GARBAGE\r\n\r\n"];
+        let (result, _, output) = serve_keep_alive::<1024>(&bad, 10);
+        assert!(matches!(result, Err(Error::InvalidResponse(_))));
+        assert!(output.ends_with("Bad Request"), "{output}");
+        assert!(output.contains("HTTP/1.1 400 Bad Request\r\n"));
     }
 
     #[test]

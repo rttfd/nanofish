@@ -2,7 +2,7 @@ use crate::{
     error::Error,
     header::{
         HttpHeader,
-        headers::{CONTENT_LENGTH, CONTENT_TYPE},
+        headers::{CONTENT_LENGTH, CONTENT_TYPE, IF_NONE_MATCH},
     },
     method::HttpMethod,
     protocol::{self, DOUBLE_CRLF_LEN, MAX_HEADERS},
@@ -177,7 +177,31 @@ impl<'a> HttpRequest<'a> {
             .map(|header| header.value)
     }
 
-    /// Get the request body as UTF-8 text.
+    /// Whether the request's `If-None-Match` header matches `etag`, meaning the
+    /// client already has the current representation and a
+    /// `304 Not Modified` response is appropriate.
+    ///
+    /// `etag` is the quoted entity tag the server would send, for example
+    /// `"\"v1\""`. Comparison is weak, as RFC 9110 requires for
+    /// `If-None-Match`: a `W/` prefix on either side is ignored, and `*`
+    /// matches any tag. Returns `false` when the header is absent.
+    #[must_use]
+    pub fn if_none_match(&self, etag: &str) -> bool {
+        self.header(IF_NONE_MATCH)
+            .is_some_and(|value| etag_matches(value, etag))
+    }
+
+    /// Match the request path (without its query) against a `pattern` with
+    /// `:name` captures and an optional trailing `*`. See [`match_path`].
+    #[must_use]
+    pub fn match_path<'p, const N: usize>(
+        &self,
+        pattern: &'p str,
+    ) -> Option<PathParams<'p, 'a, N>> {
+        match_path(pattern, self.route_path())
+    }
+
+    /// Get the request body as UTF-8 text.    /// Get the request body as UTF-8 text.
     ///
     /// # Errors
     ///
@@ -273,6 +297,124 @@ impl<'a> TryFrom<&'a [u8]> for HttpRequest<'a> {
 
         Self::parse_from(headers_str, body)
     }
+}
+
+/// Whether an `If-None-Match` header value matches the entity tag `etag`.
+///
+/// The header is `*` or a comma-separated list of entity tags. Tags are
+/// compared weakly: a `W/` prefix is ignored on both sides.
+#[must_use]
+pub fn etag_matches(header_value: &str, etag: &str) -> bool {
+    fn opaque(tag: &str) -> &str {
+        let tag = tag.trim();
+        tag.strip_prefix("W/").unwrap_or(tag)
+    }
+
+    let etag = opaque(etag);
+    header_value
+        .split(',')
+        .map(opaque)
+        .any(|candidate| candidate == "*" || (!candidate.is_empty() && candidate == etag))
+}
+
+/// Values captured by [`match_path`]: `(name, value)` pairs in pattern order.
+///
+/// Values are the raw path segments; use [`percent_decode`] if they may be
+/// percent-encoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathParams<'p, 'a, const N: usize = 4> {
+    pairs: Vec<(&'p str, &'a str), N>,
+}
+
+impl<'p, 'a, const N: usize> PathParams<'p, 'a, N> {
+    /// The value captured by `:name`, or by the trailing `*` under the name
+    /// `*`.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&'a str> {
+        self.pairs
+            .iter()
+            .find(|(param, _)| *param == name)
+            .map(|(_, value)| *value)
+    }
+
+    /// Iterate over `(name, value)` pairs in pattern order.
+    pub fn iter(&self) -> impl Iterator<Item = (&'p str, &'a str)> + '_ {
+        self.pairs.iter().copied()
+    }
+
+    /// Number of captured values.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pairs.len()
+    }
+
+    /// Whether the pattern captured nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+}
+
+/// Match `path` (without a query string) against `pattern`.
+///
+/// Segments are separated by `/`. In the pattern, `:name` matches exactly one
+/// non-empty segment and captures it, and a final `*` matches the rest of the
+/// path (including further `/`, and possibly nothing) and is captured as `*`.
+/// Every other segment must match exactly. `N` is the maximum number of
+/// captures; a pattern with more yields `None`.
+///
+/// ```
+/// use nanofish::request::match_path;
+///
+/// let params = match_path::<4>("/led/:id/state", "/led/3/state").unwrap();
+/// assert_eq!(params.get("id"), Some("3"));
+/// assert!(match_path::<4>("/led/:id/state", "/led/3").is_none());
+///
+/// let params = match_path::<4>("/static/*", "/static/css/site.css").unwrap();
+/// assert_eq!(params.get("*"), Some("css/site.css"));
+/// ```
+#[must_use]
+pub fn match_path<'p, 'a, const N: usize>(
+    pattern: &'p str,
+    path: &'a str,
+) -> Option<PathParams<'p, 'a, N>> {
+    let mut pairs = Vec::new();
+    let mut pattern_rest = pattern;
+    let mut path_rest = path;
+
+    loop {
+        let (pattern_segment, next_pattern) = split_segment(pattern_rest);
+        if pattern_segment == "*" && next_pattern.is_none() {
+            pairs.push(("*", path_rest)).ok()?;
+            return Some(PathParams { pairs });
+        }
+
+        let (path_segment, next_path) = split_segment(path_rest);
+        if let Some(name) = pattern_segment.strip_prefix(':') {
+            if path_segment.is_empty() {
+                return None;
+            }
+            pairs.push((name, path_segment)).ok()?;
+        } else if pattern_segment != path_segment {
+            return None;
+        }
+
+        match (next_pattern, next_path) {
+            (None, None) => return Some(PathParams { pairs }),
+            (Some(pattern_next), Some(path_next)) => {
+                pattern_rest = pattern_next;
+                path_rest = path_next;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Split off the first `/`-separated segment, returning the rest if there was
+/// a `/`.
+fn split_segment(path: &str) -> (&str, Option<&str>) {
+    path.split_once('/')
+        .map_or((path, None), |(segment, rest)| (segment, Some(rest)))
 }
 
 /// Percent-decode an `application/x-www-form-urlencoded` query component.
@@ -578,5 +720,99 @@ mod tests {
 
         let result = HttpRequest::try_from(buffer.as_slice());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_etag_matches() {
+        assert!(etag_matches("\"v1\"", "\"v1\""));
+        assert!(!etag_matches("\"v1\"", "\"v2\""));
+        assert!(etag_matches("\"v0\", \"v1\" ,\"v2\"", "\"v1\""));
+        // Weak comparison on either side.
+        assert!(etag_matches("W/\"v1\"", "\"v1\""));
+        assert!(etag_matches("\"v1\"", "W/\"v1\""));
+        // `*` matches anything; an empty header matches nothing.
+        assert!(etag_matches("*", "\"anything\""));
+        assert!(!etag_matches("", "\"v1\""));
+        assert!(!etag_matches(" , ", "\"\""));
+        // Substrings are not matches.
+        assert!(!etag_matches("\"v10\"", "\"v1\""));
+    }
+
+    #[test]
+    fn test_request_if_none_match() {
+        let raw = b"GET /x HTTP/1.1\r\nIf-None-Match: \"v1\", \"v2\"\r\n\r\n";
+        let request = HttpRequest::try_from(raw.as_slice()).unwrap();
+        assert!(request.if_none_match("\"v2\""));
+        assert!(!request.if_none_match("\"v3\""));
+
+        let raw = b"GET /x HTTP/1.1\r\nHost: h\r\n\r\n";
+        let request = HttpRequest::try_from(raw.as_slice()).unwrap();
+        assert!(!request.if_none_match("\"v1\""));
+    }
+
+    #[test]
+    fn test_match_path_captures() {
+        let params = match_path::<4>("/led/:id", "/led/7").unwrap();
+        assert_eq!(params.get("id"), Some("7"));
+        assert_eq!(params.len(), 1);
+
+        let params = match_path::<4>("/a/:x/b/:y", "/a/1/b/2").unwrap();
+        assert_eq!(params.get("x"), Some("1"));
+        assert_eq!(params.get("y"), Some("2"));
+        assert_eq!(params.get("z"), None);
+        assert!(params.iter().eq([("x", "1"), ("y", "2")]));
+
+        // A literal-only pattern captures nothing.
+        let params = match_path::<4>("/health", "/health").unwrap();
+        assert!(params.is_empty());
+        assert!(match_path::<4>("/", "/").is_some());
+    }
+
+    #[test]
+    fn test_match_path_rejects_mismatches() {
+        for (pattern, path) in [
+            ("/led/:id", "/led"),
+            ("/led/:id", "/led/"),
+            ("/led/:id", "/led/1/2"),
+            ("/led/:id", "/fan/1"),
+            ("/led", "/led/"),
+            ("/led/", "/led"),
+            ("/a/b", "/a/c"),
+            ("/", "/x"),
+            ("/x", "/"),
+        ] {
+            assert!(
+                match_path::<4>(pattern, path).is_none(),
+                "{pattern} vs {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_match_path_wildcard() {
+        let params = match_path::<4>("/static/*", "/static/css/site.css").unwrap();
+        assert_eq!(params.get("*"), Some("css/site.css"));
+        let params = match_path::<4>("/static/*", "/static/").unwrap();
+        assert_eq!(params.get("*"), Some(""));
+        let params = match_path::<4>("/f/:name/*", "/f/a/b/c").unwrap();
+        assert_eq!(params.get("name"), Some("a"));
+        assert_eq!(params.get("*"), Some("b/c"));
+        assert!(match_path::<4>("/static/*", "/other/x").is_none());
+        // `*` is only a wildcard as the last segment.
+        assert!(match_path::<4>("/*/x", "/a/x").is_none());
+    }
+
+    #[test]
+    fn test_match_path_capture_capacity() {
+        assert!(match_path::<1>("/:a/:b", "/1/2").is_none());
+        assert!(match_path::<2>("/:a/:b", "/1/2").is_some());
+    }
+
+    #[test]
+    fn test_request_match_path_ignores_query() {
+        let raw = b"GET /led/3?fade=1 HTTP/1.1\r\nHost: h\r\n\r\n";
+        let request = HttpRequest::try_from(raw.as_slice()).unwrap();
+        let params = request.match_path::<2>("/led/:id").unwrap();
+        assert_eq!(params.get("id"), Some("3"));
     }
 }

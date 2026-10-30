@@ -1,10 +1,16 @@
+use crate::client::builder::RequestBuilder;
 use crate::client::io::{
     HttpClient as BaseHttpClient, HttpClientRequest, HttpEndpoint, parse_endpoint,
 };
+use crate::client::redirect::follow;
+use crate::client::stream::{BodySink, StreamedResponse};
+#[cfg(feature = "tls")]
+use crate::client::tls::HttpTlsClient;
 use crate::{
-    error::Error, header::HttpHeader, method::HttpMethod, options::HttpClientOptions,
+    codec, error::Error, header::HttpHeader, method::HttpMethod, options::HttpClientOptions,
     response::HttpResponse,
 };
+use core::future::Future;
 use embassy_net::{
     Stack,
     dns::{self, DnsSocket},
@@ -12,9 +18,10 @@ use embassy_net::{
 };
 #[cfg(feature = "tls")]
 use embassy_time::Instant;
-use embassy_time::Timer;
+use embassy_time::{Timer, with_timeout};
 #[cfg(feature = "tls")]
 use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
+use heapless::String;
 #[cfg(feature = "tls")]
 use rand_core::{CryptoRng, RngCore};
 
@@ -172,6 +179,54 @@ impl<
         body: Option<&[u8]>,
         response_buffer: &'b mut [u8],
     ) -> Result<(HttpResponse<'b>, usize), Error> {
+        let attempt =
+            self.request_following_redirects(method, endpoint, headers, body, response_buffer);
+
+        match self.options.total_timeout {
+            Some(limit) => with_timeout(
+                embassy_time::Duration::from_millis(limit.as_millis()),
+                attempt,
+            )
+            .await
+            .unwrap_or(Err(Error::Timeout)),
+            None => attempt.await,
+        }
+    }
+
+    /// Send the request, then follow up to [`HttpClientOptions::max_redirects`]
+    /// redirects.
+    #[expect(clippy::future_not_send)]
+    async fn request_following_redirects<'b>(
+        &self,
+        method: HttpMethod,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        body: Option<&[u8]>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        follow(
+            self.options.max_redirects,
+            (method, endpoint, headers, body),
+            response_buffer,
+            async |method, endpoint, headers, body, buffer| {
+                self.request_once(method, endpoint, headers, body, buffer)
+                    .await
+                    .map(|(_, used)| used)
+            },
+        )
+        .await
+    }
+
+    /// Send one request without following redirects.
+    #[expect(clippy::future_not_send)]
+    async fn request_once<'b>(
+        &self,
+        method: HttpMethod,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        body: Option<&[u8]>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
         let endpoint = parse_endpoint(endpoint)?;
 
         match endpoint.scheme {
@@ -190,36 +245,18 @@ impl<
         }
     }
 
-    /// Resolve a hostname to an IP address, trying IPv4 (A) first then IPv6 (AAAA).
-    #[expect(clippy::future_not_send)]
-    async fn resolve_host(stack: Stack<'_>, host: &str) -> Result<embassy_net::IpAddress, Error> {
-        let dns_socket = DnsSocket::new(stack);
-
-        // Try A (IPv4) first — most common on embedded networks
-        if let Ok(addrs) = dns_socket.query(host, dns::DnsQueryType::A).await
-            && let Some(&addr) = addrs.first()
-        {
-            return Ok(addr);
-        }
-
-        // Fall back to AAAA (IPv6)
-        let addrs = dns_socket.query(host, dns::DnsQueryType::Aaaa).await?;
-        addrs.first().copied().ok_or(Error::IpAddressEmpty)
-    }
-
-    /// Make HTTPS request over TLS with zero-copy response handling
+    /// Connect to `endpoint` over TLS, run `operation` on the connection, and
+    /// close it.
     #[cfg(feature = "tls")]
     #[expect(clippy::future_not_send)]
-    async fn make_https_request<'b>(
+    async fn with_https_connection<R>(
         &self,
-        method: HttpMethod,
         endpoint: &HttpEndpoint<'_>,
-        headers: &[HttpHeader<'_>],
-        body: Option<&[u8]>,
-        response_buffer: &'b mut [u8],
-    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        operation: impl AsyncFnOnce(
+            &mut TlsConnection<'_, TcpSocket<'_>, Aes128GcmSha256>,
+        ) -> Result<R, Error>,
+    ) -> Result<R, Error> {
         let (host, port) = (endpoint.host, endpoint.port);
-        let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
         let mut rx_buffer = [0; TCP_RX];
         let mut tx_buffer = [0; TCP_TX];
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
@@ -227,7 +264,7 @@ impl<
             self.options.socket_timeout.as_millis(),
         )));
 
-        let ip_addr = Self::resolve_host(*self.stack, host).await?;
+        let ip_addr = resolve_host(*self.stack, host).await?;
         let remote_endpoint = (ip_addr, port);
 
         socket
@@ -251,26 +288,7 @@ impl<
         ))
         .await?;
 
-        let client = BaseHttpClient::<RQ>::with_options(self.options);
-        let result = client
-            .request_with_retry_delay(
-                &mut tls,
-                HttpClientRequest {
-                    method,
-                    host: &host_header,
-                    path: endpoint.path,
-                    query: endpoint.query,
-                    headers,
-                    body,
-                },
-                response_buffer,
-                || {
-                    Timer::after(embassy_time::Duration::from_millis(
-                        self.options.retry_delay.as_millis(),
-                    ))
-                },
-            )
-            .await;
+        let result = operation(&mut tls).await;
 
         if let Err((_, e)) = tls.close().await {
             debug!("Error closing TLS connection: {:?}", Error::from(e));
@@ -284,18 +302,15 @@ impl<
         result
     }
 
-    /// Make HTTP request with zero-copy response handling
+    /// Connect to `endpoint` over plain TCP, run `operation` on the socket,
+    /// and close it.
     #[expect(clippy::future_not_send)]
-    async fn make_http_request<'b>(
+    async fn with_http_connection<R>(
         &self,
-        method: HttpMethod,
         endpoint: &HttpEndpoint<'_>,
-        headers: &[HttpHeader<'_>],
-        body: Option<&[u8]>,
-        response_buffer: &'b mut [u8],
-    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        operation: impl AsyncFnOnce(&mut TcpSocket<'_>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
         let (host, port) = (endpoint.host, endpoint.port);
-        let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
         let mut rx_buffer = [0; TCP_RX];
         let mut tx_buffer = [0; TCP_TX];
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
@@ -303,7 +318,7 @@ impl<
             self.options.socket_timeout.as_millis(),
         )));
 
-        let ip_addr = Self::resolve_host(*self.stack, host).await?;
+        let ip_addr = resolve_host(*self.stack, host).await?;
         let remote_endpoint = (ip_addr, port);
 
         socket
@@ -314,26 +329,7 @@ impl<
                 Error::from(e)
             })?;
 
-        let client = BaseHttpClient::<RQ>::with_options(self.options);
-        let result = client
-            .request_with_retry_delay(
-                &mut socket,
-                HttpClientRequest {
-                    method,
-                    host: &host_header,
-                    path: endpoint.path,
-                    query: endpoint.query,
-                    headers,
-                    body,
-                },
-                response_buffer,
-                || {
-                    Timer::after(embassy_time::Duration::from_millis(
-                        self.options.retry_delay.as_millis(),
-                    ))
-                },
-            )
-            .await;
+        let result = operation(&mut socket).await;
 
         socket.close();
         Timer::after(embassy_time::Duration::from_millis(
@@ -342,6 +338,274 @@ impl<
         .await;
 
         result
+    }
+
+    /// The delay between read retries, as a future.
+    fn retry_delay(&self) -> impl Future<Output = ()> {
+        Timer::after(embassy_time::Duration::from_millis(
+            self.options.retry_delay.as_millis(),
+        ))
+    }
+
+    /// Make HTTPS request over TLS with zero-copy response handling
+    #[cfg(feature = "tls")]
+    #[expect(clippy::future_not_send)]
+    async fn make_https_request<'b>(
+        &self,
+        method: HttpMethod,
+        endpoint: &HttpEndpoint<'_>,
+        headers: &[HttpHeader<'_>],
+        body: Option<&[u8]>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
+        let client = BaseHttpClient::<RQ>::with_options(self.options);
+        self.with_https_connection(endpoint, async |tls| {
+            client
+                .request_with_retry_delay(
+                    tls,
+                    HttpClientRequest {
+                        method,
+                        host: &host_header,
+                        path: endpoint.path,
+                        query: endpoint.query,
+                        headers,
+                        body,
+                    },
+                    response_buffer,
+                    || self.retry_delay(),
+                )
+                .await
+        })
+        .await
+    }
+
+    /// Make HTTP request with zero-copy response handling
+    #[expect(clippy::future_not_send)]
+    async fn make_http_request<'b>(
+        &self,
+        method: HttpMethod,
+        endpoint: &HttpEndpoint<'_>,
+        headers: &[HttpHeader<'_>],
+        body: Option<&[u8]>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
+        let client = BaseHttpClient::<RQ>::with_options(self.options);
+        self.with_http_connection(endpoint, async |socket| {
+            client
+                .request_with_retry_delay(
+                    socket,
+                    HttpClientRequest {
+                        method,
+                        host: &host_header,
+                        path: endpoint.path,
+                        query: endpoint.query,
+                        headers,
+                        body,
+                    },
+                    response_buffer,
+                    || self.retry_delay(),
+                )
+                .await
+        })
+        .await
+    }
+
+    /// Make an HTTPS request with a caller-supplied [`HttpTlsClient`], which
+    /// decides how the server certificate is verified.
+    ///
+    /// [`EmbassyHttpClient::request`] does not verify certificates. Use this
+    /// method with [`HttpTlsClient::verified`] to check the server against a
+    /// pinned root CA (or any other [`TlsVerifier`](crate::client::TlsVerifier)),
+    /// while still using Embassy for DNS and TCP. The TLS client's own options
+    /// apply to reads and retries; this client's [`HttpClientOptions::socket_timeout`],
+    /// [`HttpClientOptions::socket_close_delay`] and
+    /// [`HttpClientOptions::total_timeout`] apply to the connection. Redirects
+    /// are not followed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedScheme`] unless `endpoint` is an `https`
+    /// URL, otherwise the errors of [`EmbassyHttpClient::request`] and of
+    /// [`HttpTlsClient::request`].
+    #[cfg(feature = "tls")]
+    #[expect(clippy::future_not_send)]
+    pub async fn request_with_tls<
+        'b,
+        RNG,
+        const TLS_RQ: usize,
+        const TLS_RECORD_READ: usize,
+        const TLS_RECORD_WRITE: usize,
+    >(
+        &self,
+        tls: &mut HttpTlsClient<'_, RNG, TLS_RQ, TLS_RECORD_READ, TLS_RECORD_WRITE>,
+        method: HttpMethod,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        body: Option<&[u8]>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error>
+    where
+        RNG: embedded_tls::CryptoRngCore,
+    {
+        let attempt = async {
+            let endpoint = parse_endpoint(endpoint)?;
+            if endpoint.scheme != "https" {
+                return Err(Error::UnsupportedScheme("expected an https URL"));
+            }
+            let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
+            self.with_http_connection(&endpoint, async |socket| {
+                tls.request_with_retry_delay(
+                    socket,
+                    endpoint.host,
+                    HttpClientRequest {
+                        method,
+                        host: &host_header,
+                        path: endpoint.path,
+                        query: endpoint.query,
+                        headers,
+                        body,
+                    },
+                    response_buffer,
+                    || self.retry_delay(),
+                )
+                .await
+            })
+            .await
+        };
+
+        match self.options.total_timeout {
+            Some(limit) => with_timeout(
+                embassy_time::Duration::from_millis(limit.as_millis()),
+                attempt,
+            )
+            .await
+            .unwrap_or(Err(Error::Timeout)),
+            None => attempt.await,
+        }
+    }
+
+    /// Make a request and stream the response body to `sink` instead of
+    /// collecting it in a buffer.
+    ///
+    /// `buffer` only has to hold the status line and headers plus the piece of
+    /// the body read at a time. See
+    /// [`HttpClient::request_streaming`](crate::HttpClient::request_streaming)
+    /// for how the sink is driven and which errors can occur. Redirects are not
+    /// followed; check the status in [`BodySink::head`] and request the
+    /// `Location` yourself. [`HttpClientOptions::total_timeout`] applies.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`EmbassyHttpClient::request`] that apply before
+    /// the response, and those of `request_streaming` while reading it.
+    #[expect(clippy::future_not_send)]
+    pub async fn request_streaming<K: BodySink>(
+        &self,
+        method: HttpMethod,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        body: Option<&[u8]>,
+        buffer: &mut [u8],
+        sink: &mut K,
+    ) -> Result<StreamedResponse, Error> {
+        let attempt = async {
+            let endpoint = parse_endpoint(endpoint)?;
+            let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
+            let client = BaseHttpClient::<RQ>::with_options(self.options);
+            let request = HttpClientRequest {
+                method,
+                host: &host_header,
+                path: endpoint.path,
+                query: endpoint.query,
+                headers,
+                body,
+            };
+
+            match endpoint.scheme {
+                #[cfg(feature = "tls")]
+                "https" => {
+                    self.with_https_connection(&endpoint, async |tls| {
+                        client
+                            .request_streaming_with_retry_delay(tls, request, buffer, sink, || {
+                                self.retry_delay()
+                            })
+                            .await
+                    })
+                    .await
+                }
+                #[cfg(not(feature = "tls"))]
+                "https" => Err(Error::UnsupportedScheme("https (TLS support not enabled)")),
+                "http" => {
+                    self.with_http_connection(&endpoint, async |socket| {
+                        client
+                            .request_streaming_with_retry_delay(
+                                socket,
+                                request,
+                                buffer,
+                                sink,
+                                || self.retry_delay(),
+                            )
+                            .await
+                    })
+                    .await
+                }
+                _ => Err(Error::UnsupportedScheme("unknown")),
+            }
+        };
+
+        match self.options.total_timeout {
+            Some(limit) => with_timeout(
+                embassy_time::Duration::from_millis(limit.as_millis()),
+                attempt,
+            )
+            .await
+            .unwrap_or(Err(Error::Timeout)),
+            None => attempt.await,
+        }
+    }
+
+    /// Send a request described by a [`RequestBuilder`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BufferOverflow`] if the builder was given too many
+    /// headers, otherwise the same errors as [`EmbassyHttpClient::request`].
+    #[expect(clippy::future_not_send)]
+    pub async fn send<'b>(
+        &self,
+        endpoint: &str,
+        builder: &RequestBuilder<'_>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        builder.check()?;
+        self.request(
+            builder.method(),
+            endpoint,
+            builder.headers(),
+            builder.body_bytes(),
+            response_buffer,
+        )
+        .await
+    }
+
+    /// Convenience method for making a POST request with a JSON body. Adds
+    /// `Content-Type: application/json`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`EmbassyHttpClient::send`].
+    #[expect(clippy::future_not_send)]
+    pub async fn post_json<'b>(
+        &self,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        json: &str,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        let builder = RequestBuilder::post().headers_from(headers).json(json);
+        self.send(endpoint, &builder, response_buffer).await
     }
 
     /// Convenience method for making a PATCH request
@@ -651,11 +915,263 @@ impl RngCore for XorShift32Rng {
 #[cfg(feature = "tls")]
 impl CryptoRng for XorShift32Rng {}
 
+/// Resolve a hostname to an IP address, trying IPv4 (A) first then IPv6 (AAAA).
+#[expect(clippy::future_not_send)]
+async fn resolve_host(stack: Stack<'_>, host: &str) -> Result<embassy_net::IpAddress, Error> {
+    let dns_socket = DnsSocket::new(stack);
+
+    // Try A (IPv4) first — most common on embedded networks
+    if let Ok(addrs) = dns_socket.query(host, dns::DnsQueryType::A).await
+        && let Some(&addr) = addrs.first()
+    {
+        return Ok(addr);
+    }
+
+    // Fall back to AAAA (IPv6)
+    let addrs = dns_socket.query(host, dns::DnsQueryType::Aaaa).await?;
+    addrs.first().copied().ok_or(Error::IpAddressEmpty)
+}
+
+/// A persistent HTTP connection to one server, reused for several requests.
+///
+/// [`EmbassyHttpClient`] opens and closes a connection for every request, which
+/// costs a DNS lookup, a TCP handshake and the configured
+/// [`HttpClientOptions::socket_close_delay`] each time. A session connects
+/// once and keeps the socket open (HTTP/1.1 keep-alive) while the server does.
+///
+/// It reconnects by itself when the server closed the connection, either
+/// because it said `Connection: close` or because it dropped an idle
+/// connection. A request that fails on a reused connection before any response
+/// byte arrives is repeated once on a fresh connection, but only for methods
+/// that are safe to repeat (`GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS` and
+/// `TRACE`).
+///
+/// Sessions speak plain HTTP; use [`EmbassyHttpClient`] for `https` URLs.
+pub struct EmbassyHttpSession<'a, const RQ: usize = REQUEST_SIZE> {
+    socket: TcpSocket<'a>,
+    options: HttpClientOptions,
+    remote: (embassy_net::IpAddress, u16),
+    host_header: String<HOST_HEADER_SIZE>,
+    /// The socket is connected and the last response allowed reuse.
+    open: bool,
+}
+
+impl<'a, const RQ: usize> EmbassyHttpSession<'a, RQ> {
+    /// Connect to the server of `endpoint` (an `http` URL; its path is ignored).
+    ///
+    /// `rx_buffer` and `tx_buffer` back the TCP socket for the whole life of
+    /// the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedScheme`] for anything but `http`, and the
+    /// DNS and connection errors of [`EmbassyHttpClient::request`].
+    #[expect(clippy::future_not_send)]
+    pub async fn connect(
+        stack: Stack<'a>,
+        rx_buffer: &'a mut [u8],
+        tx_buffer: &'a mut [u8],
+        endpoint: &str,
+        options: HttpClientOptions,
+    ) -> Result<Self, Error> {
+        let endpoint = parse_endpoint(endpoint)?;
+        if endpoint.scheme != "http" {
+            return Err(Error::UnsupportedScheme("sessions support only http"));
+        }
+        let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
+        let ip_addr = resolve_host(stack, endpoint.host).await?;
+
+        let mut socket = TcpSocket::new(stack, rx_buffer, tx_buffer);
+        socket.set_timeout(Some(embassy_time::Duration::from_millis(
+            options.socket_timeout.as_millis(),
+        )));
+        let mut session = Self {
+            socket,
+            options,
+            remote: (ip_addr, endpoint.port),
+            host_header,
+            open: false,
+        };
+        session.reconnect().await?;
+        Ok(session)
+    }
+
+    /// Whether the connection is believed to be usable for the next request.
+    ///
+    /// It can still turn out to be closed by the server; [`request`](Self::request)
+    /// copes with that.
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// (Re)open the connection.
+    #[expect(clippy::future_not_send)]
+    async fn reconnect(&mut self) -> Result<(), Error> {
+        self.open = false;
+        self.socket.abort();
+        // Let the reset go out before the socket is reused.
+        let _ = self.socket.flush().await;
+        self.socket
+            .connect(self.remote)
+            .await
+            .map_err(|e: embassy_net::tcp::ConnectError| {
+                self.socket.abort();
+                Error::from(e)
+            })?;
+        self.open = true;
+        Ok(())
+    }
+
+    /// Send one request on the session, connecting again first if needed.
+    ///
+    /// `target` is the path and optional query, for example `/api?limit=10`.
+    /// The `Host` header is that of the session's server.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`EmbassyHttpClient::request`], and
+    /// [`Error::Timeout`] if [`HttpClientOptions::total_timeout`] is exceeded.
+    #[expect(clippy::future_not_send)]
+    pub async fn request<'b>(
+        &mut self,
+        method: HttpMethod,
+        target: &str,
+        headers: &[HttpHeader<'_>],
+        body: Option<&[u8]>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        let total_timeout = self.options.total_timeout;
+        let attempt = self.request_inner(method, target, headers, body, response_buffer);
+        let used = match total_timeout {
+            Some(limit) => {
+                let result = with_timeout(
+                    embassy_time::Duration::from_millis(limit.as_millis()),
+                    attempt,
+                )
+                .await
+                .unwrap_or(Err(Error::Timeout));
+                if result.is_err() {
+                    // A half-finished exchange leaves the connection unusable.
+                    self.open = false;
+                }
+                result?
+            }
+            None => attempt.await?,
+        };
+        // The response is parsed again from the buffer that now holds it.
+        Ok((codec::parse_resp(&response_buffer[..used])?, used))
+    }
+
+    #[expect(clippy::future_not_send)]
+    async fn request_inner(
+        &mut self,
+        method: HttpMethod,
+        target: &str,
+        headers: &[HttpHeader<'_>],
+        body: Option<&[u8]>,
+        response_buffer: &mut [u8],
+    ) -> Result<usize, Error> {
+        let (path, query) = target
+            .split_once('?')
+            .map_or((target, None), |(path, query)| (path, Some(query)));
+        let client = BaseHttpClient::<RQ>::with_options(self.options);
+
+        let mut reused = self.open;
+        loop {
+            if !self.open {
+                self.reconnect().await?;
+            }
+            let host_header = self.host_header.clone();
+            let request = HttpClientRequest {
+                method,
+                host: &host_header,
+                path,
+                query,
+                headers,
+                body,
+            };
+            let outcome = client
+                .exchange_with_retry_delay(
+                    &mut self.socket,
+                    request,
+                    &mut *response_buffer,
+                    true,
+                    || {
+                        Timer::after(embassy_time::Duration::from_millis(
+                            self.options.retry_delay.as_millis(),
+                        ))
+                    },
+                )
+                .await
+                .map(|exchange| (exchange.used, exchange.reusable));
+
+            match outcome {
+                Ok((used, reusable)) => {
+                    self.open = reusable;
+                    return Ok(used);
+                }
+                // The server may have dropped an idle connection: repeat the
+                // request once on a new one, if repeating it is harmless.
+                Err(Error::NoResponse | Error::TcpError(_)) if reused && is_repeatable(method) => {
+                    self.open = false;
+                    reused = false;
+                }
+                Err(error) => {
+                    self.open = false;
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    /// Close the connection.
+    #[expect(clippy::future_not_send)]
+    pub async fn close(mut self) {
+        self.socket.close();
+        Timer::after(embassy_time::Duration::from_millis(
+            self.options.socket_close_delay.as_millis(),
+        ))
+        .await;
+    }
+}
+
+/// Methods that can be sent again after a connection failed without a
+/// response (RFC 9110 section 9.2.2).
+const fn is_repeatable(method: HttpMethod) -> bool {
+    matches!(
+        method,
+        HttpMethod::GET
+            | HttpMethod::HEAD
+            | HttpMethod::PUT
+            | HttpMethod::DELETE
+            | HttpMethod::OPTIONS
+            | HttpMethod::TRACE
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::TimeoutDuration;
     use embassy_net::Stack;
+
+    #[test]
+    fn test_repeatable_methods() {
+        for method in [
+            HttpMethod::GET,
+            HttpMethod::HEAD,
+            HttpMethod::PUT,
+            HttpMethod::DELETE,
+            HttpMethod::OPTIONS,
+            HttpMethod::TRACE,
+        ] {
+            assert!(is_repeatable(method), "{method:?}");
+        }
+        for method in [HttpMethod::POST, HttpMethod::PATCH, HttpMethod::CONNECT] {
+            assert!(!is_repeatable(method), "{method:?}");
+        }
+    }
 
     #[test]
     fn test_new_and_with_options() {
@@ -666,6 +1182,8 @@ mod tests {
         let opts = HttpClientOptions {
             max_retries: 1,
             socket_timeout: TimeoutDuration::from_secs(1),
+            total_timeout: None,
+            max_redirects: 0,
             retry_delay: TimeoutDuration::from_millis(1),
             socket_close_delay: TimeoutDuration::from_millis(1),
         };
@@ -685,6 +1203,8 @@ mod tests {
             HttpClientOptions {
                 max_retries: 3,
                 socket_timeout: TimeoutDuration::from_secs(2),
+                total_timeout: None,
+                max_redirects: 0,
                 retry_delay: TimeoutDuration::from_millis(10),
                 socket_close_delay: TimeoutDuration::from_millis(5),
             },
@@ -703,6 +1223,8 @@ mod tests {
             HttpClientOptions {
                 max_retries: 2,
                 socket_timeout: TimeoutDuration::from_secs(1),
+                total_timeout: None,
+                max_redirects: 0,
                 retry_delay: TimeoutDuration::from_millis(5),
                 socket_close_delay: TimeoutDuration::from_millis(2),
             },
