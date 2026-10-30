@@ -5,7 +5,7 @@ use crate::{
     options::TimeoutDuration,
     request::HttpRequest,
     response::{HttpResponse, HttpResponseBuilder},
-    server::handle_http_connection_with_sizes,
+    server::{handle_http_connection_with_sizes, serve_http_connection_with_sizes},
     status_code::StatusCode,
 };
 use embassy_net::{Stack, tcp::TcpSocket};
@@ -77,6 +77,8 @@ pub struct EmbassyHttpServer<
 > {
     port: u16,
     timeouts: ServerTimeouts,
+    /// Requests served per connection; `1` closes after every response.
+    max_requests: usize,
 }
 
 impl<
@@ -92,13 +94,32 @@ impl<
         Self {
             port,
             timeouts: ServerTimeouts::default(),
+            max_requests: 1,
         }
     }
 
     /// Create a new HTTP server with custom timeouts
     #[must_use]
     pub const fn with_timeouts(port: u16, timeouts: ServerTimeouts) -> Self {
-        Self { port, timeouts }
+        Self {
+            port,
+            timeouts,
+            max_requests: 1,
+        }
+    }
+
+    /// Keep each connection open for up to `max_requests` requests (HTTP/1.1
+    /// keep-alive) instead of closing it after every response. `0` and `1`
+    /// both mean one request per connection, which is the default.
+    ///
+    /// A client that is done but keeps the connection open occupies the
+    /// server's socket until [`ServerTimeouts::read_timeout`] expires, so
+    /// lower that timeout when enabling this, or run several server tasks.
+    /// Applies to [`EmbassyHttpServer::serve`].
+    #[must_use]
+    pub const fn with_keep_alive(mut self, max_requests: usize) -> Self {
+        self.max_requests = max_requests;
+        self
     }
 
     /// Start the HTTP server and handle incoming connections
@@ -115,16 +136,26 @@ impl<
         H: HttpHandler,
     {
         let handler_timeout = self.timeouts.handler_timeout;
+        let max_requests = self.max_requests;
         self.serve_connections(stack, async |socket| {
             let mut handler = TimeoutHandler {
                 inner: &mut handler,
                 timeout: handler_timeout,
             };
-            handle_http_connection_with_sizes::<_, _, REQ_SIZE, MAX_RESPONSE_SIZE>(
-                socket,
-                &mut handler,
-            )
-            .await
+            if max_requests > 1 {
+                serve_http_connection_with_sizes::<_, _, REQ_SIZE, MAX_RESPONSE_SIZE>(
+                    socket,
+                    &mut handler,
+                    max_requests,
+                )
+                .await
+            } else {
+                handle_http_connection_with_sizes::<_, _, REQ_SIZE, MAX_RESPONSE_SIZE>(
+                    socket,
+                    &mut handler,
+                )
+                .await
+            }
         })
         .await
     }
@@ -248,6 +279,8 @@ mod tests {
 
         let server: SmallEmbassyHttpServer = EmbassyHttpServer::new(3000);
         assert_eq!(server.port, 3000);
+        assert_eq!(server.max_requests, 1);
+        assert_eq!(server.with_keep_alive(8).max_requests, 8);
     }
 
     #[test]

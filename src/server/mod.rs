@@ -10,5 +10,5 @@ pub use embassy::{
 };
 pub use io::{
     DefaultHttpServer, HttpServer, SmallHttpServer, handle_http_connection,
-    handle_http_connection_with_sizes,
+    handle_http_connection_with_sizes, serve_http_connection_with_sizes,
 };

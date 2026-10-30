@@ -62,7 +62,7 @@ pub use server::{
 };
 pub use server::{
     DefaultHttpServer, HttpServer, SmallHttpServer, handle_http_connection,
-    handle_http_connection_with_sizes,
+    handle_http_connection_with_sizes, serve_http_connection_with_sizes,
 };
 #[cfg(feature = "smoltcp")]
 pub use smoltcp::{SmolTcpError, SmolTcpStream};

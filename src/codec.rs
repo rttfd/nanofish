@@ -269,6 +269,14 @@ pub struct ChunkScan {
 }
 
 impl ChunkScan {
+    /// How many bytes of the body [`ChunkScan::advance`] has consumed. After it
+    /// returned `true` for a well-formed body, this is where the body ends: any
+    /// bytes after it belong to something else.
+    #[must_use]
+    pub const fn end(&self) -> usize {
+        self.pos
+    }
+
     /// Walk the framing in `body` (everything after the headers, from its
     /// start) as far as it goes; `true` once the body is complete or its
     /// framing is malformed.
