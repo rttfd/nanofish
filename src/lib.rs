@@ -12,6 +12,8 @@ pub mod protocol;
 
 /// HTTP client ports and adapters.
 pub mod client;
+/// Percent-encoding, Base64 and `Authorization` header builders.
+pub mod encode;
 /// Error types for HTTP operations.
 pub mod error;
 /// HTTP request handlers and traits.
