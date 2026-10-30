@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Chunked response decoding no longer panics on a chunk size close to `usize::MAX`: the chunk end offset overflowed (a panic in debug builds, an invalid slice range in release builds), letting a malicious or buggy server crash the client. Such responses now return `InvalidResponse`.
+
 ## [0.13.0] - 2026-09-01
 
 ### Added
