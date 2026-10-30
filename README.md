@@ -38,36 +38,36 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 ### Core HTTP Support (Default, No Embassy)
 ```toml
 [dependencies]
-nanofish = "0.13"
+nanofish = "0.14"
 ```
 
 ### With TLS/HTTPS Support
 ```toml
 [dependencies]
-nanofish = { version = "0.13", features = ["tls"] }
+nanofish = { version = "0.14", features = ["tls"] }
 ```
 
 ### With Embassy Client/Server Integration
 ```toml
 [dependencies]
-nanofish = { version = "0.13", features = ["embassy"] }
+nanofish = { version = "0.14", features = ["embassy"] }
 ```
 
 ### With smoltcp Socket Adapter
 ```toml
 [dependencies]
-nanofish = { version = "0.13", features = ["smoltcp"] }
+nanofish = { version = "0.14", features = ["smoltcp"] }
 ```
 
 ### With Logging
 ```toml
 # Using defmt (common in embedded/probe-based workflows)
 [dependencies]
-nanofish = { version = "0.13", features = ["defmt"] }
+nanofish = { version = "0.14", features = ["defmt"] }
 
 # Using the log crate (common in std or defmt-incompatible environments)
 [dependencies]
-nanofish = { version = "0.13", features = ["log"] }
+nanofish = { version = "0.14", features = ["log"] }
 ```
 
 > **Note:** The `defmt` and `log` features are **mutually exclusive**. Enabling both will produce a compile-time error. If neither is enabled, all logging calls are compiled away to no-ops.
@@ -226,7 +226,7 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
     let client = DefaultEmbassyHttpClient::new(stack);
     let mut response_buffer = [0u8; 8192];
     let headers = [
-        HttpHeader::user_agent("Nanofish/0.13"),
+        HttpHeader::user_agent("Nanofish/0.14"),
         HttpHeader::content_type(mime_types::JSON),
         HttpHeader::authorization("Bearer token123"),
     ];
