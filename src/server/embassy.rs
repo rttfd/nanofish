@@ -1,4 +1,6 @@
-use crate::{
+use embassy_net::{Stack, tcp::TcpSocket};
+use embassy_time::{Duration, Timer, with_timeout};
+use nanofish::{
     error::Error,
     handler::HttpHandler,
     header::mime_types,
@@ -11,8 +13,6 @@ use crate::{
     },
     status_code::StatusCode,
 };
-use embassy_net::{Stack, tcp::TcpSocket};
-use embassy_time::{Duration, Timer, with_timeout};
 
 const SERVER_BUFFER_SIZE: usize = 4096;
 const MAX_REQUEST_SIZE: usize = 4096;
@@ -283,7 +283,7 @@ pub type SmallEmbassyHttpServer = EmbassyHttpServer<1024, 1024, 1024, 1024>;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use nanofish::server::embassy::*;
 
     #[test]
     fn test_http_server_creation() {

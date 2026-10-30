@@ -1,19 +1,19 @@
-use crate::{
+use heapless::Vec;
+use nanofish::{
     error::Error,
     header::{HttpHeader, mime_types},
     method::HttpMethod,
     protocol::MAX_HEADERS,
 };
-use heapless::Vec;
 
 /// Collects the method, headers and body of a request with a fluent API.
 ///
 /// The builder does not know where the request goes: pass it to
-/// [`HttpClient::send`](crate::HttpClient::send) together with a host and
+/// [`HttpClient::send`](nanofish::HttpClient::send) together with a host and
 /// path, or to `EmbassyHttpClient::send` with a URL.
 ///
 /// Headers and body are borrowed, so values that are computed at runtime (such
-/// as the result of [`basic_auth`](crate::encode::basic_auth)) have to outlive
+/// as the result of [`basic_auth`](nanofish::encode::basic_auth)) have to outlive
 /// the builder.
 ///
 /// ```
@@ -106,8 +106,8 @@ impl<'a> RequestBuilder<'a> {
     }
 
     /// Add an `Authorization` header, for example the result of
-    /// [`basic_auth`](crate::encode::basic_auth) or
-    /// [`bearer_auth`](crate::encode::bearer_auth).
+    /// [`basic_auth`](nanofish::encode::basic_auth) or
+    /// [`bearer_auth`](nanofish::encode::bearer_auth).
     #[must_use]
     pub fn authorization(mut self, value: &'a str) -> Self {
         self.push(HttpHeader::authorization(value));
@@ -131,7 +131,7 @@ impl<'a> RequestBuilder<'a> {
 
     /// Set an `application/x-www-form-urlencoded` body and add the matching
     /// `Content-Type`. The body must already be encoded; see
-    /// [`QueryBuilder`](crate::encode::QueryBuilder).
+    /// [`QueryBuilder`](nanofish::encode::QueryBuilder).
     #[must_use]
     pub fn form(mut self, body: &'a [u8]) -> Self {
         self.push(HttpHeader::content_type(mime_types::FORM));

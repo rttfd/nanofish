@@ -1,15 +1,3 @@
-use crate::client::builder::RequestBuilder;
-use crate::client::io::{
-    HttpClient as BaseHttpClient, HttpClientRequest, HttpEndpoint, parse_endpoint,
-};
-use crate::client::redirect::follow;
-use crate::client::stream::{BodySink, StreamedResponse};
-#[cfg(feature = "tls")]
-use crate::client::tls::HttpTlsClient;
-use crate::{
-    codec, error::Error, header::HttpHeader, method::HttpMethod, options::HttpClientOptions,
-    response::HttpResponse,
-};
 use core::future::Future;
 use embassy_net::{
     Stack,
@@ -22,6 +10,18 @@ use embassy_time::{Timer, with_timeout};
 #[cfg(feature = "tls")]
 use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
 use heapless::String;
+use nanofish::client::builder::RequestBuilder;
+use nanofish::client::io::{
+    HttpClient as BaseHttpClient, HttpClientRequest, HttpEndpoint, parse_endpoint,
+};
+use nanofish::client::redirect::follow;
+use nanofish::client::stream::{BodySink, StreamedResponse};
+#[cfg(feature = "tls")]
+use nanofish::client::tls::HttpTlsClient;
+use nanofish::{
+    codec, error::Error, header::HttpHeader, method::HttpMethod, options::HttpClientOptions,
+    response::HttpResponse,
+};
 #[cfg(feature = "tls")]
 use rand_core::{CryptoRng, RngCore};
 
@@ -417,7 +417,7 @@ impl<
     ///
     /// [`EmbassyHttpClient::request`] does not verify certificates. Use this
     /// method with [`HttpTlsClient::verified`] to check the server against a
-    /// pinned root CA (or any other [`TlsVerifier`](crate::client::TlsVerifier)),
+    /// pinned root CA (or any other [`TlsVerifier`](nanofish::client::TlsVerifier)),
     /// while still using Embassy for DNS and TCP. The TLS client's own options
     /// apply to reads and retries; this client's [`HttpClientOptions::socket_timeout`],
     /// [`HttpClientOptions::socket_close_delay`] and
@@ -491,7 +491,7 @@ impl<
     ///
     /// `buffer` only has to hold the status line and headers plus the piece of
     /// the body read at a time. See
-    /// [`HttpClient::request_streaming`](crate::HttpClient::request_streaming)
+    /// [`HttpClient::request_streaming`](nanofish::HttpClient::request_streaming)
     /// for how the sink is driven and which errors can occur. Redirects are not
     /// followed; check the status in [`BodySink::head`] and request the
     /// `Location` yourself. [`HttpClientOptions::total_timeout`] applies.
@@ -1152,9 +1152,9 @@ const fn is_repeatable(method: HttpMethod) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::TimeoutDuration;
     use embassy_net::Stack;
+    use nanofish::TimeoutDuration;
+    use nanofish::client::embassy::*;
 
     #[test]
     fn test_repeatable_methods() {

@@ -273,7 +273,7 @@ impl From<u16> for StatusCode {
 }
 
 impl TryFrom<&str> for StatusCode {
-    type Error = crate::Error;
+    type Error = nanofish::Error;
 
     /// Parse a status code from a string slice.
     ///
@@ -291,7 +291,7 @@ impl TryFrom<&str> for StatusCode {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         value
             .parse::<u16>()
-            .map_or(Err(crate::Error::InvalidStatusCode), |code| {
+            .map_or(Err(nanofish::Error::InvalidStatusCode), |code| {
                 Ok(Self::from(code))
             })
     }
@@ -299,7 +299,7 @@ impl TryFrom<&str> for StatusCode {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use nanofish::status_code::*;
 
     #[test]
     fn test_from_u16_known_codes() {

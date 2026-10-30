@@ -1,6 +1,7 @@
 //! Shared HTTP client codec helpers.
 
-use crate::{
+use heapless::{String, Vec};
+use nanofish::{
     error::Error,
     header::{HttpHeader, headers::CONTENT_LENGTH, headers::CONTENT_TYPE},
     method::HttpMethod,
@@ -11,7 +12,6 @@ use crate::{
     response::{HttpResponse, ResponseBody},
     status_code::StatusCode,
 };
-use heapless::{String, Vec};
 
 macro_rules! try_push {
     ($expr:expr) => {
@@ -664,8 +664,8 @@ fn chunked(data: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{ResponseBody, StatusCode};
+    use nanofish::codec::*;
+    use nanofish::{ResponseBody, StatusCode};
 
     fn build(path: &str, host: &str, headers: &[HttpHeader<'_>]) -> Result<(), Error> {
         build_req::<256>(HttpMethod::GET, host, path, None, headers, None).map(|_| ())

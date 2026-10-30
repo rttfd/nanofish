@@ -1,11 +1,11 @@
-use crate::{
+use heapless::Vec;
+use nanofish::{
     error::Error,
     header::{HttpHeader, mime_types},
     request::HttpRequest,
     response::{HttpResponse, ResponseBody},
     status_code::StatusCode,
 };
-use heapless::Vec;
 
 /// Trait for handling HTTP requests
 #[expect(
@@ -61,9 +61,9 @@ impl HttpHandler for SimpleHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{HttpMethod, HttpRequest, StatusCode};
     use heapless::Vec;
+    use nanofish::handler::*;
+    use nanofish::{HttpMethod, HttpRequest, StatusCode};
 
     #[test]
     fn test_simple_handler() {

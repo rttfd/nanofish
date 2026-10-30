@@ -124,7 +124,7 @@ pub(crate) fn is_valid_request_token(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use nanofish::protocol::*;
 
     #[test]
     fn test_is_valid_header_name() {

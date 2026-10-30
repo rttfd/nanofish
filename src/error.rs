@@ -104,9 +104,9 @@ impl core::fmt::Display for Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[cfg(feature = "embassy")]
     use embassy_net::{dns, tcp};
+    use nanofish::error::*;
 
     #[test]
     fn test_error_display() {

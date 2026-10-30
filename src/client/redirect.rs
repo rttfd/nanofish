@@ -1,6 +1,8 @@
 //! Redirect handling shared by the clients that can open new connections.
 
-use crate::{
+use core::fmt::Write as _;
+use heapless::{String, Vec};
+use nanofish::{
     client::io::{HttpEndpoint, parse_endpoint},
     codec,
     error::Error,
@@ -10,8 +12,6 @@ use crate::{
     response::HttpResponse,
     status_code::StatusCode,
 };
-use core::fmt::Write as _;
-use heapless::{String, Vec};
 
 /// Longest redirect target that is followed.
 pub const REDIRECT_URL_SIZE: usize = 512;
@@ -155,7 +155,7 @@ fn is_sensitive(name: &str) -> bool {
 /// final response replaces the redirect responses in it. The request tuple is
 /// `(method, URL, headers, body)`.
 ///
-/// See [`HttpClientOptions::max_redirects`](crate::HttpClientOptions::max_redirects)
+/// See [`HttpClientOptions::max_redirects`](nanofish::HttpClientOptions::max_redirects)
 /// for how headers, methods and bodies are treated across redirects.
 ///
 /// # Errors
@@ -240,7 +240,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use nanofish::client::redirect::*;
 
     fn resolve(base: &str, location: &str) -> Result<std::string::String, Error> {
         let base = parse_endpoint(base).unwrap();

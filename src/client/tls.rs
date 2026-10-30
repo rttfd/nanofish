@@ -1,12 +1,12 @@
 use core::future::Future;
 
-use crate::client::builder::RequestBuilder;
-use crate::client::io::{HttpClient, HttpClientRequest};
-use crate::client::stream::{BodySink, StreamedResponse};
-use crate::client::{DEFAULT_REQUEST_SIZE, SMALL_REQUEST_SIZE};
-use crate::{error::Error, options::HttpClientOptions, response::HttpResponse};
 use embedded_io_async::{Read, Write};
 use embedded_tls::Aes128GcmSha256;
+use nanofish::client::builder::RequestBuilder;
+use nanofish::client::io::{HttpClient, HttpClientRequest};
+use nanofish::client::stream::{BodySink, StreamedResponse};
+use nanofish::client::{DEFAULT_REQUEST_SIZE, SMALL_REQUEST_SIZE};
+use nanofish::{error::Error, options::HttpClientOptions, response::HttpResponse};
 
 const DEFAULT_TLS_BUFFER_SIZE: usize = 4096;
 const SMALL_TLS_BUFFER_SIZE: usize = 1024;
@@ -395,7 +395,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use nanofish::client::tls::*;
 
     /// Deterministic LCG RNG for wiring tests; not for production use.
     struct TestRng(u32);

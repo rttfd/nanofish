@@ -1,4 +1,8 @@
-use crate::{
+use core::fmt::Write as _;
+use core::future::Future;
+use embedded_io_async::{Read, Write};
+use heapless::String;
+use nanofish::{
     client::{
         builder::RequestBuilder,
         stream::{BodySink, ChunkDecoder, StreamedResponse},
@@ -11,12 +15,8 @@ use crate::{
     protocol::{self, DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT, DOUBLE_CRLF_LEN},
     response::HttpResponse,
 };
-use core::fmt::Write as _;
-use core::future::Future;
-use embedded_io_async::{Read, Write};
-use heapless::String;
 
-use crate::client::{DEFAULT_REQUEST_SIZE, SMALL_REQUEST_SIZE};
+use nanofish::client::{DEFAULT_REQUEST_SIZE, SMALL_REQUEST_SIZE};
 
 /// Parsed HTTP endpoint metadata.
 pub struct HttpEndpoint<'a> {
@@ -165,7 +165,7 @@ pub struct Exchange<'b> {
 /// Whether the response asks for the connection to be closed.
 fn wants_close(response: &HttpResponse<'_>) -> bool {
     response
-        .get_header(crate::header::headers::CONNECTION)
+        .get_header(nanofish::header::headers::CONNECTION)
         .is_some_and(|value| {
             value
                 .split(',')
@@ -778,11 +778,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{ResponseBody, StatusCode};
     use core::convert::Infallible;
     use embedded_io_async::ErrorType;
     use heapless::Vec;
+    use nanofish::client::io::*;
+    use nanofish::{ResponseBody, StatusCode};
 
     struct MockStream<const IN: usize, const OUT: usize> {
         input: Vec<u8, IN>,
@@ -1111,7 +1111,7 @@ mod tests {
         let mut stream = MockStream::<128, 512>::new(response);
         let client = HttpClient::new();
         let mut buffer = [0; 128];
-        let token = crate::encode::bearer_auth::<32>("abc").unwrap();
+        let token = nanofish::encode::bearer_auth::<32>("abc").unwrap();
         let builder = RequestBuilder::put()
             .authorization(&token)
             .header("X-Request-Id", "7")
@@ -1142,7 +1142,7 @@ mod tests {
         let client = HttpClient::new();
         let mut buffer = [0; 128];
         let mut builder = RequestBuilder::get();
-        for _ in 0..=crate::protocol::MAX_HEADERS {
+        for _ in 0..=nanofish::protocol::MAX_HEADERS {
             builder = builder.header("X-A", "b");
         }
 
@@ -1189,7 +1189,7 @@ mod tests {
         let mut stream = MockStream::<128, 512>::new(response);
         let client = HttpClient::new();
         let mut buffer = [0; 128];
-        let mut form = crate::encode::QueryBuilder::<64>::new();
+        let mut form = nanofish::encode::QueryBuilder::<64>::new();
         form.pair("name", "A B").unwrap().pair("k", "v&w").unwrap();
         let builder = RequestBuilder::post().form(form.as_bytes());
 

@@ -39,12 +39,12 @@ pub struct HttpClientOptions {
     /// `socket_timeout` only bounds idle time on the socket, so a server that
     /// trickles a byte every few seconds can hold a request open indefinitely.
     /// Applied by the Embassy-backed clients, which fail with
-    /// [`Error::Timeout`](crate::Error::Timeout); transport-generic clients
+    /// [`Error::Timeout`](nanofish::Error::Timeout); transport-generic clients
     /// have no timer, so wrap their futures in the timeout of your runtime.
     pub total_timeout: Option<TimeoutDuration>,
     /// Maximum number of redirects (`301`, `302`, `303`, `307`, `308`) the
     /// Embassy-backed clients follow before failing with
-    /// [`Error::InvalidResponse`](crate::Error::InvalidResponse). `0` (the
+    /// [`Error::InvalidResponse`](nanofish::Error::InvalidResponse). `0` (the
     /// default) returns redirect responses to the caller untouched.
     ///
     /// Each hop opens a new connection and reuses the response buffer, so the
@@ -59,7 +59,7 @@ pub struct HttpClientOptions {
     /// Honored by request APIs that accept a retry delay (for example the
     /// Embassy-backed clients, which sleep between attempts). Transport-neutral
     /// APIs retry immediately unless given a delay via
-    /// [`HttpClient::request_with_retry_delay`](crate::client::HttpClient::request_with_retry_delay).
+    /// [`HttpClient::request_with_retry_delay`](nanofish::client::HttpClient::request_with_retry_delay).
     pub retry_delay: TimeoutDuration,
     /// Delay after closing a socket before proceeding
     pub socket_close_delay: TimeoutDuration,
@@ -80,7 +80,7 @@ impl Default for HttpClientOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use nanofish::options::*;
 
     #[test]
     fn test_timeout_duration_constructors() {

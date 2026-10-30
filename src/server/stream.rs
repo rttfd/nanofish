@@ -1,7 +1,10 @@
 //! Streaming responses: send the head, then the body in pieces, without
 //! building the whole response in memory.
 
-use crate::{
+use core::fmt::Write as _;
+use embedded_io_async::{Read, Write};
+use heapless::{String, Vec};
+use nanofish::{
     error::Error,
     header::{HttpHeader, headers},
     method::HttpMethod,
@@ -11,9 +14,6 @@ use crate::{
     server::io::{DEFAULT_REQUEST_SIZE, DEFAULT_RESPONSE_SIZE, receive_request},
     status_code::StatusCode,
 };
-use core::fmt::Write as _;
-use embedded_io_async::{Read, Write};
-use heapless::{String, Vec};
 
 /// How the length of a streamed response body is announced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,7 +255,7 @@ fn chunk_size_line(len: usize, out: &mut [u8; 18]) -> &[u8] {
 
 /// Handles a request by streaming the response.
 ///
-/// Use it instead of [`HttpHandler`](crate::HttpHandler) for responses that
+/// Use it instead of [`HttpHandler`](nanofish::HttpHandler) for responses that
 /// are large or produced incrementally, such as files read from flash, sensor
 /// logs or server-sent events.
 #[expect(
@@ -281,7 +281,7 @@ pub trait StreamingHandler {
 /// request and head buffer sizes.
 ///
 /// Request parsing and its error responses (`400`, `413`, `431`) work as in
-/// [`handle_http_connection`](crate::handle_http_connection).
+/// [`handle_http_connection`](nanofish::handle_http_connection).
 ///
 /// # Errors
 ///
@@ -335,7 +335,7 @@ where
         Err(error) => {
             // Only an unstarted response can still be turned into an error page.
             if !writer.head_sent() {
-                crate::server::io::send_status::<S, HEAD_SIZE>(
+                nanofish::server::io::send_status::<S, HEAD_SIZE>(
                     writer.stream,
                     StatusCode::InternalServerError,
                 )
@@ -348,10 +348,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::codec;
     use core::convert::Infallible;
     use embedded_io_async::ErrorType;
+    use nanofish::codec;
+    use nanofish::server::stream::*;
 
     struct MockStream<const OUT: usize> {
         input: Vec<u8, 256>,
