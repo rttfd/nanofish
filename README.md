@@ -873,4 +873,4 @@ See [CHANGELOG.md](CHANGELOG.md) for a full list of changes across all versions.
 
 ## License
 
-[MIT](license)
+[MIT](https://github.com/rttfd/nanofish/blob/main/LICENSE)
