@@ -26,4 +26,6 @@ pub use io::{
 };
 pub use stream::{BodySink, StreamedResponse};
 #[cfg(feature = "tls")]
-pub use tls::{DefaultHttpTlsClient, HttpTlsClient, SmallHttpTlsClient, TlsVerification};
+pub use tls::{
+    DefaultHttpTlsClient, HttpTlsClient, SmallHttpTlsClient, TlsVerification, TlsVerifier,
+};

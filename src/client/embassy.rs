@@ -4,6 +4,8 @@ use crate::client::io::{
 };
 use crate::client::redirect::follow;
 use crate::client::stream::{BodySink, StreamedResponse};
+#[cfg(feature = "tls")]
+use crate::client::tls::HttpTlsClient;
 use crate::{
     codec, error::Error, header::HttpHeader, method::HttpMethod, options::HttpClientOptions,
     response::HttpResponse,
@@ -408,6 +410,80 @@ impl<
                 .await
         })
         .await
+    }
+
+    /// Make an HTTPS request with a caller-supplied [`HttpTlsClient`], which
+    /// decides how the server certificate is verified.
+    ///
+    /// [`EmbassyHttpClient::request`] does not verify certificates. Use this
+    /// method with [`HttpTlsClient::verified`] to check the server against a
+    /// pinned root CA (or any other [`TlsVerifier`](crate::client::TlsVerifier)),
+    /// while still using Embassy for DNS and TCP. The TLS client's own options
+    /// apply to reads and retries; this client's [`HttpClientOptions::socket_timeout`],
+    /// [`HttpClientOptions::socket_close_delay`] and
+    /// [`HttpClientOptions::total_timeout`] apply to the connection. Redirects
+    /// are not followed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedScheme`] unless `endpoint` is an `https`
+    /// URL, otherwise the errors of [`EmbassyHttpClient::request`] and of
+    /// [`HttpTlsClient::request`].
+    #[cfg(feature = "tls")]
+    #[expect(clippy::future_not_send)]
+    pub async fn request_with_tls<
+        'b,
+        RNG,
+        const TLS_RQ: usize,
+        const TLS_RECORD_READ: usize,
+        const TLS_RECORD_WRITE: usize,
+    >(
+        &self,
+        tls: &mut HttpTlsClient<'_, RNG, TLS_RQ, TLS_RECORD_READ, TLS_RECORD_WRITE>,
+        method: HttpMethod,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        body: Option<&[u8]>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error>
+    where
+        RNG: embedded_tls::CryptoRngCore,
+    {
+        let attempt = async {
+            let endpoint = parse_endpoint(endpoint)?;
+            if endpoint.scheme != "https" {
+                return Err(Error::UnsupportedScheme("expected an https URL"));
+            }
+            let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
+            self.with_http_connection(&endpoint, async |socket| {
+                tls.request_with_retry_delay(
+                    socket,
+                    endpoint.host,
+                    HttpClientRequest {
+                        method,
+                        host: &host_header,
+                        path: endpoint.path,
+                        query: endpoint.query,
+                        headers,
+                        body,
+                    },
+                    response_buffer,
+                    || self.retry_delay(),
+                )
+                .await
+            })
+            .await
+        };
+
+        match self.options.total_timeout {
+            Some(limit) => with_timeout(
+                embassy_time::Duration::from_millis(limit.as_millis()),
+                attempt,
+            )
+            .await
+            .unwrap_or(Err(Error::Timeout)),
+            None => attempt.await,
+        }
     }
 
     /// Make a request and stream the response body to `sink` instead of
