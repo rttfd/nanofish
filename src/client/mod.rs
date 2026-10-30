@@ -9,6 +9,8 @@ mod builder;
 #[cfg(feature = "embassy")]
 mod embassy;
 mod io;
+#[cfg(any(feature = "embassy", test))]
+pub(crate) mod redirect;
 #[cfg(feature = "tls")]
 mod tls;
 

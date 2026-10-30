@@ -33,6 +33,27 @@ pub struct HttpClientOptions {
     pub max_retries: usize,
     /// Timeout duration for socket operations
     pub socket_timeout: TimeoutDuration,
+    /// Overall deadline for one request, from DNS resolution to the end of the
+    /// response, or `None` for no limit (the default).
+    ///
+    /// `socket_timeout` only bounds idle time on the socket, so a server that
+    /// trickles a byte every few seconds can hold a request open indefinitely.
+    /// Applied by the Embassy-backed clients, which fail with
+    /// [`Error::Timeout`](crate::Error::Timeout); transport-generic clients
+    /// have no timer, so wrap their futures in the timeout of your runtime.
+    pub total_timeout: Option<TimeoutDuration>,
+    /// Maximum number of redirects (`301`, `302`, `303`, `307`, `308`) the
+    /// Embassy-backed clients follow before failing with
+    /// [`Error::InvalidResponse`](crate::Error::InvalidResponse). `0` (the
+    /// default) returns redirect responses to the caller untouched.
+    ///
+    /// Each hop opens a new connection and reuses the response buffer, so the
+    /// final response replaces the redirect responses in it. `Authorization`,
+    /// `Cookie` and `Proxy-Authorization` headers are dropped when a redirect
+    /// leaves the original origin, a redirect from `https` to `http` is
+    /// refused, and a `POST` answered by `301`, `302` or `303` is repeated as
+    /// a `GET` without its body.
+    pub max_redirects: usize,
     /// Delay between read retry attempts.
     ///
     /// Honored by request APIs that accept a retry delay (for example the
@@ -49,6 +70,8 @@ impl Default for HttpClientOptions {
         Self {
             max_retries: 5,
             socket_timeout: TimeoutDuration::from_secs(60),
+            total_timeout: None,
+            max_redirects: 0,
             retry_delay: TimeoutDuration::from_millis(200),
             socket_close_delay: TimeoutDuration::from_millis(100),
         }
@@ -70,6 +93,8 @@ mod tests {
         let opts = HttpClientOptions::default();
         assert_eq!(opts.max_retries, 5);
         assert_eq!(opts.socket_timeout, TimeoutDuration::from_secs(60));
+        assert_eq!(opts.total_timeout, None);
+        assert_eq!(opts.max_redirects, 0);
         assert_eq!(opts.retry_delay, TimeoutDuration::from_millis(200));
         assert_eq!(opts.socket_close_delay, TimeoutDuration::from_millis(100));
     }
@@ -79,11 +104,15 @@ mod tests {
         let opts = HttpClientOptions {
             max_retries: 2,
             socket_timeout: TimeoutDuration::from_secs(10),
+            total_timeout: Some(TimeoutDuration::from_secs(30)),
+            max_redirects: 3,
             retry_delay: TimeoutDuration::from_millis(50),
             socket_close_delay: TimeoutDuration::from_millis(20),
         };
         assert_eq!(opts.max_retries, 2);
         assert_eq!(opts.socket_timeout, TimeoutDuration::from_secs(10));
+        assert_eq!(opts.total_timeout, Some(TimeoutDuration::from_secs(30)));
+        assert_eq!(opts.max_redirects, 3);
         assert_eq!(opts.retry_delay, TimeoutDuration::from_millis(50));
         assert_eq!(opts.socket_close_delay, TimeoutDuration::from_millis(20));
     }

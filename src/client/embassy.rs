@@ -2,6 +2,7 @@ use crate::client::builder::RequestBuilder;
 use crate::client::io::{
     HttpClient as BaseHttpClient, HttpClientRequest, HttpEndpoint, parse_endpoint,
 };
+use crate::client::redirect::follow;
 use crate::{
     error::Error, header::HttpHeader, method::HttpMethod, options::HttpClientOptions,
     response::HttpResponse,
@@ -14,7 +15,7 @@ use embassy_net::{
 };
 #[cfg(feature = "tls")]
 use embassy_time::Instant;
-use embassy_time::Timer;
+use embassy_time::{Timer, with_timeout};
 #[cfg(feature = "tls")]
 use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
 #[cfg(feature = "tls")]
@@ -167,6 +168,54 @@ impl<
     /// ```
     #[expect(clippy::future_not_send)]
     pub async fn request<'b>(
+        &self,
+        method: HttpMethod,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        body: Option<&[u8]>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        let attempt =
+            self.request_following_redirects(method, endpoint, headers, body, response_buffer);
+
+        match self.options.total_timeout {
+            Some(limit) => with_timeout(
+                embassy_time::Duration::from_millis(limit.as_millis()),
+                attempt,
+            )
+            .await
+            .unwrap_or(Err(Error::Timeout)),
+            None => attempt.await,
+        }
+    }
+
+    /// Send the request, then follow up to [`HttpClientOptions::max_redirects`]
+    /// redirects.
+    #[expect(clippy::future_not_send)]
+    async fn request_following_redirects<'b>(
+        &self,
+        method: HttpMethod,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        body: Option<&[u8]>,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        follow(
+            self.options.max_redirects,
+            (method, endpoint, headers, body),
+            response_buffer,
+            async |method, endpoint, headers, body, buffer| {
+                self.request_once(method, endpoint, headers, body, buffer)
+                    .await
+                    .map(|(_, used)| used)
+            },
+        )
+        .await
+    }
+
+    /// Send one request without following redirects.
+    #[expect(clippy::future_not_send)]
+    async fn request_once<'b>(
         &self,
         method: HttpMethod,
         endpoint: &str,
@@ -740,6 +789,8 @@ mod tests {
         let opts = HttpClientOptions {
             max_retries: 1,
             socket_timeout: TimeoutDuration::from_secs(1),
+            total_timeout: None,
+            max_redirects: 0,
             retry_delay: TimeoutDuration::from_millis(1),
             socket_close_delay: TimeoutDuration::from_millis(1),
         };
@@ -759,6 +810,8 @@ mod tests {
             HttpClientOptions {
                 max_retries: 3,
                 socket_timeout: TimeoutDuration::from_secs(2),
+                total_timeout: None,
+                max_redirects: 0,
                 retry_delay: TimeoutDuration::from_millis(10),
                 socket_close_delay: TimeoutDuration::from_millis(5),
             },
@@ -777,6 +830,8 @@ mod tests {
             HttpClientOptions {
                 max_retries: 2,
                 socket_timeout: TimeoutDuration::from_secs(1),
+                total_timeout: None,
+                max_redirects: 0,
                 retry_delay: TimeoutDuration::from_millis(5),
                 socket_close_delay: TimeoutDuration::from_millis(2),
             },
