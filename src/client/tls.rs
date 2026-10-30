@@ -1,12 +1,12 @@
 use core::future::Future;
 
-use crate::client::builder::RequestBuilder;
-use crate::client::io::{HttpClient, HttpClientRequest};
-use crate::client::stream::{BodySink, StreamedResponse};
-use crate::client::{DEFAULT_REQUEST_SIZE, SMALL_REQUEST_SIZE};
-use crate::{error::Error, options::HttpClientOptions, response::HttpResponse};
 use embedded_io_async::{Read, Write};
 use embedded_tls::Aes128GcmSha256;
+use nanofish::client::builder::RequestBuilder;
+use nanofish::client::io::{HttpClient, HttpClientRequest};
+use nanofish::client::stream::{BodySink, StreamedResponse};
+use nanofish::client::{DEFAULT_REQUEST_SIZE, SMALL_REQUEST_SIZE};
+use nanofish::{error::Error, options::HttpClientOptions, response::HttpResponse};
 
 const DEFAULT_TLS_BUFFER_SIZE: usize = 4096;
 const SMALL_TLS_BUFFER_SIZE: usize = 1024;
@@ -130,7 +130,10 @@ impl<'a, RNG, const RQ: usize, const TLS_READ: usize, const TLS_WRITE: usize>
     /// fails, stream IO fails, no response is received, the response is
     /// incomplete or larger than the response buffer, or the response cannot
     /// be parsed.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn request<'b, S>(
         &mut self,
         stream: S,
@@ -155,7 +158,10 @@ impl<'a, RNG, const RQ: usize, const TLS_READ: usize, const TLS_WRITE: usize>
     ///
     /// Returns [`Error::BufferOverflow`] if the builder was given too many
     /// headers, otherwise the same errors as [`HttpTlsClient::request`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn send<'b, S>(
         &mut self,
         stream: S,
@@ -194,7 +200,10 @@ impl<'a, RNG, const RQ: usize, const TLS_READ: usize, const TLS_WRITE: usize>
     /// # Errors
     ///
     /// Returns the same errors as [`HttpTlsClient::request`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn request_with_retry_delay<'b, S, D, Fut>(
         &mut self,
         stream: S,
@@ -229,7 +238,10 @@ impl<'a, RNG, const RQ: usize, const TLS_READ: usize, const TLS_WRITE: usize>
     ///
     /// Returns the errors of [`HttpTlsClient::request`] that apply before the
     /// response, and those of `request_streaming` while reading it.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn request_streaming<S, K>(
         &mut self,
         stream: S,
@@ -255,7 +267,10 @@ impl<'a, RNG, const RQ: usize, const TLS_READ: usize, const TLS_WRITE: usize>
     /// # Errors
     ///
     /// Returns the same errors as [`HttpTlsClient::request_streaming`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn request_streaming_with_retry_delay<S, K, D, Fut>(
         &mut self,
         stream: S,
@@ -283,7 +298,10 @@ impl<'a, RNG, const RQ: usize, const TLS_READ: usize, const TLS_WRITE: usize>
 
     /// Run the TLS handshake on `stream`, run `operation` on the connection,
     /// and close it.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     async fn with_connection<S, R>(
         &mut self,
         stream: S,
@@ -395,7 +413,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use nanofish::client::tls::*;
 
     /// Deterministic LCG RNG for wiring tests; not for production use.
     struct TestRng(u32);

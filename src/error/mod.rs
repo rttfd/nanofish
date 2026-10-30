@@ -35,6 +35,12 @@ pub enum Error {
     Timeout,
 }
 
+// Conversions from adapter error types live with their feature.
+#[cfg(feature = "embassy")]
+mod embassy;
+#[cfg(feature = "tls")]
+mod tls;
+
 #[cfg(feature = "defmt")]
 impl defmt::Format for Error {
     fn format(&self, fmt: defmt::Formatter) {
@@ -42,38 +48,12 @@ impl defmt::Format for Error {
     }
 }
 
-#[cfg(feature = "embassy")]
-impl From<embassy_net::dns::Error> for Error {
-    fn from(_err: embassy_net::dns::Error) -> Self {
-        Self::DnsError
-    }
-}
-
-#[cfg(feature = "embassy")]
-impl From<embassy_net::tcp::ConnectError> for Error {
-    fn from(_err: embassy_net::tcp::ConnectError) -> Self {
-        Self::ConnectionError
-    }
-}
-
-#[cfg(feature = "embassy")]
-impl From<embassy_net::tcp::Error> for Error {
-    fn from(err: embassy_net::tcp::Error) -> Self {
-        Self::io(err)
-    }
-}
-
-#[cfg(feature = "tls")]
-impl From<embedded_tls::TlsError> for Error {
-    fn from(err: embedded_tls::TlsError) -> Self {
-        Self::TlsError(err)
-    }
-}
-
 impl Error {
     /// Wrap a transport I/O error, keeping its [`embedded_io_async::ErrorKind`].
-    // Taken by value so it can be passed straight to `map_err`.
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "taken by value so it can be passed straight to `map_err`"
+    )]
     pub(crate) fn io<E: embedded_io_async::Error>(error: E) -> Self {
         Self::TcpError(error.kind())
     }
@@ -102,9 +82,7 @@ impl core::fmt::Display for Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    #[cfg(feature = "embassy")]
-    use embassy_net::{dns, tcp};
+    use nanofish::error::*;
 
     #[test]
     fn test_error_display() {
@@ -126,27 +104,5 @@ mod tests {
         assert_eq!(format!("{e}"), "Operation timed out");
         let e = Error::TcpError(embedded_io_async::ErrorKind::TimedOut);
         assert_eq!(format!("{e}"), "TCP communication error: TimedOut");
-    }
-
-    #[cfg(feature = "embassy")]
-    #[test]
-    fn test_from_dns_error() {
-        let dns_err = dns::Error::InvalidName;
-        let err: Error = dns_err.into();
-        match err {
-            Error::DnsError => {}
-            _ => panic!("Expected DnsError variant"),
-        }
-    }
-
-    #[cfg(feature = "embassy")]
-    #[test]
-    fn test_from_tcp_error() {
-        let tcp_err = tcp::Error::ConnectionReset;
-        let err: Error = tcp_err.into();
-        match err {
-            Error::TcpError(embedded_io_async::ErrorKind::ConnectionReset) => {}
-            _ => panic!("Expected TcpError(ConnectionReset) variant"),
-        }
     }
 }

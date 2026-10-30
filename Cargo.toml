@@ -42,13 +42,24 @@ rand_core = { version = "0.6", optional = true }
 smoltcp = { version = "0.13", default-features = false, features = ["async", "medium-ethernet", "proto-ipv4", "socket-tcp"], optional = true }
 
 [dev-dependencies]
+criterion = { version = "0.8.2", default-features = false }
 futures-lite = "2.6"
 
+[[bench]]
+name = "http"
+harness = false
+
+# Optimized, with symbols, for `samply` and `cargo flamegraph`.
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [lints.clippy]
-panic = "forbid"
-unwrap_used = "forbid"
-expect_used = "forbid"
-todo = "forbid"
-unimplemented = "forbid"
+# `deny` rather than `forbid`, so tests and benches can opt out (see clippy.toml).
+panic = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+unimplemented = "deny"
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }

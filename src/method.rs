@@ -96,7 +96,7 @@ impl TryFrom<&[u8]> for HttpMethod {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use nanofish::method::*;
 
     #[test]
     fn test_http_method_as_str() {

@@ -4,9 +4,9 @@
 //! `Authorization` header values. All of them write into caller-provided or fixed-capacity buffers and report
 //! [`Error::BufferOverflow`] when the result does not fit.
 
-use crate::error::Error;
 use core::fmt::Write as _;
 use heapless::String;
+use nanofish::error::Error;
 
 const HEX: &[u8; 16] = b"0123456789ABCDEF";
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -22,7 +22,7 @@ const fn is_unreserved(byte: u8) -> bool {
 ///
 /// The result is safe as a single query or form component, for example a value
 /// that contains `&`, `=`, `#` or a space (written as `%20`). It is the inverse
-/// of [`percent_decode`](crate::percent_decode).
+/// of [`percent_decode`](nanofish::percent_decode).
 ///
 /// # Errors
 ///
@@ -225,8 +225,8 @@ impl<const N: usize> QueryBuilder<N> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::request::percent_decode;
+    use nanofish::encode::*;
+    use nanofish::request::percent_decode;
 
     #[test]
     fn test_percent_encode() {

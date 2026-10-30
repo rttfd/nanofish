@@ -1,17 +1,20 @@
 //! Streaming response bodies: hand a body to a sink piece by piece instead of
 //! holding all of it in the response buffer.
 
-use crate::{error::Error, response::HttpResponse, status_code::StatusCode};
 use core::ops::Range;
 use heapless::Vec;
+use nanofish::{error::Error, response::HttpResponse, status_code::StatusCode};
 
 /// Receives a response as it is read by
-/// [`HttpClient::request_streaming`](crate::HttpClient::request_streaming).
+/// [`HttpClient::request_streaming`](nanofish::HttpClient::request_streaming).
 ///
 /// The body arrives in pieces no larger than the response buffer, already
 /// decoded: a chunked body is delivered as its payload, without chunk framing.
 /// A sink can write to flash, feed a parser or a hash, and so on.
-#[allow(async_fn_in_trait)]
+#[expect(
+    async_fn_in_trait,
+    reason = "no_std embedded executors are single-threaded, so no `Send` bound is wanted"
+)]
 pub trait BodySink {
     /// Called once, when the status line and headers have been read and
     /// before any body data.
@@ -27,7 +30,7 @@ pub trait BodySink {
     async fn chunk(&mut self, data: &[u8]) -> Result<(), Error>;
 }
 
-/// What [`HttpClient::request_streaming`](crate::HttpClient::request_streaming)
+/// What [`HttpClient::request_streaming`](nanofish::HttpClient::request_streaming)
 /// learned about a response whose body was streamed to a [`BodySink`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamedResponse {
@@ -56,7 +59,7 @@ enum ChunkState {
 
 /// Incremental decoder for chunked transfer coding.
 ///
-/// Unlike [`dechunk`](crate::codec::dechunk), which needs the whole body in
+/// Unlike [`dechunk`](nanofish::codec::dechunk), which needs the whole body in
 /// memory, it consumes the body in arbitrary pieces and reports where the
 /// payload is in each piece.
 #[derive(Debug, Clone)]
@@ -168,8 +171,8 @@ impl ChunkDecoder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::codec;
+    use nanofish::client::stream::*;
+    use nanofish::codec;
 
     /// Decode `raw` in pieces of `step` bytes, returning the payload.
     fn decode(raw: &[u8], step: usize) -> Result<std::vec::Vec<u8>, Error> {

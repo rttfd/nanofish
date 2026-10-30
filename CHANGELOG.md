@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Criterion benchmarks for response parsing, request serving and the encoders (`make bench`, `make bench-save`, `make bench-compare`), and a `profiling` build profile for `samply` and `cargo flamegraph`.
+- `AGENTS.md` with the crate's code rules, and `make check` and `make lint` targets.
+
+### Changed
+
+- The code follows the rules in `AGENTS.md`: it refers to itself as `nanofish::` instead of `crate::` and `super::`, gates TLS and Embassy code by module (`client/embassy/tls.rs`, `error/embassy.rs`, `error/tls.rs`) instead of inside files, lints tests and benchmarks too, and gives every lint exception a reason. There are no public API changes.
+
+### Fixed
+
+- `make clippy-all` and `make test-all` ignored a failure in any feature combination except the last one, so a broken combination could pass CI. They now stop at the first failure.
+
 ## [0.14.0] - 2026-10-30
 
 ### Added

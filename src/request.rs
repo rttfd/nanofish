@@ -1,4 +1,5 @@
-use crate::{
+use heapless::Vec;
+use nanofish::{
     error::Error,
     header::{
         HttpHeader,
@@ -7,7 +8,6 @@ use crate::{
     method::HttpMethod,
     protocol::{self, DOUBLE_CRLF_LEN, MAX_HEADERS},
 };
-use heapless::Vec;
 
 /// A single raw query parameter pair.
 ///
@@ -480,8 +480,8 @@ const fn hex_value(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::HttpMethod;
+    use nanofish::HttpMethod;
+    use nanofish::request::*;
 
     #[test]
     fn test_parse_request_get() {
@@ -648,7 +648,7 @@ mod tests {
 
     #[test]
     fn test_find_double_crlf() {
-        use crate::protocol::find_double_crlf;
+        use nanofish::protocol::find_double_crlf;
 
         // Normal case
         let data = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\nBody";

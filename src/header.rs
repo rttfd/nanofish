@@ -134,7 +134,7 @@ impl<'a> HttpHeader<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use nanofish::header::*;
 
     #[test]
     fn test_http_header_creation() {

@@ -1,4 +1,6 @@
-use crate::{
+use embedded_io_async::{Read, Write};
+use heapless::Vec;
+use nanofish::{
     codec::{self, Framing, FramingError},
     error::Error,
     handler::HttpHandler,
@@ -13,8 +15,6 @@ use crate::{
     response::{HttpResponse, ResponseBody},
     status_code::StatusCode,
 };
-use embedded_io_async::{Read, Write};
-use heapless::Vec;
 
 pub(super) const DEFAULT_REQUEST_SIZE: usize = 4096;
 pub(super) const DEFAULT_RESPONSE_SIZE: usize = 4096;
@@ -497,10 +497,10 @@ fn text_error<const MAX_RESPONSE_SIZE: usize>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::SimpleHandler;
     use core::convert::Infallible;
     use embedded_io_async::ErrorType;
+    use nanofish::SimpleHandler;
+    use nanofish::server::io::*;
 
     struct MockStream<const IN: usize, const OUT: usize> {
         input: Vec<u8, IN>,
@@ -990,7 +990,7 @@ mod tests {
             &mut self,
             request: &HttpRequest<'_>,
         ) -> Result<HttpResponse<'_>, Error> {
-            let builder = crate::HttpResponseBuilder::new();
+            let builder = nanofish::HttpResponseBuilder::new();
             if request.if_none_match("\"v1\"") {
                 builder
                     .status(StatusCode::NotModified)
@@ -1108,7 +1108,7 @@ mod tests {
             &mut self,
             request: &HttpRequest<'_>,
         ) -> Result<HttpResponse<'_>, Error> {
-            let builder = crate::HttpResponseBuilder::new();
+            let builder = nanofish::HttpResponseBuilder::new();
             match request.route_path() {
                 "/" => builder.text("hi").build(),
                 "/empty" => builder.build(),

@@ -1,4 +1,5 @@
-use crate::{
+use heapless::Vec;
+use nanofish::{
     HttpHeader, StatusCode,
     error::Error,
     header::headers::{CONTENT_LENGTH, CONTENT_TYPE},
@@ -9,7 +10,6 @@ use crate::{
         is_valid_header_value,
     },
 };
-use heapless::Vec;
 
 /// HTTP Response body that can handle both text and binary data using zero-copy references
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
@@ -307,7 +307,7 @@ impl<'a> HttpResponseBuilder<'a> {
     }
 
     /// Add an `ETag` header. `etag` is the quoted entity tag, for example
-    /// `"\"v1\""`. Pair it with [`HttpRequest::if_none_match`](crate::HttpRequest::if_none_match)
+    /// `"\"v1\""`. Pair it with [`HttpRequest::if_none_match`](nanofish::HttpRequest::if_none_match)
     /// to answer repeat requests with `304 Not Modified`.
     ///
     /// # Errors
@@ -450,7 +450,10 @@ fn write_decimal_to_buffer<const N: usize>(
     let mut i = 0;
 
     while num > 0 {
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a decimal digit is below 10"
+        )]
         {
             digits[i] = (num % 10) as u8 + b'0';
         }
@@ -466,9 +469,9 @@ fn write_decimal_to_buffer<const N: usize>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::header::{HttpHeader, headers};
     use heapless::Vec;
+    use nanofish::header::{HttpHeader, headers};
+    use nanofish::response::*;
 
     fn response_with_header<'a>(name: &'a str, value: &'a str) -> HttpResponse<'a> {
         let mut headers = Vec::new();

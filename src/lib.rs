@@ -2,6 +2,9 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 
+// Lets the crate refer to itself as `nanofish::`, like its users and doc examples do.
+extern crate self as nanofish;
+
 /// Shared HTTP codec helpers.
 pub(crate) mod codec;
 /// Logging macros

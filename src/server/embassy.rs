@@ -1,4 +1,6 @@
-use crate::{
+use embassy_net::{Stack, tcp::TcpSocket};
+use embassy_time::{Duration, Timer, with_timeout};
+use nanofish::{
     error::Error,
     handler::HttpHandler,
     header::mime_types,
@@ -11,8 +13,6 @@ use crate::{
     },
     status_code::StatusCode,
 };
-use embassy_net::{Stack, tcp::TcpSocket};
-use embassy_time::{Duration, Timer, with_timeout};
 
 const SERVER_BUFFER_SIZE: usize = 4096;
 const MAX_REQUEST_SIZE: usize = 4096;
@@ -134,7 +134,10 @@ impl<
     /// Connections are handled one at a time on a single socket. To serve
     /// several clients at once, run this method in several tasks: each task
     /// owns its socket and buffers, and all of them accept on the same port.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn serve<H>(&mut self, stack: Stack<'_>, mut handler: H) -> !
     where
         H: HttpHandler,
@@ -171,7 +174,10 @@ impl<
     /// response; the body is not limited by it. `ServerTimeouts::handler_timeout`
     /// does not apply, since a streamed response can legitimately take long;
     /// `ServerTimeouts::connection_timeout` bounds the whole connection.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn serve_streaming<H>(&mut self, stack: Stack<'_>, mut handler: H) -> !
     where
         H: StreamingHandler,
@@ -187,7 +193,10 @@ impl<
     }
 
     /// Accept connections forever, running `connection` on each.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     async fn serve_connections(
         &self,
         stack: Stack<'_>,
@@ -283,7 +292,7 @@ pub type SmallEmbassyHttpServer = EmbassyHttpServer<1024, 1024, 1024, 1024>;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use nanofish::server::embassy::*;
 
     #[test]
     fn test_http_server_creation() {
