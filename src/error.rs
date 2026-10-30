@@ -14,8 +14,8 @@ pub enum Error {
     IpAddressEmpty,
     /// Failed to establish a TCP connection
     ConnectionError,
-    /// TCP communication error
-    TcpError,
+    /// TCP communication error, with the kind reported by the transport
+    TcpError(embedded_io_async::ErrorKind),
     /// No response was received from the server
     NoResponse,
     /// The server's response could not be parsed
@@ -31,6 +31,8 @@ pub enum Error {
     InvalidStatusCode,
     /// Buffer overflow when building a request or response
     BufferOverflow,
+    /// The operation did not finish within its overall deadline
+    Timeout,
 }
 
 #[cfg(feature = "defmt")]
@@ -56,8 +58,8 @@ impl From<embassy_net::tcp::ConnectError> for Error {
 
 #[cfg(feature = "embassy")]
 impl From<embassy_net::tcp::Error> for Error {
-    fn from(_err: embassy_net::tcp::Error) -> Self {
-        Self::TcpError
+    fn from(err: embassy_net::tcp::Error) -> Self {
+        Self::io(err)
     }
 }
 
@@ -68,6 +70,15 @@ impl From<embedded_tls::TlsError> for Error {
     }
 }
 
+impl Error {
+    /// Wrap a transport I/O error, keeping its [`embedded_io_async::ErrorKind`].
+    // Taken by value so it can be passed straight to `map_err`.
+    #[allow(clippy::needless_pass_by_value)]
+    pub(crate) fn io<E: embedded_io_async::Error>(error: E) -> Self {
+        Self::TcpError(error.kind())
+    }
+}
+
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -75,7 +86,7 @@ impl core::fmt::Display for Error {
             Self::DnsError => write!(f, "DNS resolution failed"),
             Self::IpAddressEmpty => write!(f, "No IP addresses returned by DNS"),
             Self::ConnectionError => write!(f, "Failed to establish TCP connection"),
-            Self::TcpError => write!(f, "TCP communication error"),
+            Self::TcpError(kind) => write!(f, "TCP communication error: {kind:?}"),
             Self::NoResponse => write!(f, "No response received from server"),
             Self::InvalidResponse(msg) => write!(f, "Invalid response: {msg}"),
             #[cfg(feature = "tls")]
@@ -84,6 +95,7 @@ impl core::fmt::Display for Error {
             Self::HeaderError(msg) => write!(f, "Header error: {msg}"),
             Self::InvalidStatusCode => write!(f, "Invalid status code"),
             Self::BufferOverflow => write!(f, "Buffer overflow"),
+            Self::Timeout => write!(f, "Operation timed out"),
         }
     }
 }
@@ -110,6 +122,10 @@ mod tests {
         assert_eq!(format!("{e}"), "Header error: too long");
         let e = Error::InvalidStatusCode;
         assert_eq!(format!("{e}"), "Invalid status code");
+        let e = Error::Timeout;
+        assert_eq!(format!("{e}"), "Operation timed out");
+        let e = Error::TcpError(embedded_io_async::ErrorKind::TimedOut);
+        assert_eq!(format!("{e}"), "TCP communication error: TimedOut");
     }
 
     #[cfg(feature = "embassy")]
@@ -129,8 +145,8 @@ mod tests {
         let tcp_err = tcp::Error::ConnectionReset;
         let err: Error = tcp_err.into();
         match err {
-            Error::TcpError => {}
-            _ => panic!("Expected TcpError variant"),
+            Error::TcpError(embedded_io_async::ErrorKind::ConnectionReset) => {}
+            _ => panic!("Expected TcpError(ConnectionReset) variant"),
         }
     }
 }

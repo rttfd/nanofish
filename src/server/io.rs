@@ -163,11 +163,8 @@ where
         }
     };
 
-    stream
-        .write_all(&response)
-        .await
-        .map_err(|_| Error::TcpError)?;
-    stream.flush().await.map_err(|_| Error::TcpError)
+    stream.write_all(&response).await.map_err(Error::io)?;
+    stream.flush().await.map_err(Error::io)
 }
 
 /// Why a request could not be read, and the status to answer with, if any.
@@ -220,7 +217,7 @@ where
         let n = stream
             .read(&mut buf[total_read..])
             .await
-            .map_err(|_| ReadFailure::silent(Error::TcpError))?;
+            .map_err(|error| ReadFailure::silent(Error::io(error)))?;
         if n == 0 {
             return Err(ReadFailure::silent(Error::InvalidResponse(
                 "Incomplete request",

@@ -260,16 +260,13 @@ impl<const RQ: usize> HttpClient<RQ> {
         stream
             .write_all(http_request.as_bytes())
             .await
-            .map_err(|_| Error::TcpError)?;
+            .map_err(Error::io)?;
 
         if let Some(body_data) = request.body {
-            stream
-                .write_all(body_data)
-                .await
-                .map_err(|_| Error::TcpError)?;
+            stream.write_all(body_data).await.map_err(Error::io)?;
         }
 
-        stream.flush().await.map_err(|_| Error::TcpError)?;
+        stream.flush().await.map_err(Error::io)?;
 
         let total_read = read_response(
             stream,
@@ -360,7 +357,8 @@ impl<const RQ: usize> HttpClient<RQ> {
 /// # Errors
 ///
 /// - [`Error::NoResponse`] if nothing was read.
-/// - [`Error::TcpError`] if `max_retries` read attempts fail.
+/// - [`Error::TcpError`] if `max_retries` read attempts fail, with the kind of
+///   the last failure.
 /// - [`Error::InvalidResponse`] if the peer closes the connection before a
 ///   length-delimited (or chunked) body is complete.
 /// - [`Error::BufferOverflow`] if the buffer fills before the response is
@@ -393,10 +391,10 @@ where
                     return Ok(total_read);
                 }
             }
-            Err(_) => {
+            Err(error) => {
                 retries -= 1;
                 if retries == 0 {
-                    return Err(Error::TcpError);
+                    return Err(Error::io(error));
                 }
                 retry_delay().await;
             }
@@ -1201,7 +1199,10 @@ mod tests {
             },
         ));
 
-        assert!(matches!(result, Err(Error::TcpError)));
+        assert!(matches!(
+            result,
+            Err(Error::TcpError(embedded_io_async::ErrorKind::Other))
+        ));
         // max_retries counts total attempts: 2 failures, 1 delay in between.
         assert_eq!(delays.get(), 1);
     }
