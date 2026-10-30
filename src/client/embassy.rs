@@ -1,4 +1,6 @@
-use crate::client::io::{HttpClient as BaseHttpClient, HttpClientRequest, parse_endpoint};
+use crate::client::io::{
+    HttpClient as BaseHttpClient, HttpClientRequest, HttpEndpoint, parse_endpoint,
+};
 use crate::{
     error::Error, header::HttpHeader, method::HttpMethod, options::HttpClientOptions,
     response::HttpResponse,
@@ -19,6 +21,8 @@ use rand_core::{CryptoRng, RngCore};
 const REQUEST_SIZE: usize = 1024;
 const SMALL_BUFFER_SIZE: usize = 1024;
 const MEDIUM_BUFFER_SIZE: usize = 4096;
+/// Room for a 253-byte hostname plus `:` and a five-digit port.
+const HOST_HEADER_SIZE: usize = 259;
 
 /// Type alias for `EmbassyHttpClient` with default buffer sizes
 pub type DefaultEmbassyHttpClient<'a> = EmbassyHttpClient<
@@ -173,28 +177,14 @@ impl<
         match endpoint.scheme {
             #[cfg(feature = "tls")]
             "https" => {
-                self.make_https_request(
-                    method,
-                    (endpoint.host, endpoint.port),
-                    endpoint.path,
-                    headers,
-                    body,
-                    response_buffer,
-                )
-                .await
+                self.make_https_request(method, &endpoint, headers, body, response_buffer)
+                    .await
             }
             #[cfg(not(feature = "tls"))]
             "https" => Err(Error::UnsupportedScheme("https (TLS support not enabled)")),
             "http" => {
-                self.make_http_request(
-                    method,
-                    (endpoint.host, endpoint.port),
-                    endpoint.path,
-                    headers,
-                    body,
-                    response_buffer,
-                )
-                .await
+                self.make_http_request(method, &endpoint, headers, body, response_buffer)
+                    .await
             }
             _ => Err(Error::UnsupportedScheme("unknown")),
         }
@@ -223,13 +213,13 @@ impl<
     async fn make_https_request<'b>(
         &self,
         method: HttpMethod,
-        host_port: (&str, u16),
-        path: &str,
+        endpoint: &HttpEndpoint<'_>,
         headers: &[HttpHeader<'_>],
         body: Option<&[u8]>,
         response_buffer: &'b mut [u8],
     ) -> Result<(HttpResponse<'b>, usize), Error> {
-        let (host, port) = host_port;
+        let (host, port) = (endpoint.host, endpoint.port);
+        let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
         let mut rx_buffer = [0; TCP_RX];
         let mut tx_buffer = [0; TCP_TX];
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
@@ -267,8 +257,8 @@ impl<
                 &mut tls,
                 HttpClientRequest {
                     method,
-                    host,
-                    path,
+                    host: &host_header,
+                    path: endpoint.path,
                     headers,
                     body,
                 },
@@ -298,13 +288,13 @@ impl<
     async fn make_http_request<'b>(
         &self,
         method: HttpMethod,
-        host_port: (&str, u16),
-        path: &str,
+        endpoint: &HttpEndpoint<'_>,
         headers: &[HttpHeader<'_>],
         body: Option<&[u8]>,
         response_buffer: &'b mut [u8],
     ) -> Result<(HttpResponse<'b>, usize), Error> {
-        let (host, port) = host_port;
+        let (host, port) = (endpoint.host, endpoint.port);
+        let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
         let mut rx_buffer = [0; TCP_RX];
         let mut tx_buffer = [0; TCP_TX];
         let mut socket = TcpSocket::new(*self.stack, &mut rx_buffer, &mut tx_buffer);
@@ -329,8 +319,8 @@ impl<
                 &mut socket,
                 HttpClientRequest {
                     method,
-                    host,
-                    path,
+                    host: &host_header,
+                    path: endpoint.path,
                     headers,
                     body,
                 },

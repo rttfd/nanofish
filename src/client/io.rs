@@ -7,8 +7,10 @@ use crate::{
     protocol::{DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT},
     response::HttpResponse,
 };
+use core::fmt::Write as _;
 use core::future::Future;
 use embedded_io_async::{Read, Write};
+use heapless::String;
 
 use crate::client::{DEFAULT_REQUEST_SIZE, SMALL_REQUEST_SIZE};
 
@@ -22,6 +24,38 @@ pub struct HttpEndpoint<'a> {
     pub port: u16,
     /// Request path, defaulting to `/`.
     pub path: &'a str,
+}
+
+impl HttpEndpoint<'_> {
+    /// Build the value for the `Host` header of a request to this endpoint.
+    ///
+    /// This is the host, followed by `:port` unless the port is the default
+    /// for the scheme (80 for `http`, 443 for `https`). A request to
+    /// `http://example.com:8080/` must send `Host: example.com:8080`, otherwise
+    /// virtual-host routing and generated redirects point at the wrong port.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BufferOverflow`] if the value does not fit in `N` bytes.
+    pub fn host_header<const N: usize>(&self) -> Result<String<N>, Error> {
+        let mut value = String::new();
+        value
+            .push_str(self.host)
+            .map_err(|_| Error::BufferOverflow)?;
+        if self.port != default_port(self.scheme) {
+            write!(value, ":{}", self.port).map_err(|_| Error::BufferOverflow)?;
+        }
+        Ok(value)
+    }
+}
+
+/// Default port for a URL scheme.
+fn default_port(scheme: &str) -> u16 {
+    if scheme == "https" {
+        DEFAULT_HTTPS_PORT
+    } else {
+        DEFAULT_HTTP_PORT
+    }
 }
 
 /// Parse an HTTP or HTTPS URL into endpoint metadata.
@@ -42,11 +76,7 @@ pub fn parse_endpoint(endpoint: &str) -> Result<HttpEndpoint<'_>, Error> {
     let path = &host_port[host.len()..];
     let path = if path.is_empty() { "/" } else { path };
 
-    let default_port = if scheme == "https" {
-        DEFAULT_HTTPS_PORT
-    } else {
-        DEFAULT_HTTP_PORT
-    };
+    let default_port = default_port(scheme);
     let (host, port) = host.rfind(':').map_or((host, default_port), |colon_pos| {
         host[colon_pos + 1..]
             .parse::<u16>()
@@ -66,6 +96,9 @@ pub struct HttpClientRequest<'a> {
     /// HTTP method to send.
     pub method: HttpMethod,
     /// Host value used for the HTTP `Host` header.
+    ///
+    /// Include the port when it is not the default for the scheme; see
+    /// [`HttpEndpoint::host_header`].
     pub host: &'a str,
     /// Request target, for example `/`, `/api`, or `/api?limit=10`.
     pub path: &'a str,
@@ -649,6 +682,80 @@ mod tests {
         let endpoint = parse_endpoint("http://[::1]").unwrap();
         assert_eq!(endpoint.host, "[::1]");
         assert_eq!(endpoint.port, DEFAULT_HTTP_PORT);
+    }
+
+    #[test]
+    fn test_host_header_omits_default_port() {
+        let endpoint = parse_endpoint("http://example.com/x").unwrap();
+        assert_eq!(endpoint.host_header::<64>().unwrap().as_str(), "example.com");
+
+        let endpoint = parse_endpoint("https://example.com:443/x").unwrap();
+        assert_eq!(endpoint.host_header::<64>().unwrap().as_str(), "example.com");
+
+        // An explicit default port is the same as no port.
+        let endpoint = parse_endpoint("http://example.com:80").unwrap();
+        assert_eq!(endpoint.host_header::<64>().unwrap().as_str(), "example.com");
+    }
+
+    #[test]
+    fn test_host_header_includes_non_default_port() {
+        let endpoint = parse_endpoint("http://example.com:8080/x").unwrap();
+        assert_eq!(
+            endpoint.host_header::<64>().unwrap().as_str(),
+            "example.com:8080"
+        );
+
+        // The default port of one scheme is not the default of the other.
+        let endpoint = parse_endpoint("https://example.com:80").unwrap();
+        assert_eq!(
+            endpoint.host_header::<64>().unwrap().as_str(),
+            "example.com:80"
+        );
+        let endpoint = parse_endpoint("http://example.com:443").unwrap();
+        assert_eq!(
+            endpoint.host_header::<64>().unwrap().as_str(),
+            "example.com:443"
+        );
+
+        let endpoint = parse_endpoint("http://[::1]:8080/x").unwrap();
+        assert_eq!(endpoint.host_header::<64>().unwrap().as_str(), "[::1]:8080");
+    }
+
+    #[test]
+    fn test_host_header_overflow() {
+        let endpoint = parse_endpoint("http://example.com:8080").unwrap();
+        // "example.com" fits, ":8080" does not.
+        assert!(matches!(
+            endpoint.host_header::<13>(),
+            Err(Error::BufferOverflow)
+        ));
+        assert!(matches!(
+            endpoint.host_header::<5>(),
+            Err(Error::BufferOverflow)
+        ));
+        assert!(endpoint.host_header::<16>().is_ok());
+    }
+
+    #[test]
+    fn test_io_client_sends_host_header_with_port() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let mut stream = MockStream::<128, 256>::new(response);
+        let client = HttpClient::new();
+        let mut buffer = [0; 64];
+        let endpoint = parse_endpoint("http://example.com:8080/status").unwrap();
+        let host = endpoint.host_header::<64>().unwrap();
+
+        futures_lite::future::block_on(client.get(
+            &mut stream,
+            &host,
+            endpoint.path,
+            &[],
+            &mut buffer,
+        ))
+        .unwrap();
+
+        let request = core::str::from_utf8(&stream.output).unwrap();
+        assert!(request.starts_with("GET /status HTTP/1.1\r\nHost: example.com:8080\r\n"));
     }
 
     #[test]
