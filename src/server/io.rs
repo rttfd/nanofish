@@ -151,7 +151,7 @@ where
                 "Internal Server Error",
             )
         },
-        |response| response.build_bytes::<MAX_RESPONSE_SIZE>(),
+        |response| response.build_bytes_for::<MAX_RESPONSE_SIZE>(request.method),
     );
     let response = match response {
         Ok(response) => response,
@@ -781,6 +781,72 @@ mod tests {
 
         let response = core::str::from_utf8(&stream.output).unwrap();
         assert!(response.ends_with("body-ok"), "{response}");
+    }
+
+    #[test]
+    fn test_head_request_gets_headers_without_body() {
+        let request = b"HEAD /health HTTP/1.1\r\nHost: h\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(request);
+        let mut handler = SimpleHandler;
+
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut handler,
+        ))
+        .unwrap();
+
+        let response = core::str::from_utf8(&stream.output).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("Content-Length: 15\r\n"), "{response}");
+        assert!(response.ends_with("\r\n\r\n"), "{response}");
+    }
+
+    /// Handler that answers `304` when the client's `ETag` is current.
+    struct EtagHandler;
+
+    impl HttpHandler for EtagHandler {
+        async fn handle_request(
+            &mut self,
+            request: &HttpRequest<'_>,
+        ) -> Result<HttpResponse<'_>, Error> {
+            let builder = crate::HttpResponseBuilder::new();
+            if request.if_none_match("\"v1\"") {
+                builder
+                    .status(StatusCode::NotModified)
+                    .etag("\"v1\"")?
+                    .build()
+            } else {
+                builder.etag("\"v1\"")?.text("body").build()
+            }
+        }
+    }
+
+    #[test]
+    fn test_conditional_get_with_etag() {
+        let cached = b"GET / HTTP/1.1\r\nHost: h\r\nIf-None-Match: \"v1\"\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(cached);
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut EtagHandler,
+        ))
+        .unwrap();
+        let response = core::str::from_utf8(&stream.output).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 304 Not Modified\r\n"),
+            "{response}"
+        );
+        assert!(!response.contains("body"));
+
+        let fresh = b"GET / HTTP/1.1\r\nHost: h\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(fresh);
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut EtagHandler,
+        ))
+        .unwrap();
+        let response = core::str::from_utf8(&stream.output).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(response.ends_with("body"));
     }
 
     #[test]

@@ -49,8 +49,11 @@ pub use handler::{HttpHandler, SimpleHandler};
 pub use header::{HttpHeader, headers, mime_types};
 pub use method::HttpMethod;
 pub use options::{HttpClientOptions, TimeoutDuration};
-pub use request::{HttpRequest, QueryPair, QueryPairs, QueryValues, percent_decode};
-pub use response::{HttpResponse, ResponseBody};
+pub use request::{
+    HttpRequest, PathParams, QueryPair, QueryPairs, QueryValues, etag_matches, match_path,
+    percent_decode,
+};
+pub use response::{HttpResponse, HttpResponseBuilder, ResponseBody};
 #[cfg(feature = "embassy")]
 pub use server::{
     DefaultEmbassyHttpServer, EmbassyHttpServer, ServerTimeouts, SmallEmbassyHttpServer,
