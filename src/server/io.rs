@@ -16,8 +16,8 @@ use crate::{
 use embedded_io_async::{Read, Write};
 use heapless::Vec;
 
-const DEFAULT_REQUEST_SIZE: usize = 4096;
-const DEFAULT_RESPONSE_SIZE: usize = 4096;
+pub(super) const DEFAULT_REQUEST_SIZE: usize = 4096;
+pub(super) const DEFAULT_RESPONSE_SIZE: usize = 4096;
 const SMALL_REQUEST_SIZE: usize = 1024;
 const SMALL_RESPONSE_SIZE: usize = 1024;
 
@@ -467,8 +467,10 @@ const fn framing_failure(error: FramingError) -> ReadFailure {
 
 /// Best-effort plain-text error response; a failure to send it is ignored
 /// because the caller already has an error to report.
-async fn send_status<S, const MAX_RESPONSE_SIZE: usize>(stream: &mut S, status: StatusCode)
-where
+pub(super) async fn send_status<S, const MAX_RESPONSE_SIZE: usize>(
+    stream: &mut S,
+    status: StatusCode,
+) where
     S: Write,
 {
     if let Ok(response) = text_error::<MAX_RESPONSE_SIZE>(status, status.text())

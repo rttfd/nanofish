@@ -56,13 +56,14 @@ pub use request::{
     percent_decode,
 };
 pub use response::{HttpResponse, HttpResponseBuilder, ResponseBody};
+pub use server::{
+    BodyLength, DefaultHttpServer, HttpServer, ResponseWriter, SmallHttpServer, StreamingHandler,
+    handle_http_connection, handle_http_connection_with_sizes, handle_http_stream_connection,
+    handle_http_stream_connection_with_sizes, serve_http_connection_with_sizes,
+};
 #[cfg(feature = "embassy")]
 pub use server::{
     DefaultEmbassyHttpServer, EmbassyHttpServer, ServerTimeouts, SmallEmbassyHttpServer,
-};
-pub use server::{
-    DefaultHttpServer, HttpServer, SmallHttpServer, handle_http_connection,
-    handle_http_connection_with_sizes, serve_http_connection_with_sizes,
 };
 #[cfg(feature = "smoltcp")]
 pub use smoltcp::{SmolTcpError, SmolTcpStream};

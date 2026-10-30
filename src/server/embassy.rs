@@ -5,7 +5,10 @@ use crate::{
     options::TimeoutDuration,
     request::HttpRequest,
     response::{HttpResponse, HttpResponseBuilder},
-    server::{handle_http_connection_with_sizes, serve_http_connection_with_sizes},
+    server::{
+        StreamingHandler, handle_http_connection_with_sizes,
+        handle_http_stream_connection_with_sizes, serve_http_connection_with_sizes,
+    },
     status_code::StatusCode,
 };
 use embassy_net::{Stack, tcp::TcpSocket};
@@ -115,7 +118,8 @@ impl<
     /// A client that is done but keeps the connection open occupies the
     /// server's socket until [`ServerTimeouts::read_timeout`] expires, so
     /// lower that timeout when enabling this, or run several server tasks.
-    /// Applies to [`EmbassyHttpServer::serve`].
+    /// Applies to [`EmbassyHttpServer::serve`]; streamed responses always
+    /// close the connection.
     #[must_use]
     pub const fn with_keep_alive(mut self, max_requests: usize) -> Self {
         self.max_requests = max_requests;
@@ -156,6 +160,28 @@ impl<
                 )
                 .await
             }
+        })
+        .await
+    }
+
+    /// Like [`EmbassyHttpServer::serve`], for a [`StreamingHandler`] that
+    /// sends its responses in pieces.
+    ///
+    /// `MAX_RESPONSE_SIZE` bounds the status line and headers of each
+    /// response; the body is not limited by it. `ServerTimeouts::handler_timeout`
+    /// does not apply, since a streamed response can legitimately take long;
+    /// `ServerTimeouts::connection_timeout` bounds the whole connection.
+    #[expect(clippy::future_not_send)]
+    pub async fn serve_streaming<H>(&mut self, stack: Stack<'_>, mut handler: H) -> !
+    where
+        H: StreamingHandler,
+    {
+        self.serve_connections(stack, async |socket| {
+            handle_http_stream_connection_with_sizes::<_, _, REQ_SIZE, MAX_RESPONSE_SIZE>(
+                socket,
+                &mut handler,
+            )
+            .await
         })
         .await
     }
