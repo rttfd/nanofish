@@ -11,8 +11,8 @@
 #
 # Usage:
 #   make help          - Show all available targets
-#   make ci            - Run all CI checks (fmt-check, clippy-all, test-all)
-#   make pre-commit    - Run pre-commit checks (fmt, clippy-all, test-all)
+#   make ci            - Run all CI checks (fmt-check, check, lint, test-all, doc-check)
+#   make pre-commit    - Run pre-commit checks (fmt, lint, test-all)
 #   make publish       - Publish to crates.io
 #
 # ==============================================================================
@@ -45,25 +45,35 @@ fmt: ## Format all code
 fmt-check: ## Check code formatting
 	cargo +$(RUST_VERSION) fmt --all --check
 
+.PHONY: check
+check: ## Type-check all targets on all feature combinations
+	@for features in "" "embassy" "smoltcp" "tls" "embassy,tls" "smoltcp,tls" "embassy,smoltcp,tls,log" "embassy,tls,defmt"; do \
+		echo "Checking with features: $$features"; \
+		cargo +$(RUST_VERSION) check --all-targets --features "$$features" || exit 1; \
+	done
+
+.PHONY: lint
+lint: clippy-all ## Run clippy (pedantic; no unwrap, expect, or panic outside tests) on all feature combinations
+
 .PHONY: clippy
 clippy: ## Run clippy lints
 ifeq ($(FEATURES),)
-	cargo +$(RUST_VERSION) clippy -- -D warnings -W clippy::pedantic
+	cargo +$(RUST_VERSION) clippy --all-targets -- -D warnings -W clippy::pedantic
 else
-	cargo +$(RUST_VERSION) clippy --features "$(FEATURES)" -- -D warnings -W clippy::pedantic
+	cargo +$(RUST_VERSION) clippy --all-targets --features "$(FEATURES)" -- -D warnings -W clippy::pedantic
 endif
 
 .PHONY: clippy-all
 clippy-all: ## Run clippy on all feature combinations
 	@echo "Running clippy with no default features"; \
-	cargo +$(RUST_VERSION) clippy --no-default-features -- -D warnings -W clippy::pedantic
+	cargo +$(RUST_VERSION) clippy --all-targets --no-default-features -- -D warnings -W clippy::pedantic
 	@echo "Running clippy with no default features and tls"; \
-	cargo +$(RUST_VERSION) clippy --no-default-features --features "tls" -- -D warnings -W clippy::pedantic
+	cargo +$(RUST_VERSION) clippy --all-targets --no-default-features --features "tls" -- -D warnings -W clippy::pedantic
 	@echo "Running clippy with no default features and smoltcp"; \
-	cargo +$(RUST_VERSION) clippy --no-default-features --features "smoltcp" -- -D warnings -W clippy::pedantic
+	cargo +$(RUST_VERSION) clippy --all-targets --no-default-features --features "smoltcp" -- -D warnings -W clippy::pedantic
 	@for features in "" "embassy" "smoltcp" "tls" "embassy,tls" "smoltcp,tls" "log" "embassy,log" "defmt" "embassy,defmt" "tls,log" "embassy,tls,log" "tls,defmt" "embassy,tls,defmt"; do \
 		echo "Running clippy with features: $$features"; \
-		cargo +$(RUST_VERSION) clippy --features "$$features" -- -D warnings -W clippy::pedantic; \
+		cargo +$(RUST_VERSION) clippy --all-targets --features "$$features" -- -D warnings -W clippy::pedantic || exit 1; \
 	done
 
 .PHONY: test
@@ -84,7 +94,7 @@ test-all: ## Run tests on all feature combinations
 	cargo +$(RUST_VERSION) test --no-default-features --features "smoltcp"
 	@for features in "" "embassy" "smoltcp" "tls" "embassy,tls" "smoltcp,tls" "log" "embassy,log" "defmt" "embassy,defmt" "tls,log" "embassy,tls,log" "tls,defmt" "embassy,tls,defmt"; do \
 		echo "Running tests with features: $$features"; \
-		cargo +$(RUST_VERSION) test --features "$$features"; \
+		cargo +$(RUST_VERSION) test --features "$$features" || exit 1; \
 	done
 
 .PHONY: build
@@ -115,10 +125,10 @@ clean: ## Clean build artifacts
 	cargo clean
 
 .PHONY: ci
-ci: fmt-check clippy-all test-all doc-check ## Run all CI checks
+ci: fmt-check check lint test-all doc-check ## Run all CI checks
 
 .PHONY: pre-commit
-pre-commit: fmt clippy-all test-all ## Run pre-commit checks
+pre-commit: fmt lint test-all ## Run pre-commit checks
 
 .PHONY: verify-version
 verify-version: ## Verify version configuration
