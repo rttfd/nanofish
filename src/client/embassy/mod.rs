@@ -168,7 +168,10 @@ impl<
     ///     Ok(())
     /// }
     /// ```
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn request<'b>(
         &self,
         method: HttpMethod,
@@ -193,7 +196,10 @@ impl<
 
     /// Send the request, then follow up to [`HttpClientOptions::max_redirects`]
     /// redirects.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     async fn request_following_redirects<'b>(
         &self,
         method: HttpMethod,
@@ -216,7 +222,10 @@ impl<
     }
 
     /// Send one request without following redirects.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     async fn request_once<'b>(
         &self,
         method: HttpMethod,
@@ -242,7 +251,10 @@ impl<
 
     /// Connect to `endpoint` over plain TCP, run `operation` on the socket,
     /// and close it.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     async fn with_http_connection<R>(
         &self,
         endpoint: &HttpEndpoint<'_>,
@@ -286,7 +298,10 @@ impl<
     }
 
     /// Make HTTP request with zero-copy response handling
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     async fn make_http_request<'b>(
         &self,
         method: HttpMethod,
@@ -331,7 +346,10 @@ impl<
     ///
     /// Returns the errors of [`EmbassyHttpClient::request`] that apply before
     /// the response, and those of `request_streaming` while reading it.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn request_streaming<K: BodySink>(
         &self,
         method: HttpMethod,
@@ -394,7 +412,10 @@ impl<
     ///
     /// Returns [`Error::BufferOverflow`] if the builder was given too many
     /// headers, otherwise the same errors as [`EmbassyHttpClient::request`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn send<'b>(
         &self,
         endpoint: &str,
@@ -418,7 +439,10 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`EmbassyHttpClient::send`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn post_json<'b>(
         &self,
         endpoint: &str,
@@ -444,7 +468,10 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`EmbassyHttpClient::request`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn patch<'b>(
         &self,
         endpoint: &str,
@@ -475,7 +502,10 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`EmbassyHttpClient::request`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn head<'b>(
         &self,
         endpoint: &str,
@@ -499,7 +529,10 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`EmbassyHttpClient::request`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn options<'b>(
         &self,
         endpoint: &str,
@@ -529,7 +562,10 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`EmbassyHttpClient::request`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn trace<'b>(
         &self,
         endpoint: &str,
@@ -553,7 +589,10 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`EmbassyHttpClient::request`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn connect<'b>(
         &self,
         endpoint: &str,
@@ -583,7 +622,10 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`EmbassyHttpClient::request`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn get<'b>(
         &self,
         endpoint: &str,
@@ -608,7 +650,10 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`EmbassyHttpClient::request`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn post<'b>(
         &self,
         endpoint: &str,
@@ -640,7 +685,10 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`EmbassyHttpClient::request`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn put<'b>(
         &self,
         endpoint: &str,
@@ -671,7 +719,10 @@ impl<
     /// # Errors
     ///
     /// Returns the same errors as [`EmbassyHttpClient::request`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn delete<'b>(
         &self,
         endpoint: &str,
@@ -684,7 +735,10 @@ impl<
 }
 
 /// Resolve a hostname to an IP address, trying IPv4 (A) first then IPv6 (AAAA).
-#[expect(clippy::future_not_send)]
+#[expect(
+    clippy::future_not_send,
+    reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+)]
 async fn resolve_host(stack: Stack<'_>, host: &str) -> Result<embassy_net::IpAddress, Error> {
     let dns_socket = DnsSocket::new(stack);
 
@@ -734,7 +788,10 @@ impl<'a, const RQ: usize> EmbassyHttpSession<'a, RQ> {
     ///
     /// Returns [`Error::UnsupportedScheme`] for anything but `http`, and the
     /// DNS and connection errors of [`EmbassyHttpClient::request`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn connect(
         stack: Stack<'a>,
         rx_buffer: &'a mut [u8],
@@ -774,7 +831,10 @@ impl<'a, const RQ: usize> EmbassyHttpSession<'a, RQ> {
     }
 
     /// (Re)open the connection.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     async fn reconnect(&mut self) -> Result<(), Error> {
         self.open = false;
         self.socket.abort();
@@ -800,7 +860,10 @@ impl<'a, const RQ: usize> EmbassyHttpSession<'a, RQ> {
     ///
     /// Returns the same errors as [`EmbassyHttpClient::request`], and
     /// [`Error::Timeout`] if [`HttpClientOptions::total_timeout`] is exceeded.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn request<'b>(
         &mut self,
         method: HttpMethod,
@@ -831,7 +894,10 @@ impl<'a, const RQ: usize> EmbassyHttpSession<'a, RQ> {
         Ok((codec::parse_resp(&response_buffer[..used])?, used))
     }
 
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     async fn request_inner(
         &mut self,
         method: HttpMethod,
@@ -894,7 +960,10 @@ impl<'a, const RQ: usize> EmbassyHttpSession<'a, RQ> {
     }
 
     /// Close the connection.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn close(mut self) {
         self.socket.close();
         Timer::after(embassy_time::Duration::from_millis(

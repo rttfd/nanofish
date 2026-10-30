@@ -15,7 +15,10 @@ impl<
     const RQ: usize,
 > EmbassyHttpClient<'_, TCP_RX, TCP_TX, TLS_READ, TLS_WRITE, RQ>
 {
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     #[expect(clippy::unused_async, reason = "same signature as the TLS variant")]
     pub(super) async fn make_https_request<'b>(
         &self,
@@ -28,7 +31,10 @@ impl<
         Err(NO_TLS)
     }
 
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     #[expect(clippy::unused_async, reason = "same signature as the TLS variant")]
     pub(super) async fn https_streaming<K: BodySink>(
         &self,

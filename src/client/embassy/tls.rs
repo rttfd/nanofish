@@ -22,7 +22,10 @@ impl<
 {
     /// Connect to `endpoint` over TLS, run `operation` on the connection, and
     /// close it.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     async fn with_https_connection<R>(
         &self,
         endpoint: &HttpEndpoint<'_>,
@@ -77,7 +80,10 @@ impl<
     }
 
     /// Make HTTPS request over TLS with zero-copy response handling
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub(super) async fn make_https_request<'b>(
         &self,
         method: HttpMethod,
@@ -110,7 +116,10 @@ impl<
 
     /// Stream the response to an `https` request; see
     /// [`EmbassyHttpClient::request_streaming`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub(super) async fn https_streaming<K: BodySink>(
         &self,
         endpoint: &HttpEndpoint<'_>,
@@ -146,7 +155,10 @@ impl<
     /// Returns [`Error::UnsupportedScheme`] unless `endpoint` is an `https`
     /// URL, otherwise the errors of [`EmbassyHttpClient::request`] and of
     /// [`HttpTlsClient::request`].
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
     pub async fn request_with_tls<
         'b,
         RNG,
