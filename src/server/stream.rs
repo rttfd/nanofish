@@ -725,4 +725,3 @@ mod tests {
         assert!(matches!(result, Err(Error::BufferOverflow)));
     }
 }
-

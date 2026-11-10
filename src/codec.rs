@@ -280,7 +280,7 @@ pub fn build_req_chunked_with<const RQ: usize>(
 /// The shared framing of one chunk, used by the client (chunked upload) and
 /// the server (chunked response). `out` must hold up to 16 hex digits plus
 /// CRLF, the size of `usize::MAX`.
-pub(crate) fn chunk_size_line(len: usize, out: &mut [u8; 18]) -> &[u8] {
+pub fn chunk_size_line(len: usize, out: &mut [u8; 18]) -> &[u8] {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut digits = [0u8; 16];
     let mut count = 0;
@@ -1406,15 +1406,8 @@ mod tests {
 
     #[test]
     fn test_build_req_chunked_with_writes_transfer_encoding() {
-        let req = build_req_chunked_with::<128>(
-            HttpMethod::POST,
-            "h",
-            "/upload",
-            None,
-            &[],
-            false,
-        )
-        .unwrap();
+        let req = build_req_chunked_with::<128>(HttpMethod::POST, "h", "/upload", None, &[], false)
+            .unwrap();
         assert_eq!(
             req.as_str(),
             "POST /upload HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
@@ -1442,7 +1435,12 @@ mod tests {
 
     #[test]
     fn test_build_req_chunked_with_rejects_framing_headers() {
-        for name in ["Content-Length", "content-length", "Transfer-Encoding", "TRANSFER-ENCODING"] {
+        for name in [
+            "Content-Length",
+            "content-length",
+            "Transfer-Encoding",
+            "TRANSFER-ENCODING",
+        ] {
             let headers = [HttpHeader::new(name, "5")];
             assert!(
                 matches!(
