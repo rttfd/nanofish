@@ -132,7 +132,13 @@ where
                 "Internal Server Error",
             )
         },
-        |response| response.build_bytes_for::<MAX_RESPONSE_SIZE>(request.method),
+        |response| {
+            // One request per connection: say so, or an HTTP/1.1 client
+            // assumes the connection stays open and sends its next request
+            // into a socket that is already gone.
+            persistent_response::<MAX_RESPONSE_SIZE>(&response, request.method, true)
+                .map(|(bytes, _)| bytes)
+        },
     );
     let response = match response {
         Ok(response) => response,
@@ -560,6 +566,26 @@ mod tests {
         let response = core::str::from_utf8(&stream.output).unwrap();
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(response.contains("{\"status\":\"ok\"}"));
+    }
+
+    #[test]
+    fn single_request_connections_announce_that_they_close() {
+        let request = b"GET /health HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mut stream = MockStream::<128, 512>::new(request);
+        let mut handler = SimpleHandler;
+
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut handler,
+        ))
+        .unwrap();
+
+        let response = core::str::from_utf8(&stream.output).unwrap();
+        assert_eq!(
+            response.matches("Connection: close\r\n").count(),
+            1,
+            "{response}"
+        );
     }
 
     #[test]

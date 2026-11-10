@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `EmbassyHttpServer` now waits for its FIN to go out before reusing the socket. It used to call `TcpSocket::close` and drop the socket straight away, before the network task could send the FIN, so clients that read until the connection closes hung until they timed out, and the client's own FIN was answered with an RST. A peer that never acknowledges is aborted after 2 seconds.
 
+- `EmbassyHttpServer::serve` and `handle_http_connection` closed the connection after every response without saying so. They now send `Connection: close`, so an HTTP/1.1 client such as a browser stops sending its next request into a connection that is already gone (a reset). The keep-alive and streaming paths already did this.
+
 ### Documentation
 
 - Explained that each server task serves one connection at a time and that parallel clients (a browser loading a page) need one task per connection, with an example.
