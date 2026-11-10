@@ -72,9 +72,10 @@ impl ServerTimeouts {
 
 /// Simple HTTP server implementation
 ///
-/// **Note**: This server only supports HTTP connections, not HTTPS/TLS.
-/// For secure connections, consider using a reverse proxy or load balancer
-/// that handles TLS termination.
+/// **Note**: This adapter accepts plain TCP; Nanofish does not terminate TLS.
+/// For HTTPS, run [`handle_http_connection`](nanofish::handle_http_connection)
+/// over a TLS stream you bring, or put a reverse proxy or load balancer that
+/// handles TLS termination in front of the device.
 pub struct EmbassyHttpServer<
     const RX_SIZE: usize,
     const TX_SIZE: usize,
@@ -131,8 +132,9 @@ impl<
 
     /// Start the HTTP server and handle incoming connections
     ///
-    /// **Important**: This server only accepts plain HTTP connections.
-    /// HTTPS/TLS is not supported by the server (only by the client).
+    /// **Important**: This server only accepts plain TCP connections; the
+    /// `tls` feature covers the client only. See the type's docs for the
+    /// options to serve HTTPS.
     ///
     /// Connections are handled one at a time on a single socket, and there is
     /// no listen backlog: while every task is busy, a new connection is
