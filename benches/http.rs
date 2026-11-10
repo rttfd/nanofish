@@ -10,6 +10,7 @@ use core::convert::Infallible;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use embedded_io_async::{ErrorType, Read, Write};
 use futures_lite::future::block_on;
+use nanofish::client::SliceSource;
 use nanofish::encode::{base64_encode, percent_encode};
 use nanofish::{
     HttpClient, HttpClientRequest, HttpMethod, SimpleHandler, handle_http_connection_with_sizes,
@@ -96,6 +97,49 @@ fn client_response(c: &mut Criterion) {
     group.finish();
 }
 
+/// Serves a canned 204 response to an upload: writes are discarded, the read
+/// side replays the response.
+fn client_upload(c: &mut Criterion) {
+    let client = HttpClient::<1024>::new();
+    let request = || HttpClientRequest {
+        method: HttpMethod::PUT,
+        host: "example.com",
+        path: "/upload",
+        query: None,
+        headers: &[],
+        body: None,
+    };
+    let body = vec![b'x'; 4096];
+    let reply = b"HTTP/1.1 204 No Content\r\n\r\n";
+    let mut group = c.benchmark_group("client_upload");
+    // The chunk size drives how often the size line is formatted and written.
+    for chunk in [64, 256, 1460] {
+        group.bench_with_input(
+            BenchmarkId::new("chunked_4k", chunk),
+            &chunk,
+            |b, &chunk| {
+                let mut buffer = [0u8; 128];
+                b.iter(|| {
+                    let mut stream = Replay {
+                        input: reply,
+                        max: 1460,
+                    };
+                    let mut source = SliceSource::new(black_box(&body), chunk);
+                    let (response, used) = block_on(client.request_upload(
+                        &mut stream,
+                        request(),
+                        &mut source,
+                        &mut buffer,
+                    ))
+                    .expect("canned response parses");
+                    black_box((response.status_code, used));
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 fn server_request(c: &mut Criterion) {
     let raw =
         b"GET /health HTTP/1.1\r\nHost: device.local\r\nUser-Agent: bench\r\nAccept: */*\r\n\r\n";
@@ -136,5 +180,11 @@ fn encoders(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, client_response, server_request, encoders);
+criterion_group!(
+    benches,
+    client_response,
+    client_upload,
+    server_request,
+    encoders
+);
 criterion_main!(benches);

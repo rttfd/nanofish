@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Chunked request upload, the fourth and last chunked piece (issue #59): `HttpClient::request_upload` and `exchange_upload` (each with a `_with_retry_delay` variant), `EmbassyHttpClient::request_upload` and `EmbassyHttpSession::request_upload` send a request body from a `BodySource` piece by piece, with chunked transfer coding — no `Content-Length`, no buffering, any method. `SliceSource` sends a slice in bounded pieces. A chunked upload is fully delimited, so keep-alive connections stay reusable. With this, chunked responses in both directions (0.11.4+) and chunked requests in both directions all work.
+
 ## [0.14.2] - 2026-11-10
 
 ### Fixed
