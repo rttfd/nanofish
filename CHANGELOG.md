@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.15.1] - 2026-11-10
+## [0.16.0] - 2026-11-10
+
+### Breaking changes
+
+- The response type is split by direction. `HttpResponse` (with its text/binary `ResponseBody`) is now only the response the client receives. A handler returns a `ServerResponse`, whose body is plain bytes (`&[u8]`; text is `"…".as_bytes()` or a `b"…"` literal), built with `ServerResponseBuilder` (formerly `HttpResponseBuilder`, same methods). `build_bytes`, `build_bytes_for` and `build_head_bytes` moved to `ServerResponse`. `HttpHandler::handle_request` returns `Result<ServerResponse<'_>, Error>`.
+- `HttpResponse::get_header` is renamed `header`, matching `HttpRequest::header` and `ServerResponse::header`.
+- `Error` is `#[non_exhaustive]` and says which side failed: `InvalidRequest` for a request the server could not parse or refuses (it was `InvalidResponse`), `InvalidState` for an API used out of order such as `ResponseWriter` writes before the head or past the declared length (was `InvalidResponse`), and `FileError` for a `FileStore` that cannot produce a file (was `InvalidResponse`). `InvalidResponse` now only means a bad response from a server. `HttpRequest::parse_from`, `body_str` and `percent_decode` return `InvalidRequest`.
+- The server parses requests strictly and answers `400` to what it used to accept: bare LF line endings, whitespace before a header's colon, folded header lines, header lines without a colon, extra tokens on the request line, and versions other than `HTTP/1.0` and `HTTP/1.1`.
+- Requests with their own `Host` header, a `Content-Length` that disagrees with the body, or (outside a chunked upload) a `Transfer-Encoding` header are refused with `HeaderError`; so are server responses whose `Content-Length` disagrees with the body or that set `Transfer-Encoding` on a buffered body.
+- `handle_http_connection` and `serve_http_connection_with_sizes` return the handler's error after answering `500`, instead of `Ok(())`.
+- A handler that exceeds `ServerTimeouts::handler_timeout` gets `503 Service Unavailable` instead of `408 Request Timeout`.
+- Static file paths are percent-decoded before lookup: `/my%20file.txt` finds `/my file.txt`, and a store keyed by encoded paths no longer matches.
+- `HttpClientOptions::max_retries = 0` means one read attempt instead of none.
 
 ### Fixed
 
@@ -22,8 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A redirect that turns a `POST` into a `GET` dropped the body but kept a caller's `Content-Length`, so the server waited for bytes that never came. `Content-*` headers now go with the body.
 - Files with a gzip variant are served with `Vary: Accept-Encoding`, so a cache does not hand gzip to a client that cannot decode it.
 - The client kept bytes after a `Content-Length` body (or after the head of a body-less response) in `response.body`; the response now ends where its framing says.
-- `handle_http_connection` and `serve_http_connection_with_sizes` swallowed a handler's error after sending the `500`, although the docs said it was returned. It is now returned.
-- A handler that exceeded `ServerTimeouts::handler_timeout` was answered `408 Request Timeout`, which blames the client. It now gets `503 Service Unavailable` with `Connection: close`.
+- `handle_http_connection` and `serve_http_connection_with_sizes` swallowed a handler's error after sending the `500`, although the docs said it was returned.
+- A handler that exceeded `ServerTimeouts::handler_timeout` was answered `408 Request Timeout`, which blames the client; the `503` now also closes the connection.
 - `HttpResponseBuilder::build` deduplicated `Set-Cookie`, keeping only the last cookie. Every `Set-Cookie` is now kept.
 - A response or request whose `Content-Length` header disagrees with its buffered body, or that carries `Transfer-Encoding` with a buffered body, is refused with `HeaderError` instead of being sent with contradictory framing. A request with its own `Host` header is refused too (a second `Host` makes servers answer `400`), and a caller's `Connection` header is no longer joined by a second `Connection: close`.
 - `1xx`, `204` and `304` responses never carry a body or framing headers: `build_bytes` drops a body given to them, and `ResponseWriter` no longer sends `Content-Length: 0` on a `304` or chunked coding on a `204`.
@@ -37,9 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The server writes a buffered response body straight from the handler's slice instead of copying it into the response buffer, and error responses use a small buffer of their own instead of a second response-sized one in every connection future.
 - A `HEAD` request for a static file no longer reads the file from the store.
 - Faster CRLF searches over response and request heads; the client decodes chunked coding only when the response uses it.
+- `EmbassyHttpSession` parses each response once instead of twice, and redirect hops are decided from the status line and `Location` alone, so the final response is the only one parsed in full.
 
 ### Added
 
+- `ServerResponse`, `ServerResponseBuilder`, and `Error::InvalidRequest`, `Error::InvalidState` and `Error::FileError` (see Breaking changes).
 - `percent_decode_path`, which percent-decodes a path segment without turning `+` into a space, as `percent_decode` does for query components.
 - `headers::SET_COOKIE`.
 
@@ -467,8 +481,8 @@ HttpResponseBuilder::new()
 - Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, and CONNECT methods.
 - Configurable client options (retries, timeouts, delays).
 
-[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.15.1...HEAD
-[0.15.1]: https://github.com/rttfd/nanofish/compare/v0.15.0...v0.15.1
+[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/rttfd/nanofish/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/rttfd/nanofish/compare/v0.14.2...v0.15.0
 [0.14.2]: https://github.com/rttfd/nanofish/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/rttfd/nanofish/compare/v0.14.0...v0.14.1

@@ -50,7 +50,7 @@ mod tests {
         for piece in raw.chunks(step) {
             let mut rest = piece;
             while !rest.is_empty() && !decoder.is_done() {
-                let step = decoder.step(rest)?;
+                let step = decoder.step(rest).map_err(Error::InvalidResponse)?;
                 if let Some(range) = step.data {
                     payload.extend_from_slice(&rest[range]);
                 }

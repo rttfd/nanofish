@@ -2,9 +2,13 @@
 ///
 /// This enum represents all possible errors that can be returned by the HTTP client
 /// during various stages of request processing, from URL parsing to connection
-/// establishment and response handling.
+/// establishment and response handling, and the errors the server reports
+/// for requests it could not serve.
+///
+/// New variants may be added in minor releases, so a `match` needs a
+/// wildcard arm.
 #[derive(Debug)]
-/// All possible errors returned by the HTTP client.
+#[non_exhaustive]
 pub enum Error {
     /// The provided URL was invalid or malformed
     InvalidUrl,
@@ -20,6 +24,14 @@ pub enum Error {
     NoResponse,
     /// The server's response could not be parsed
     InvalidResponse(&'static str),
+    /// A request received by the server could not be parsed, or is framed in
+    /// a way the server refuses
+    InvalidRequest(&'static str),
+    /// An API was used out of order, for example writing a response body
+    /// before its head, or more bytes than the declared length
+    InvalidState(&'static str),
+    /// A [`FileStore`](nanofish::server::FileStore) could not produce a file
+    FileError(&'static str),
     /// This error occurs when there is an issue with the TLS handshake or communication.
     #[cfg(feature = "tls")]
     TlsError(embedded_tls::TlsError),
@@ -69,6 +81,9 @@ impl core::fmt::Display for Error {
             Self::TcpError(kind) => write!(f, "TCP communication error: {kind:?}"),
             Self::NoResponse => write!(f, "No response received from server"),
             Self::InvalidResponse(msg) => write!(f, "Invalid response: {msg}"),
+            Self::InvalidRequest(msg) => write!(f, "Invalid request: {msg}"),
+            Self::InvalidState(msg) => write!(f, "Invalid state: {msg}"),
+            Self::FileError(msg) => write!(f, "File error: {msg}"),
             #[cfg(feature = "tls")]
             Self::TlsError(_) => write!(f, "TLS error occurred"),
             Self::UnsupportedScheme(scheme) => write!(f, "Unsupported scheme: {scheme}"),
@@ -94,6 +109,12 @@ mod tests {
         assert_eq!(format!("{e}"), "No response received from server");
         let e = Error::InvalidResponse("bad");
         assert_eq!(format!("{e}"), "Invalid response: bad");
+        let e = Error::InvalidRequest("bad");
+        assert_eq!(format!("{e}"), "Invalid request: bad");
+        let e = Error::InvalidState("late");
+        assert_eq!(format!("{e}"), "Invalid state: late");
+        let e = Error::FileError("gone");
+        assert_eq!(format!("{e}"), "File error: gone");
         let e = Error::UnsupportedScheme("ftp");
         assert_eq!(format!("{e}"), "Unsupported scheme: ftp");
         let e = Error::HeaderError("too long");

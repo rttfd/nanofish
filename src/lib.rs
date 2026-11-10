@@ -58,11 +58,11 @@ pub use request::{
     HttpRequest, PathParams, QueryPair, QueryPairs, QueryValues, etag_matches, match_path,
     percent_decode, percent_decode_path,
 };
-pub use response::{HttpResponse, HttpResponseBuilder, ResponseBody};
+pub use response::{HttpResponse, ResponseBody};
 pub use server::{
-    BodyLength, DefaultHttpServer, FileStat, FileStore, HttpServer, ResponseWriter,
-    SmallHttpServer, StaticFile, StaticSite, StreamingHandler, handle_http_connection,
-    handle_http_connection_with_sizes, handle_http_stream_connection,
+    BodyLength, DefaultHttpServer, FileStat, FileStore, HttpServer, ResponseWriter, ServerResponse,
+    ServerResponseBuilder, SmallHttpServer, StaticFile, StaticSite, StreamingHandler,
+    handle_http_connection, handle_http_connection_with_sizes, handle_http_stream_connection,
     handle_http_stream_connection_with_sizes, mime_for_extension, serve,
     serve_http_connection_with_sizes, serve_with,
 };

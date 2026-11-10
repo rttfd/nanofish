@@ -12,7 +12,7 @@ use nanofish::{
     method::HttpMethod,
     protocol::{self, DOUBLE_CRLF_LEN},
     request::HttpRequest,
-    response::{HttpResponse, ResponseBody},
+    server::response::ServerResponse,
     status_code::StatusCode,
 };
 
@@ -142,7 +142,7 @@ where
 /// serialized, is returned after the client got its `500`.
 async fn answer<S, const MAX_RESPONSE_SIZE: usize>(
     stream: &mut S,
-    response: Result<HttpResponse<'_>, Error>,
+    response: Result<ServerResponse<'_>, Error>,
     method: HttpMethod,
     close: bool,
 ) -> Result<bool, Error>
@@ -262,12 +262,12 @@ fn has_connection_token(value: Option<&str>, token: &str) -> bool {
 ///
 /// # Errors
 ///
-/// The errors of [`HttpResponse::build_head_for`], including
+/// The errors of [`ServerResponse::build_head_for`], including
 /// [`Error::BufferOverflow`] when head and body together exceed
 /// `MAX_RESPONSE_SIZE`: that bound still applies, although the body is no
 /// longer copied into the buffer.
 fn persistent_head<const MAX_RESPONSE_SIZE: usize>(
-    response: &HttpResponse<'_>,
+    response: &ServerResponse<'_>,
     method: HttpMethod,
     close: bool,
 ) -> Result<(Vec<u8, MAX_RESPONSE_SIZE>, bool), Error> {
@@ -295,7 +295,7 @@ fn persistent_head<const MAX_RESPONSE_SIZE: usize>(
         close = true;
     }
 
-    let framed = HttpResponse {
+    let framed = ServerResponse {
         status_code: response.status_code,
         headers,
         body: response.body,
@@ -340,7 +340,7 @@ where
 
     // Only the request itself: bytes of a pipelined request after it are not
     // part of its body.
-    let request_end = match codec::dechunk(buffer, request_end) {
+    let request_end = match codec::dechunk_with(buffer, request_end, Error::InvalidRequest) {
         Ok(request_end) => request_end,
         Err(error) => {
             send_status(stream, StatusCode::BadRequest).await;
@@ -395,7 +395,7 @@ impl ReadFailure {
 /// # Errors
 ///
 /// - [`Error::TcpError`] if the stream fails.
-/// - [`Error::InvalidResponse`] if the peer closes the connection before the
+/// - [`Error::InvalidRequest`] if the peer closes the connection before the
 ///   request headers (or a declared body) are complete.
 /// - [`Error::BufferOverflow`] if the request does not fit in `buf`, answered
 ///   with `413` when the headers were read and `431` when they were not.
@@ -422,7 +422,7 @@ where
                 return Err(ReadFailure::silent(Error::NoResponse));
             }
             Ok(0) => {
-                return Err(ReadFailure::silent(Error::InvalidResponse(
+                return Err(ReadFailure::silent(Error::InvalidRequest(
                     "Incomplete request",
                 )));
             }
@@ -492,10 +492,10 @@ where
 const fn framing_failure(error: FramingError) -> ReadFailure {
     match error {
         FramingError::Invalid(reason) => {
-            ReadFailure::reply(Error::InvalidResponse(reason), StatusCode::BadRequest)
+            ReadFailure::reply(Error::InvalidRequest(reason), StatusCode::BadRequest)
         }
         FramingError::UnsupportedCoding => ReadFailure::reply(
-            Error::InvalidResponse("Unsupported transfer coding"),
+            Error::InvalidRequest("Unsupported transfer coding"),
             StatusCode::NotImplemented,
         ),
     }
@@ -515,10 +515,10 @@ where
     let mut headers = Vec::new();
     let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
     let _ = headers.push(HttpHeader::new(CONNECTION, "close"));
-    let response = HttpResponse {
+    let response = ServerResponse {
         status_code: status,
         headers,
-        body: ResponseBody::Text(status.text()),
+        body: status.text().as_bytes(),
     };
     if let Ok(response) = response.build_bytes::<ERROR_RESPONSE_SIZE>()
         && stream.write_all(&response).await.is_ok()
@@ -636,7 +636,7 @@ mod tests {
         async fn handle_request(
             &mut self,
             request: &HttpRequest<'_>,
-        ) -> Result<HttpResponse<'_>, Error> {
+        ) -> Result<ServerResponse<'_>, Error> {
             let mut headers = Vec::new();
             let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
             let body = if request.body == b"hello".as_slice() && request.content_length() == Some(5)
@@ -645,10 +645,10 @@ mod tests {
             } else {
                 "body-bad"
             };
-            Ok(HttpResponse {
+            Ok(ServerResponse {
                 status_code: StatusCode::Ok,
                 headers,
-                body: ResponseBody::Text(body),
+                body: body.as_bytes(),
             })
         }
     }
@@ -677,13 +677,13 @@ mod tests {
         async fn handle_request(
             &mut self,
             _request: &HttpRequest<'_>,
-        ) -> Result<HttpResponse<'_>, Error> {
+        ) -> Result<ServerResponse<'_>, Error> {
             let mut headers = Vec::new();
             let _ = headers.push(HttpHeader::new("Location", "/a\r\nSet-Cookie: evil=1"));
-            Ok(HttpResponse {
+            Ok(ServerResponse {
                 status_code: StatusCode::Found,
                 headers,
-                body: ResponseBody::Empty,
+                body: &[],
             })
         }
     }
@@ -719,7 +719,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(err, Error::InvalidResponse("Incomplete request")));
+        assert!(matches!(err, Error::InvalidRequest("Incomplete request")));
         assert!(stream.output.is_empty());
     }
 
@@ -734,7 +734,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(err, Error::InvalidResponse("Incomplete request")));
+        assert!(matches!(err, Error::InvalidRequest("Incomplete request")));
     }
 
     #[test]
@@ -842,16 +842,16 @@ mod tests {
         async fn handle_request(
             &mut self,
             request: &HttpRequest<'_>,
-        ) -> Result<HttpResponse<'_>, Error> {
+        ) -> Result<ServerResponse<'_>, Error> {
             let body = if request.body == b"hello".as_slice() {
                 "body-ok"
             } else {
                 "body-bad"
             };
-            Ok(HttpResponse {
+            Ok(ServerResponse {
                 status_code: StatusCode::Ok,
                 headers: Vec::new(),
-                body: ResponseBody::Text(body),
+                body: body.as_bytes(),
             })
         }
     }
@@ -947,7 +947,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(err, Error::InvalidResponse("Invalid chunk size")));
+        assert!(matches!(err, Error::InvalidRequest("Invalid chunk size")));
         assert_status(&stream.output, "400 Bad Request");
     }
 
@@ -967,7 +967,7 @@ mod tests {
             )
             .unwrap_err();
 
-            assert!(matches!(err, Error::InvalidResponse(_)));
+            assert!(matches!(err, Error::InvalidRequest(_)));
             assert_status(&stream.output, "400 Bad Request");
         }
     }
@@ -993,7 +993,7 @@ mod tests {
                 .unwrap_err();
 
             assert!(
-                matches!(err, Error::InvalidResponse("Unsupported transfer coding")),
+                matches!(err, Error::InvalidRequest("Unsupported transfer coding")),
                 "{coding}"
             );
             assert_status(&stream.output, "501 Not Implemented");
@@ -1041,8 +1041,8 @@ mod tests {
         async fn handle_request(
             &mut self,
             request: &HttpRequest<'_>,
-        ) -> Result<HttpResponse<'_>, Error> {
-            let builder = nanofish::HttpResponseBuilder::new();
+        ) -> Result<ServerResponse<'_>, Error> {
+            let builder = nanofish::ServerResponseBuilder::new();
             if request.if_none_match("\"v1\"") {
                 builder
                     .status(StatusCode::NotModified)
@@ -1159,8 +1159,8 @@ mod tests {
         async fn handle_request(
             &mut self,
             request: &HttpRequest<'_>,
-        ) -> Result<HttpResponse<'_>, Error> {
-            let builder = nanofish::HttpResponseBuilder::new();
+        ) -> Result<ServerResponse<'_>, Error> {
+            let builder = nanofish::ServerResponseBuilder::new();
             match request.route_path() {
                 "/" => builder.text("hi").build(),
                 "/empty" => builder.build(),
@@ -1332,14 +1332,14 @@ mod tests {
                 10,
             ))
             .unwrap_err();
-        assert!(matches!(err, Error::InvalidResponse("Incomplete request")));
+        assert!(matches!(err, Error::InvalidRequest("Incomplete request")));
     }
 
     #[test]
     fn test_keep_alive_errors_are_still_answered() {
         let bad: [&[u8]; 2] = [GET_ROOT, b"GARBAGE\r\n\r\n"];
         let (result, _, output) = serve_keep_alive::<1024>(&bad, 10);
-        assert!(matches!(result, Err(Error::InvalidResponse(_))));
+        assert!(matches!(result, Err(Error::InvalidRequest(_))));
         assert!(output.ends_with("Bad Request"), "{output}");
         assert!(output.contains("HTTP/1.1 400 Bad Request\r\n"));
     }
@@ -1360,7 +1360,7 @@ mod tests {
                 )
                 .unwrap_err();
 
-            assert!(matches!(err, Error::InvalidResponse(_)));
+            assert!(matches!(err, Error::InvalidRequest(_)));
             assert_status(&stream.output, "400 Bad Request");
         }
     }
@@ -1372,7 +1372,7 @@ mod tests {
         async fn handle_request(
             &mut self,
             _request: &HttpRequest<'_>,
-        ) -> Result<HttpResponse<'_>, Error> {
+        ) -> Result<ServerResponse<'_>, Error> {
             Err(Error::NoResponse)
         }
     }
@@ -1434,14 +1434,12 @@ mod tests {
         async fn handle_request(
             &mut self,
             _request: &HttpRequest<'_>,
-        ) -> Result<HttpResponse<'_>, Error> {
-            Ok(HttpResponse {
+        ) -> Result<ServerResponse<'_>, Error> {
+            Ok(ServerResponse {
                 status_code: StatusCode::Ok,
                 headers: Vec::new(),
-                body: ResponseBody::Text(
-                    "0123456789012345678901234567890123456789012345678901234567890123456789\
+                body: b"0123456789012345678901234567890123456789012345678901234567890123456789\
                      0123456789012345678901234567890123456789012345678901234567890123456789",
-                ),
             })
         }
     }
@@ -1457,7 +1455,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(err, Error::InvalidResponse("Incomplete request")));
+        assert!(matches!(err, Error::InvalidRequest("Incomplete request")));
         assert!(stream.output.is_empty());
     }
 

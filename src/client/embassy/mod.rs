@@ -980,16 +980,14 @@ impl<'a, const RQ: usize> EmbassyHttpSession<'a, RQ> {
                     body,
                 };
                 client
-                    .exchange_with_retry_delay(socket, request, &mut *buffer, true, || {
-                        delay(retry_delay)
-                    })
+                    .exchange_raw(socket, request, &mut *buffer, true, || delay(retry_delay))
                     .await
-                    .map(|exchange| (exchange.used, exchange.reusable))
+                    .map(|raw| (raw.used, raw.reusable))
             },
         );
         let used = within_total_timeout(total_timeout, attempt).await;
         let used = self.settle(used)?;
-        // The response is parsed again from the buffer that now holds it.
+        // The attempts only read; the one response returned is parsed once.
         Ok((codec::parse_resp(&response_buffer[..used])?, used))
     }
 
@@ -1037,20 +1035,15 @@ impl<'a, const RQ: usize> EmbassyHttpSession<'a, RQ> {
                 body: None,
             };
             client
-                .exchange_upload_with_retry_delay(
-                    socket,
-                    request,
-                    source,
-                    &mut *buffer,
-                    true,
-                    || delay(retry_delay),
-                )
+                .exchange_upload_raw(socket, request, source, &mut *buffer, true, || {
+                    delay(retry_delay)
+                })
                 .await
-                .map(|exchange| (exchange.used, exchange.reusable))
+                .map(|raw| (raw.used, raw.reusable))
         });
         let used = within_total_timeout(total_timeout, attempt).await;
         let used = self.settle(used)?;
-        // The response is parsed again from the buffer that now holds it.
+        // The attempts only read; the one response returned is parsed once.
         Ok((codec::parse_resp(&response_buffer[..used])?, used))
     }
 

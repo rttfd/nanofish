@@ -9,7 +9,7 @@ use nanofish::{
     header::{headers::CONNECTION, mime_types},
     options::TimeoutDuration,
     request::HttpRequest,
-    response::{HttpResponse, HttpResponseBuilder},
+    server::response::{ServerResponse, ServerResponseBuilder},
     server::{
         StreamingHandler, handle_http_connection_with_sizes,
         handle_http_stream_connection_with_sizes, serve_http_connection_with_sizes,
@@ -306,7 +306,7 @@ where
     async fn handle_request(
         &mut self,
         request: &HttpRequest<'_>,
-    ) -> Result<HttpResponse<'_>, Error> {
+    ) -> Result<ServerResponse<'_>, Error> {
         match with_timeout(
             Duration::from_millis(self.timeout.as_millis()),
             self.inner.handle_request(request),
@@ -324,7 +324,7 @@ where
                 // `408 Request Timeout`, which blames the client. The
                 // connection closes, since the abandoned handler may have
                 // left it mid-way.
-                HttpResponseBuilder::new()
+                ServerResponseBuilder::new()
                     .status(StatusCode::ServiceUnavailable)
                     .content_type(mime_types::TEXT)?
                     .header(CONNECTION, "close")?

@@ -11,8 +11,8 @@ use nanofish::{
     method::HttpMethod,
     protocol::MAX_HEADERS,
     request::HttpRequest,
-    response::{HttpResponse, ResponseBody},
     server::io::{DEFAULT_REQUEST_SIZE, DEFAULT_RESPONSE_SIZE, receive_request},
+    server::response::ServerResponse,
     status_code::StatusCode,
 };
 
@@ -141,10 +141,10 @@ where
         all.push(HttpHeader::connection("close"))
             .map_err(|_| Error::HeaderError("Too many headers"))?;
 
-        let head = HttpResponse {
+        let head = ServerResponse {
             status_code: status,
             headers: all,
-            body: ResponseBody::Empty,
+            body: &[],
         }
         .build_head_bytes::<HEAD_SIZE>()?;
 
@@ -159,18 +159,18 @@ where
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidResponse`] if the head was not sent, the response
+    /// - [`Error::InvalidState`] if the head was not sent, the response
     ///   is finished, or `data` would exceed a declared [`BodyLength::Known`].
     /// - [`Error::TcpError`] if the stream fails.
     pub async fn write(&mut self, data: &[u8]) -> Result<(), Error> {
         match self.state {
             BodyState::NotStarted => {
-                return Err(Error::InvalidResponse("Response head not sent"));
+                return Err(Error::InvalidState("Response head not sent"));
             }
-            BodyState::Finished => return Err(Error::InvalidResponse("Response already finished")),
+            BodyState::Finished => return Err(Error::InvalidState("Response already finished")),
             BodyState::Known(remaining) => {
                 if data.len() > remaining {
-                    return Err(Error::InvalidResponse(
+                    return Err(Error::InvalidState(
                         "Response body longer than its Content-Length",
                     ));
                 }
@@ -208,16 +208,16 @@ where
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidResponse`] if the head was not sent, or fewer bytes
+    /// - [`Error::InvalidState`] if the head was not sent, or fewer bytes
     ///   than a declared [`BodyLength::Known`] were written (the connection
     ///   must be dropped then: the peer is still waiting for the rest).
     /// - [`Error::TcpError`] if the stream fails.
     pub async fn finish(&mut self) -> Result<(), Error> {
         match self.state {
-            BodyState::NotStarted => return Err(Error::InvalidResponse("Response head not sent")),
+            BodyState::NotStarted => return Err(Error::InvalidState("Response head not sent")),
             BodyState::Finished => return Ok(()),
             BodyState::Known(remaining) if remaining > 0 => {
-                return Err(Error::InvalidResponse(
+                return Err(Error::InvalidState(
                     "Response body shorter than its Content-Length",
                 ));
             }
@@ -518,7 +518,7 @@ mod tests {
                     response.finish().await?;
                     assert!(matches!(
                         response.write(b"late").await,
-                        Err(Error::InvalidResponse("Response already finished"))
+                        Err(Error::InvalidState("Response already finished"))
                     ));
                     Ok(())
                 }
@@ -626,7 +626,7 @@ mod tests {
         let (result, stream) = serve(GET, Scenario::WriteBeforeHead);
         assert!(matches!(
             result,
-            Err(Error::InvalidResponse("Response head not sent"))
+            Err(Error::InvalidState("Response head not sent"))
         ));
         // The handler failed before any head: the client gets a 500.
         assert!(
@@ -638,7 +638,7 @@ mod tests {
         let (result, stream) = serve(GET, Scenario::TooLong);
         assert!(matches!(
             result,
-            Err(Error::InvalidResponse(
+            Err(Error::InvalidState(
                 "Response body longer than its Content-Length"
             ))
         ));
@@ -652,7 +652,7 @@ mod tests {
         let (result, stream) = serve(GET, Scenario::TooShort);
         assert!(matches!(
             result,
-            Err(Error::InvalidResponse(
+            Err(Error::InvalidState(
                 "Response body shorter than its Content-Length"
             ))
         ));
@@ -719,7 +719,7 @@ mod tests {
     #[test]
     fn test_bad_requests_are_answered_before_the_handler() {
         let (result, stream) = serve(b"GARBAGE\r\n\r\n", Scenario::Known);
-        assert!(matches!(result, Err(Error::InvalidResponse(_))));
+        assert!(matches!(result, Err(Error::InvalidRequest(_))));
         assert!(stream.output().starts_with("HTTP/1.1 400 Bad Request\r\n"));
     }
 

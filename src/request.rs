@@ -205,10 +205,10 @@ impl<'a> HttpRequest<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `Error::InvalidResponse` if the body is not valid UTF-8.
+    /// Returns `Error::InvalidRequest` if the body is not valid UTF-8.
     pub fn body_str(&self) -> Result<&'a str, Error> {
         core::str::from_utf8(self.body)
-            .map_err(|_| Error::InvalidResponse("Invalid UTF-8 in request body"))
+            .map_err(|_| Error::InvalidRequest("Invalid UTF-8 in request body"))
     }
 
     /// Get the `Content-Type` header value.
@@ -246,29 +246,29 @@ impl<'a> HttpRequest<'a> {
         // Parse request line
         let request_line = lines
             .next()
-            .ok_or(Error::InvalidResponse("Missing request line"))?;
+            .ok_or(Error::InvalidRequest("Missing request line"))?;
         let mut parts = request_line.split(' ');
 
         let method_str = parts
             .next()
             .filter(|method| !method.is_empty())
-            .ok_or(Error::InvalidResponse("Missing method"))?;
+            .ok_or(Error::InvalidRequest("Missing method"))?;
         let path = parts
             .next()
             .filter(|path| protocol::is_valid_request_token(path))
-            .ok_or(Error::InvalidResponse("Missing path"))?;
+            .ok_or(Error::InvalidRequest("Missing path"))?;
         let version = parts
             .next()
-            .ok_or(Error::InvalidResponse("Missing version"))?;
+            .ok_or(Error::InvalidRequest("Missing version"))?;
         if parts.next().is_some() {
-            return Err(Error::InvalidResponse("Malformed request line"));
+            return Err(Error::InvalidRequest("Malformed request line"));
         }
         if version != "HTTP/1.1" && version != "HTTP/1.0" {
-            return Err(Error::InvalidResponse("Unsupported HTTP version"));
+            return Err(Error::InvalidRequest("Unsupported HTTP version"));
         }
 
         let method = HttpMethod::try_from(method_str)
-            .map_err(|_| Error::InvalidResponse("Unknown HTTP method"))?;
+            .map_err(|_| Error::InvalidRequest("Unknown HTTP method"))?;
 
         // Parse headers
         let mut headers = Vec::new();
@@ -277,23 +277,23 @@ impl<'a> HttpRequest<'a> {
                 break;
             }
             if line.contains(['\r', '\n']) {
-                return Err(Error::InvalidResponse("Bare CR or LF in request head"));
+                return Err(Error::InvalidRequest("Bare CR or LF in request head"));
             }
 
             let (name, value) = line
                 .split_once(':')
-                .ok_or(Error::InvalidResponse("Malformed header line"))?;
+                .ok_or(Error::InvalidRequest("Malformed header line"))?;
             if !protocol::is_valid_header_name(name) {
-                return Err(Error::InvalidResponse("Invalid header name"));
+                return Err(Error::InvalidRequest("Invalid header name"));
             }
             let value = value.trim_matches([' ', '\t']);
             if !protocol::is_valid_header_value(value) {
-                return Err(Error::InvalidResponse("Invalid header value"));
+                return Err(Error::InvalidRequest("Invalid header value"));
             }
 
             headers
                 .push(HttpHeader::new(name, value))
-                .map_err(|_| Error::InvalidResponse("Too many headers"))?;
+                .map_err(|_| Error::InvalidRequest("Too many headers"))?;
         }
 
         Ok(HttpRequest {
@@ -312,11 +312,11 @@ impl<'a> TryFrom<&'a [u8]> for HttpRequest<'a> {
     fn try_from(buffer: &'a [u8]) -> Result<Self, Self::Error> {
         // Find the end of headers (double CRLF)
         let end_of_headers = protocol::find_double_crlf(buffer)
-            .ok_or(Error::InvalidResponse("Incomplete request headers"))?;
+            .ok_or(Error::InvalidRequest("Incomplete request headers"))?;
 
         // Parse the headers string
         let headers_str = core::str::from_utf8(&buffer[..end_of_headers])
-            .map_err(|_| Error::InvalidResponse("Invalid UTF-8 in request"))?;
+            .map_err(|_| Error::InvalidRequest("Invalid UTF-8 in request"))?;
 
         // Body starts after the double CRLF
         let body = &buffer[end_of_headers + DOUBLE_CRLF_LEN..];
@@ -454,7 +454,7 @@ fn split_segment(path: &str) -> (&str, Option<&str>) {
 /// # Errors
 ///
 /// Returns `Error::BufferOverflow` when `out` is too small, or
-/// `Error::InvalidResponse` for malformed percent escapes or invalid UTF-8.
+/// `Error::InvalidRequest` for malformed percent escapes or invalid UTF-8.
 pub fn percent_decode<'a>(input: &str, out: &'a mut [u8]) -> Result<&'a str, Error> {
     decode_percent(input, out, true)
 }
@@ -485,12 +485,12 @@ fn decode_percent<'a>(
             b'%' => {
                 let hi = bytes
                     .next()
-                    .ok_or(Error::InvalidResponse("Incomplete percent escape"))?;
+                    .ok_or(Error::InvalidRequest("Incomplete percent escape"))?;
                 let lo = bytes
                     .next()
-                    .ok_or(Error::InvalidResponse("Incomplete percent escape"))?;
-                (hex_value(hi).ok_or(Error::InvalidResponse("Invalid percent escape"))? << 4)
-                    | hex_value(lo).ok_or(Error::InvalidResponse("Invalid percent escape"))?
+                    .ok_or(Error::InvalidRequest("Incomplete percent escape"))?;
+                (hex_value(hi).ok_or(Error::InvalidRequest("Invalid percent escape"))? << 4)
+                    | hex_value(lo).ok_or(Error::InvalidRequest("Invalid percent escape"))?
             }
             byte => byte,
         };
@@ -501,7 +501,7 @@ fn decode_percent<'a>(
     }
 
     core::str::from_utf8(&out[..written])
-        .map_err(|_| Error::InvalidResponse("Invalid UTF-8 in percent-decoded value"))
+        .map_err(|_| Error::InvalidRequest("Invalid UTF-8 in percent-decoded value"))
 }
 
 fn query_name_matches_index(query_name: &str, name: &str, index: usize) -> bool {

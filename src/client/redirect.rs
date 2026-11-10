@@ -8,7 +8,7 @@ use nanofish::{
     error::Error,
     header::{HttpHeader, headers},
     method::HttpMethod,
-    protocol::MAX_HEADERS,
+    protocol::{self, CRLF_STR, MAX_HEADERS},
     response::HttpResponse,
     status_code::StatusCode,
 };
@@ -141,6 +141,22 @@ fn push_relative_path<const N: usize>(
     Ok(())
 }
 
+/// The value of the first header called `name` in the message head in
+/// `data`, without parsing the rest of the message.
+fn head_value<'d>(data: &'d [u8], name: &str) -> Option<&'d str> {
+    let head_end = protocol::find_double_crlf(data).unwrap_or(data.len());
+    let head = core::str::from_utf8(&data[..head_end]).ok()?;
+    // The status line has no colon before its first space, so it never
+    // matches a header name.
+    head.split(CRLF_STR).skip(1).find_map(|line| {
+        let (header, value) = line.split_once(':')?;
+        header
+            .trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim())
+    })
+}
+
 /// Headers that must not follow a redirect to a different origin.
 fn is_sensitive(name: &str) -> bool {
     [headers::AUTHORIZATION, "Cookie", "Proxy-Authorization"]
@@ -218,19 +234,17 @@ where
 
         // Decide in a scope of its own: the response borrows the buffer, which
         // the next hop reuses.
-        let redirect = {
-            let response = codec::parse_resp(&buffer[..used])?;
-            if is_redirect(response.status_code) {
-                response
-                    .get_header(headers::LOCATION)
-                    .map(|location| {
-                        resolve_location::<REDIRECT_URL_SIZE>(&parse_endpoint(target)?, location)
-                            .map(|url| (response.status_code, url))
-                    })
-                    .transpose()?
-            } else {
-                None
-            }
+        // Only the status line and `Location` decide; the response is
+        // parsed in full once, when it is the final one.
+        let head = &buffer[..used];
+        let redirect = match codec::status_code(head).map(StatusCode::from) {
+            Some(status) if is_redirect(status) => head_value(head, headers::LOCATION)
+                .map(|location| {
+                    resolve_location::<REDIRECT_URL_SIZE>(&parse_endpoint(target)?, location)
+                        .map(|url| (status, url))
+                })
+                .transpose()?,
+            _ => None,
         };
         let Some((status, url)) = redirect else {
             break used;

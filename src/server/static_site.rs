@@ -152,18 +152,16 @@ impl<const N: usize> FileStore for StaticSite<N> {
         offset: usize,
         buf: &mut [u8],
     ) -> Result<usize, Error> {
-        let file = self
-            .find(path)
-            .ok_or(Error::InvalidResponse("No such file"))?;
+        let file = self.find(path).ok_or(Error::FileError("No such file"))?;
         let body = if gzip {
-            file.gzip.ok_or(Error::InvalidResponse("No gzip variant"))?
+            file.gzip.ok_or(Error::FileError("No gzip variant"))?
         } else {
             file.body
         };
         let end = (offset + buf.len()).min(body.len());
         let slice = body
             .get(offset..end)
-            .ok_or(Error::InvalidResponse("Read past the end of the file"))?;
+            .ok_or(Error::FileError("Read past the end of the file"))?;
         buf[..slice.len()].copy_from_slice(slice);
         Ok(slice.len())
     }
@@ -309,7 +307,7 @@ fn header_list<'h>(
 ///
 /// - The errors of [`ResponseWriter::send_head`], [`ResponseWriter::write`]
 ///   and [`ResponseWriter::finish`], plus the store's read errors.
-/// - [`Error::InvalidResponse`] when a store ends a file before its `len`.
+/// - [`Error::FileError`] when a store ends a file before its `len`.
 /// - [`Error::BufferOverflow`] when the file is non-empty but `buf` is empty.
 #[expect(
     clippy::future_not_send,
@@ -424,9 +422,7 @@ where
         while offset < len {
             let n = store.read(&path, serving_gzip, offset, buf).await?;
             if n == 0 {
-                return Err(Error::InvalidResponse(
-                    "Static file ended before its length",
-                ));
+                return Err(Error::FileError("Static file ended before its length"));
             }
             response.write(&buf[..n]).await?;
             offset += n;
@@ -869,7 +865,7 @@ mod tests {
             _offset: usize,
             _buf: &mut [u8],
         ) -> Result<usize, Error> {
-            Err(Error::InvalidResponse("HEAD must not read"))
+            Err(Error::FileError("HEAD must not read"))
         }
     }
 

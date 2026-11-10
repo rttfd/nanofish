@@ -38,36 +38,36 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 ### Core HTTP Support (Default, No Embassy)
 ```toml
 [dependencies]
-nanofish = "0.14"
+nanofish = "0.16"
 ```
 
 ### With TLS/HTTPS Support
 ```toml
 [dependencies]
-nanofish = { version = "0.14", features = ["tls"] }
+nanofish = { version = "0.16", features = ["tls"] }
 ```
 
 ### With Embassy Client/Server Integration
 ```toml
 [dependencies]
-nanofish = { version = "0.14", features = ["embassy"] }
+nanofish = { version = "0.16", features = ["embassy"] }
 ```
 
 ### With smoltcp Socket Adapter
 ```toml
 [dependencies]
-nanofish = { version = "0.14", features = ["smoltcp"] }
+nanofish = { version = "0.16", features = ["smoltcp"] }
 ```
 
 ### With Logging
 ```toml
 # Using defmt (common in embedded/probe-based workflows)
 [dependencies]
-nanofish = { version = "0.14", features = ["defmt"] }
+nanofish = { version = "0.16", features = ["defmt"] }
 
 # Using the log crate (common in std or defmt-incompatible environments)
 [dependencies]
-nanofish = { version = "0.14", features = ["log"] }
+nanofish = { version = "0.16", features = ["log"] }
 ```
 
 > **Note:** The `defmt` and `log` features are **mutually exclusive**. Enabling both will produce a compile-time error. If neither is enabled, all logging calls are compiled away to no-ops.
@@ -485,29 +485,29 @@ where
 This example uses the Embassy-backed server (`features = ["embassy"]`).
 
 ```rust,ignore
-use nanofish::{DefaultEmbassyHttpServer, HttpHandler, HttpRequest, HttpResponse, ResponseBody, StatusCode};
+use nanofish::{DefaultEmbassyHttpServer, HttpHandler, HttpRequest, ServerResponse, StatusCode};
 use embassy_net::Stack;
 
 // Create a simple request handler
 struct MyHandler;
 
 impl HttpHandler for MyHandler {
-    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, nanofish::Error> {
+    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<ServerResponse<'_>, nanofish::Error> {
         match request.path {
-            "/" => Ok(HttpResponse {
+            "/" => Ok(ServerResponse {
                 status_code: StatusCode::Ok,
                 headers: Vec::new(),
-                body: ResponseBody::Text("<h1>Hello World!</h1>"),
+                body: b"<h1>Hello World!</h1>",
             }),
-            "/api/status" => Ok(HttpResponse {
+            "/api/status" => Ok(ServerResponse {
                 status_code: StatusCode::Ok,
                 headers: Vec::new(),
-                body: ResponseBody::Text("{\"status\":\"ok\"}"),
+                body: b"{\"status\":\"ok\"}",
             }),
-            _ => Ok(HttpResponse {
+            _ => Ok(ServerResponse {
                 status_code: StatusCode::NotFound,
                 headers: Vec::new(),
-                body: ResponseBody::Text("Not Found"),
+                body: b"Not Found",
             }),
         }
     }
@@ -551,31 +551,33 @@ Each task costs its RX and TX buffers (4 KB each with `DefaultEmbassyHttpServer`
 
 ### Response Builder
 
-Use `HttpResponseBuilder` to construct responses with a fluent API:
+Use `ServerResponseBuilder` to construct a `ServerResponse` with a fluent API. (Responses
+the client receives are `HttpResponse`s; responses a handler returns are `ServerResponse`s, whose
+body is plain bytes.)
 
 ```rust,ignore
-use nanofish::{HttpResponseBuilder, HttpHandler, HttpRequest, StatusCode, mime_types};
+use nanofish::{HttpHandler, HttpRequest, ServerResponse, ServerResponseBuilder, StatusCode, mime_types};
 
 struct ApiHandler;
 
 impl HttpHandler for ApiHandler {
-    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, nanofish::Error> {
-        match request.path {
-            "/api/health" => HttpResponseBuilder::new().json(r#"{"status":"ok"}"#)?.build()?,
-            "/"           => HttpResponseBuilder::new()
+    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<ServerResponse<'_>, nanofish::Error> {
+        Ok(match request.path {
+            "/api/health" => ServerResponseBuilder::new().json(r#"{"status":"ok"}"#)?.build()?,
+            "/"           => ServerResponseBuilder::new()
                                 .content_type(mime_types::TEXT)?
                                 .text("Hello from nanofish!")
                                 .build()?,
-            "/bad"        => HttpResponseBuilder::new()
+            "/bad"        => ServerResponseBuilder::new()
                                 .status(StatusCode::BadRequest)
                                 .problem_json(r#"{"type":"https://example.com/probs/invalid","title":"Invalid parameter"}"#)?
                                 .build()?,
-            _             => HttpResponseBuilder::new()
+            _             => ServerResponseBuilder::new()
                                 .status(StatusCode::NotFound)
                                 .content_type(mime_types::TEXT)?
                                 .text("Not Found")
                                 .build()?,
-        }
+        })
     }
 }
 ```
@@ -590,12 +592,12 @@ impl HttpHandler for ApiHandler {
 | `binary(data)` | Set binary body |
 | `empty_body()` | Set empty body |
 | `header(name, value)` | Add custom header |
-| `build()` → `Result<HttpResponse>` | Build with header dedup (last wins) |
+| `build()` → `Result<ServerResponse>` | Build with header dedup (last wins, every `Set-Cookie` kept) |
 
 ### Dynamic Responses
 
 ```rust,ignore
-use nanofish::{HttpHandler, HttpRequest, HttpResponse, ResponseBody, StatusCode, HttpHeader};
+use nanofish::{HttpHandler, HttpRequest, ServerResponse, StatusCode, HttpHeader};
 use heapless::String;
 use core::fmt::Write;
 
@@ -611,7 +613,7 @@ impl DynamicHandler {
 }
 
 impl HttpHandler for DynamicHandler {
-    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, nanofish::Error> {
+    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<ServerResponse<'_>, nanofish::Error> {
         match request.path {
             "/api/counter" => {
                 self.counter += 1;
@@ -621,17 +623,17 @@ impl HttpHandler for DynamicHandler {
                 let mut headers = heapless::Vec::new();
                 let _ = headers.push(HttpHeader::content_type(nanofish::mime_types::JSON));
 
-                Ok(HttpResponse {
+                Ok(ServerResponse {
                     status_code: StatusCode::Ok,
                     headers,
-                    body: ResponseBody::Text(&self.buffer),
+                    body: self.buffer.as_bytes(),
                 })
             }
             _ => {
-                Ok(HttpResponse {
+                Ok(ServerResponse {
                     status_code: StatusCode::NotFound,
                     headers: heapless::Vec::new(),
-                    body: ResponseBody::Empty,
+                    body: &[],
                 })
             }
         }
@@ -685,7 +687,7 @@ Your handler receives detailed information about each request:
 
 ```rust,ignore
 impl HttpHandler for MyHandler {
-    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, nanofish::Error> {
+    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<ServerResponse<'_>, nanofish::Error> {
         // Check the HTTP method
         match request.method {
             HttpMethod::GET => { /* handle GET */ }
@@ -707,7 +709,7 @@ impl HttpHandler for MyHandler {
         }
         
         // Return your response...
-        Ok(HttpResponse { /* ... */ })
+        Ok(ServerResponse { /* ... */ })
     }
 }
 ```
@@ -789,12 +791,12 @@ is refused. `total_timeout` bounds the whole chain.
 status line and headers plus one piece of the body. A chunked body is decoded on the fly.
 
 ```rust,ignore
-use nanofish::{BodySink, Error, HttpResponse};
+use nanofish::{BodySink, Error, ServerResponse};
 
 struct Flash { written: usize }
 
 impl BodySink for Flash {
-    async fn head(&mut self, response: &HttpResponse<'_>) -> Result<(), Error> {
+    async fn head(&mut self, response: &ServerResponse<'_>) -> Result<(), Error> {
         // Refuse anything but a complete image before touching flash.
         if response.status_code != nanofish::StatusCode::Ok {
             return Err(Error::InvalidResponse("unexpected status"));
@@ -903,15 +905,15 @@ Any `TlsVerifier` works, including your own that compares the certificate with a
 
 ```rust,ignore
 impl HttpHandler for Api {
-    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<HttpResponse<'_>, Error> {
+    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<ServerResponse<'_>, Error> {
         if let Some(params) = request.match_path::<2>("/led/:id") {
             let id = params.get("id");
             // ...
         }
         if request.if_none_match("\"v7\"") {
-            return HttpResponseBuilder::new().status(StatusCode::NotModified).etag("\"v7\"")?.build();
+            return ServerResponseBuilder::new().status(StatusCode::NotModified).etag("\"v7\"")?.build();
         }
-        HttpResponseBuilder::new().etag("\"v7\"")?.text("hello").build()
+        ServerResponseBuilder::new().etag("\"v7\"")?.text("hello").build()
     }
 }
 ```

@@ -378,7 +378,7 @@ pub fn is_interim(data: &[u8]) -> bool {
 }
 
 /// Numeric status code from the status line, if it is present and valid.
-fn status_code(data: &[u8]) -> Option<u16> {
+pub fn status_code(data: &[u8]) -> Option<u16> {
     let line_end = protocol::find_crlf(data)?;
     core::str::from_utf8(&data[..line_end])
         .ok()?
@@ -476,8 +476,10 @@ impl ChunkDecoder {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidResponse`] for malformed framing.
-    pub fn step(&mut self, input: &[u8]) -> Result<Step, Error> {
+    /// Why the framing is malformed. The caller wraps it in the error for its
+    /// side: [`Error::InvalidRequest`] on the server,
+    /// [`Error::InvalidResponse`] on the client.
+    pub fn step(&mut self, input: &[u8]) -> Result<Step, &'static str> {
         let mut pos = 0;
         while pos < input.len() {
             if let ChunkState::Data(remaining) = self.state {
@@ -506,9 +508,9 @@ impl ChunkDecoder {
     }
 
     /// The state after one framing byte (anything but chunk data).
-    fn next(state: ChunkState, byte: u8) -> Result<ChunkState, Error> {
-        const INVALID_SIZE: Error = Error::InvalidResponse("Invalid chunk size");
-        const TOO_LONG: Error = Error::InvalidResponse("Chunk size line too long");
+    fn next(state: ChunkState, byte: u8) -> Result<ChunkState, &'static str> {
+        const INVALID_SIZE: &str = "Invalid chunk size";
+        const TOO_LONG: &str = "Chunk size line too long";
 
         let line_len = |len: usize| {
             if len < MAX_SIZE_LINE {
@@ -567,17 +569,17 @@ impl ChunkDecoder {
             ChunkState::DataEnd(seen) => match (seen, byte) {
                 (0, b'\r') => ChunkState::DataEnd(1),
                 (1, b'\n') => ChunkState::SIZE_LINE,
-                _ => return Err(Error::InvalidResponse("Invalid chunk terminator")),
+                _ => return Err("Invalid chunk terminator"),
             },
             ChunkState::Trailer(len) => match byte {
                 b'\r' => ChunkState::TrailerLf(len == 0),
-                b'\n' => return Err(Error::InvalidResponse("Invalid chunk trailer")),
+                b'\n' => return Err("Invalid chunk trailer"),
                 _ => ChunkState::Trailer(len + 1),
             },
             ChunkState::TrailerLf(empty) => match byte {
                 b'\n' if empty => ChunkState::Done,
                 b'\n' => ChunkState::Trailer(0),
-                _ => return Err(Error::InvalidResponse("Invalid chunk trailer")),
+                _ => return Err("Invalid chunk trailer"),
             },
             ChunkState::Data(_) | ChunkState::Done => state,
         })
@@ -928,29 +930,44 @@ pub fn request_framing(header_bytes: &[u8]) -> Result<Framing, FramingError> {
     }
 }
 
-/// Decode a chunked message in place: the payload is moved right behind the
-/// headers and the new length of the message is returned. A message that is
-/// not chunked is left as it is.
+/// Decode a chunked response in place: the payload is moved right behind the
+/// headers and the new length of the response is returned. A response that
+/// is not chunked is left as it is.
 ///
 /// # Errors
 ///
 /// [`Error::InvalidResponse`] if the head is incomplete, the framing is
 /// malformed, or the body ends before its last chunk and final empty line.
+#[cfg(test)]
 pub fn dechunk(buffer: &mut [u8], total_read: usize) -> Result<usize, Error> {
+    dechunk_with(buffer, total_read, Error::InvalidResponse)
+}
+
+/// Like [`dechunk`], for a message of either direction: `error` builds the
+/// error from the reason, [`Error::InvalidRequest`] for a request the server
+/// received, [`Error::InvalidResponse`] for a response the client received.
+///
+/// # Errors
+///
+/// `error` with the reason the message cannot be decoded.
+pub fn dechunk_with(
+    buffer: &mut [u8],
+    total_read: usize,
+    error: fn(&'static str) -> Error,
+) -> Result<usize, Error> {
     let data = &buffer[..total_read];
     if !chunked(data) {
         return Ok(total_read);
     }
 
-    let headers_end = protocol::find_double_crlf(data)
-        .ok_or(Error::InvalidResponse("Invalid HTTP response format"))?
-        + DOUBLE_CRLF_LEN;
+    let headers_end =
+        protocol::find_double_crlf(data).ok_or_else(|| error("Incomplete head"))? + DOUBLE_CRLF_LEN;
 
     let mut decoder = ChunkDecoder::new();
     let mut read_pos = headers_end;
     let mut write_pos = headers_end;
     while read_pos < total_read && !decoder.is_done() {
-        let step = decoder.step(&buffer[read_pos..total_read])?;
+        let step = decoder.step(&buffer[read_pos..total_read]).map_err(error)?;
         if let Some(range) = step.data {
             let (start, end) = (read_pos + range.start, read_pos + range.end);
             if write_pos != start {
@@ -961,7 +978,7 @@ pub fn dechunk(buffer: &mut [u8], total_read: usize) -> Result<usize, Error> {
         read_pos += step.consumed;
     }
     if !decoder.is_done() {
-        return Err(Error::InvalidResponse("Incomplete chunked body"));
+        return Err(error("Incomplete chunked body"));
     }
     Ok(write_pos)
 }
@@ -998,6 +1015,17 @@ fn chunked(data: &[u8]) -> bool {
         transfer_codings(headers_str)
             .last()
             .is_some_and(|coding| coding.eq_ignore_ascii_case(CHUNKED))
+    })
+}
+
+/// Whether the message head in `data` has a `Connection` header listing
+/// `close`.
+pub fn asks_to_close(data: &[u8]) -> bool {
+    let head_end = protocol::find_double_crlf(data).unwrap_or(data.len());
+    core::str::from_utf8(&data[..head_end]).is_ok_and(|head| {
+        header_values(head, CONNECTION)
+            .flat_map(|value| value.split(','))
+            .any(|token| token.trim().eq_ignore_ascii_case("close"))
     })
 }
 

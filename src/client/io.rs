@@ -163,15 +163,25 @@ pub struct Exchange<'b> {
     pub reusable: bool,
 }
 
-/// Whether the response asks for the connection to be closed.
-fn wants_close(response: &HttpResponse<'_>) -> bool {
-    response
-        .get_header(nanofish::header::headers::CONNECTION)
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .any(|token| token.trim().eq_ignore_ascii_case("close"))
+/// A response read into a buffer but not parsed yet; see
+/// [`HttpClient::exchange_raw`].
+#[derive(Debug, Clone, Copy)]
+pub struct RawExchange {
+    /// How many bytes of the response buffer hold the response.
+    pub used: usize,
+    /// Whether the stream may carry another request.
+    pub reusable: bool,
+}
+
+impl RawExchange {
+    /// Parse the response this exchange left in `buffer`.
+    fn parse(self, buffer: &[u8]) -> Result<Exchange<'_>, Error> {
+        Ok(Exchange {
+            response: codec::parse_resp(&buffer[..self.used])?,
+            used: self.used,
+            reusable: self.reusable,
         })
+    }
 }
 
 /// Request metadata for [`HttpClient`].
@@ -330,6 +340,28 @@ impl<const RQ: usize> HttpClient<RQ> {
         keep_alive: bool,
         retry_delay: D,
     ) -> Result<Exchange<'b>, Error>
+    where
+        S: Read + Write,
+        D: Fn() -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let raw = self
+            .exchange_raw(stream, request, response_buffer, keep_alive, retry_delay)
+            .await?;
+        raw.parse(response_buffer)
+    }
+
+    /// Like [`HttpClient::exchange_with_retry_delay`], but leaves the response
+    /// unparsed in `response_buffer`, for a caller that loops over attempts
+    /// and parses only the one it returns.
+    pub(crate) async fn exchange_raw<S, D, Fut>(
+        &self,
+        stream: &mut S,
+        request: HttpClientRequest<'_>,
+        response_buffer: &mut [u8],
+        keep_alive: bool,
+        retry_delay: D,
+    ) -> Result<RawExchange, Error>
     where
         S: Read + Write,
         D: Fn() -> Fut,
@@ -560,6 +592,36 @@ impl<const RQ: usize> HttpClient<RQ> {
         D: Fn() -> Fut,
         Fut: Future<Output = ()>,
     {
+        let raw = self
+            .exchange_upload_raw(
+                stream,
+                request,
+                source,
+                response_buffer,
+                keep_alive,
+                retry_delay,
+            )
+            .await?;
+        raw.parse(response_buffer)
+    }
+
+    /// Like [`HttpClient::exchange_upload_with_retry_delay`], but leaves the
+    /// response unparsed; see [`HttpClient::exchange_raw`].
+    pub(crate) async fn exchange_upload_raw<S, U, D, Fut>(
+        &self,
+        stream: &mut S,
+        request: HttpClientRequest<'_>,
+        source: &mut U,
+        response_buffer: &mut [u8],
+        keep_alive: bool,
+        retry_delay: D,
+    ) -> Result<RawExchange, Error>
+    where
+        S: Read + Write,
+        U: BodySource,
+        D: Fn() -> Fut,
+        Fut: Future<Output = ()>,
+    {
         self.send_request_chunked(stream, &request, source, keep_alive)
             .await?;
         read_exchange(
@@ -685,7 +747,9 @@ impl<const RQ: usize> HttpClient<RQ> {
                 loop {
                     let mut pos = 0;
                     while pos < held && !decoder.is_done() {
-                        let step = decoder.step(&buffer[pos..held])?;
+                        let step = decoder
+                            .step(&buffer[pos..held])
+                            .map_err(Error::InvalidResponse)?;
                         if let Some(range) = step.data {
                             sink.chunk(&buffer[pos + range.start..pos + range.end])
                                 .await?;
@@ -928,8 +992,9 @@ where
     }
 }
 
-/// Read the response to a sent request, parse it, and decide whether the
-/// connection can carry another request.
+/// Read the response to a sent request and decide whether the connection can
+/// carry another request. The response is left in the buffer, decoded but
+/// not parsed.
 ///
 /// Shared by the buffered and the chunked-upload exchange paths, so both see
 /// responses exactly the same way: read to the end of the framing, reject a
@@ -937,14 +1002,14 @@ where
 /// connection only when `keep_alive` was asked for, the framing (not the
 /// connection close) delimited the response, the peer is HTTP/1.1 and it did
 /// not ask to close.
-async fn read_exchange<'b, S, D, Fut>(
+async fn read_exchange<S, D, Fut>(
     stream: &mut S,
     method: HttpMethod,
-    response_buffer: &'b mut [u8],
+    response_buffer: &mut [u8],
     max_retries: usize,
     keep_alive: bool,
     retry_delay: D,
-) -> Result<Exchange<'b>, Error>
+) -> Result<RawExchange, Error>
 where
     S: Read,
     D: Fn() -> Fut,
@@ -955,14 +1020,13 @@ where
     codec::check_response_framing(&response_buffer[..end])?;
     let http11 = response_buffer[..end].starts_with(b"HTTP/1.1 ");
     let end = if read.chunked {
-        codec::dechunk(response_buffer, end)?
+        codec::dechunk_with(response_buffer, end, Error::InvalidResponse)?
     } else {
         end
     };
-    let response = codec::parse_resp(&response_buffer[..end])?;
-    let reusable = keep_alive && read.framed && http11 && !wants_close(&response);
-    Ok(Exchange {
-        response,
+    let reusable =
+        keep_alive && read.framed && http11 && !codec::asks_to_close(&response_buffer[..end]);
+    Ok(RawExchange {
         used: end,
         reusable,
     })
