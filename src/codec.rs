@@ -3,7 +3,10 @@
 use heapless::{String, Vec};
 use nanofish::{
     error::Error,
-    header::{HttpHeader, headers::CONTENT_LENGTH, headers::CONTENT_TYPE},
+    header::{
+        HttpHeader,
+        headers::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST},
+    },
     method::HttpMethod,
     protocol::{
         self, CHUNKED, CONNECTION_CLOSE_END, CRLF_LEN, CRLF_STR, DOUBLE_CRLF_LEN, HEADER_SEPARATOR,
@@ -140,25 +143,24 @@ fn check_request_parts(
         if !protocol::is_valid_header_value(header.value) {
             return Err(Error::HeaderError("Invalid header value"));
         }
+        // The `Host` header is written from `host`; a second one makes
+        // servers answer `400` (RFC 9112 section 3.2).
+        if header.name.eq_ignore_ascii_case(HOST) {
+            return Err(Error::HeaderError("Host is set from the request's host"));
+        }
     }
     Ok(())
 }
 
-/// Like [`build_req`]. With `keep_alive`, no `Connection: close` is sent, so an
-/// HTTP/1.1 server keeps the connection open for another request.
-pub fn build_req_with<const RQ: usize>(
+/// Write the request line, the `Host` header and the caller's headers.
+fn write_req_start<const RQ: usize>(
+    req: &mut String<RQ>,
     method: HttpMethod,
     host: &str,
     path: &str,
     query: Option<&str>,
     headers: &[HttpHeader<'_>],
-    body: Option<&[u8]>,
-    keep_alive: bool,
-) -> Result<String<RQ>, Error> {
-    check_request_parts(path, query, host, headers)?;
-
-    let mut req = String::<RQ>::new();
-
+) -> Result<(), Error> {
     try_push!(req.push_str(method.as_str()));
     try_push!(req.push_str(" "));
     try_push!(req.push_str(path));
@@ -171,16 +173,73 @@ pub fn build_req_with<const RQ: usize>(
     try_push!(req.push_str(host));
     try_push!(req.push_str(CRLF_STR));
 
-    let mut has_len = false;
     for header in headers {
         try_push!(req.push_str(header.name));
         try_push!(req.push_str(HEADER_SEPARATOR));
         try_push!(req.push_str(header.value));
         try_push!(req.push_str(CRLF_STR));
+    }
+    Ok(())
+}
+
+/// End the head: with `keep_alive` just the empty line, otherwise
+/// `Connection: close` first, unless the caller already sent a `Connection`
+/// header of their own.
+fn write_req_end<const RQ: usize>(
+    req: &mut String<RQ>,
+    headers: &[HttpHeader<'_>],
+    keep_alive: bool,
+) -> Result<(), Error> {
+    let has_connection = headers
+        .iter()
+        .any(|header| header.name.eq_ignore_ascii_case(CONNECTION));
+    if keep_alive || has_connection {
+        try_push!(req.push_str(CRLF_STR));
+    } else {
+        try_push!(req.push_str(CONNECTION_CLOSE_END));
+    }
+    Ok(())
+}
+
+/// Like [`build_req`]. With `keep_alive`, no `Connection: close` is sent, so an
+/// HTTP/1.1 server keeps the connection open for another request.
+///
+/// # Errors
+///
+/// The errors of [`build_req`], and [`Error::HeaderError`] if `headers`
+/// carry a `Transfer-Encoding` (the body is sent as is, never chunked) or a
+/// `Content-Length` that disagrees with `body`.
+pub fn build_req_with<const RQ: usize>(
+    method: HttpMethod,
+    host: &str,
+    path: &str,
+    query: Option<&str>,
+    headers: &[HttpHeader<'_>],
+    body: Option<&[u8]>,
+    keep_alive: bool,
+) -> Result<String<RQ>, Error> {
+    check_request_parts(path, query, host, headers)?;
+
+    let body_len = body.map(<[u8]>::len);
+    let mut has_len = false;
+    for header in headers {
+        if header.name.eq_ignore_ascii_case(TRANSFER_ENCODING) {
+            return Err(Error::HeaderError(
+                "Transfer-Encoding is only sent by the chunked upload",
+            ));
+        }
         if header.name.eq_ignore_ascii_case(CONTENT_LENGTH) {
+            // A length that does not match the body would make the server
+            // read the next request as part of this one, or wait forever.
+            if body_len.is_some_and(|len| header.value.trim().parse() != Ok(len)) {
+                return Err(Error::HeaderError("Content-Length does not match the body"));
+            }
             has_len = true;
         }
     }
+
+    let mut req = String::<RQ>::new();
+    write_req_start(&mut req, method, host, path, query, headers)?;
 
     // POST, PUT and PATCH without a body still need an explicit length, or
     // some servers answer `411 Length Required`.
@@ -191,19 +250,15 @@ pub fn build_req_with<const RQ: usize>(
     if !has_len && (body.is_some() || carries_body) {
         try_push!(req.push_str(CONTENT_LENGTH));
         try_push!(req.push_str(HEADER_SEPARATOR));
-        let mut len = String::<8>::new();
-        if core::fmt::write(&mut len, format_args!("{}", body.unwrap_or_default().len())).is_err() {
+        let mut len = String::<20>::new();
+        if core::fmt::write(&mut len, format_args!("{}", body_len.unwrap_or_default())).is_err() {
             return Err(Error::BufferOverflow);
         }
         try_push!(req.push_str(&len));
         try_push!(req.push_str(CRLF_STR));
     }
 
-    if keep_alive {
-        try_push!(req.push_str(CRLF_STR));
-    } else {
-        try_push!(req.push_str(CONNECTION_CLOSE_END));
-    }
+    write_req_end(&mut req, headers, keep_alive)?;
     Ok(req)
 }
 
@@ -242,36 +297,14 @@ pub fn build_req_chunked_with<const RQ: usize>(
     }
 
     let mut req = String::<RQ>::new();
-
-    try_push!(req.push_str(method.as_str()));
-    try_push!(req.push_str(" "));
-    try_push!(req.push_str(path));
-    if let Some(query) = query {
-        try_push!(req.push_str("?"));
-        try_push!(req.push_str(query));
-    }
-    try_push!(req.push_str(HTTP_VERSION_LINE_SUFFIX));
-    try_push!(req.push_str("Host: "));
-    try_push!(req.push_str(host));
-    try_push!(req.push_str(CRLF_STR));
-
-    for header in headers {
-        try_push!(req.push_str(header.name));
-        try_push!(req.push_str(HEADER_SEPARATOR));
-        try_push!(req.push_str(header.value));
-        try_push!(req.push_str(CRLF_STR));
-    }
+    write_req_start(&mut req, method, host, path, query, headers)?;
 
     try_push!(req.push_str(TRANSFER_ENCODING));
     try_push!(req.push_str(HEADER_SEPARATOR));
     try_push!(req.push_str(CHUNKED));
     try_push!(req.push_str(CRLF_STR));
 
-    if keep_alive {
-        try_push!(req.push_str(CRLF_STR));
-    } else {
-        try_push!(req.push_str(CONNECTION_CLOSE_END));
-    }
+    write_req_end(&mut req, headers, keep_alive)?;
     Ok(req)
 }
 
@@ -335,6 +368,15 @@ fn bodyless(method: HttpMethod, data: &[u8]) -> bool {
     method == HttpMethod::HEAD || matches!(status_code(data), Some(100..=199 | 204 | 304))
 }
 
+/// Whether the response head in `data` is an interim (`1xx`) response that
+/// a final response follows on the same connection.
+///
+/// `101 Switching Protocols` is final: after it the connection speaks
+/// another protocol.
+pub fn is_interim(data: &[u8]) -> bool {
+    matches!(status_code(data), Some(100 | 102..=199))
+}
+
 /// Numeric status code from the status line, if it is present and valid.
 fn status_code(data: &[u8]) -> Option<u16> {
     let line_end = protocol::find_crlf(data)?;
@@ -349,30 +391,218 @@ fn status_code(data: &[u8]) -> Option<u16> {
 /// Whether `body` holds a whole chunked body: every chunk, the last (zero
 /// size) chunk, any trailers and the final empty line.
 ///
-/// The chunk framing is walked rather than searched for `0\r\n\r\n`, which can
-/// also appear in chunk data or at the end of a header block (`Age: 0`).
 /// Malformed framing counts as complete so that [`dechunk`] reports the error
 /// instead of the read loop waiting for bytes that will never make it valid.
-///
-/// This stateless form is the reference for [`ChunkScan`], which the read loops
-/// use to avoid rescanning a growing buffer after every read.
 #[cfg(test)]
 pub fn chunked_body_complete(body: &[u8]) -> bool {
     ChunkScan::default().advance(body)
 }
 
-/// Incremental version of [`chunked_body_complete`].
+/// Longest chunk-size line (hex size plus extensions) that is accepted.
+const MAX_SIZE_LINE: usize = 64;
+
+/// Where [`ChunkDecoder`] is in the chunked framing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkState {
+    /// In the hex digits of a chunk-size line: the size so far and the line
+    /// length so far.
+    Size { size: usize, len: usize },
+    /// Whitespace after the size, which may only lead to an extension.
+    SizeSpace { size: usize, len: usize },
+    /// In a chunk extension (after `;`), up to the CR.
+    Extension { size: usize, len: usize },
+    /// After the CR of a chunk-size line, expecting LF.
+    SizeLf { size: usize },
+    /// Inside chunk data, with this many bytes left.
+    Data(usize),
+    /// After chunk data: expecting CR (0) or LF (1).
+    DataEnd(u8),
+    /// After the last chunk: in a trailer line, with this many bytes so far.
+    Trailer(usize),
+    /// After the CR of a trailer line (`true` if the line was empty).
+    TrailerLf(bool),
+    /// The final empty line has been read.
+    Done,
+}
+
+impl ChunkState {
+    const SIZE_LINE: Self = Self::Size { size: 0, len: 0 };
+}
+
+/// Incremental, strict decoder for chunked transfer coding.
+///
+/// The one implementation of the chunked framing: [`dechunk`] decodes a
+/// buffered body with it, [`ChunkScan`] uses it to find where a body ends,
+/// and streaming responses decode their body piece by piece with it. Lines
+/// must end in CRLF, chunk data must be followed by CRLF, and a chunk size is
+/// plain hex digits, optionally followed by whitespace and `;` extensions. Any
+/// other byte is an error rather than a guess, since two parties guessing
+/// differently is how requests get smuggled.
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkDecoder {
+    state: ChunkState,
+}
+
+/// Result of [`ChunkDecoder::step`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct Step {
+    /// Bytes of the input consumed.
+    pub consumed: usize,
+    /// Payload within the consumed input, if any.
+    pub data: Option<core::ops::Range<usize>>,
+}
+
+impl Default for ChunkDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChunkDecoder {
+    pub const fn new() -> Self {
+        Self {
+            state: ChunkState::SIZE_LINE,
+        }
+    }
+
+    /// Whether the last chunk and the trailers have been read.
+    pub fn is_done(&self) -> bool {
+        self.state == ChunkState::Done
+    }
+
+    /// Consume input until some payload is found, the body ends or the input
+    /// runs out. Call again with the rest of the input (`consumed..`) until
+    /// `consumed == input.len()` or [`ChunkDecoder::is_done`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidResponse`] for malformed framing.
+    pub fn step(&mut self, input: &[u8]) -> Result<Step, Error> {
+        let mut pos = 0;
+        while pos < input.len() {
+            if let ChunkState::Data(remaining) = self.state {
+                let take = remaining.min(input.len() - pos);
+                let remaining = remaining - take;
+                self.state = if remaining == 0 {
+                    ChunkState::DataEnd(0)
+                } else {
+                    ChunkState::Data(remaining)
+                };
+                return Ok(Step {
+                    consumed: pos + take,
+                    data: Some(pos..pos + take),
+                });
+            }
+            if self.state == ChunkState::Done {
+                break;
+            }
+            self.state = Self::next(self.state, input[pos])?;
+            pos += 1;
+        }
+        Ok(Step {
+            consumed: pos,
+            data: None,
+        })
+    }
+
+    /// The state after one framing byte (anything but chunk data).
+    fn next(state: ChunkState, byte: u8) -> Result<ChunkState, Error> {
+        const INVALID_SIZE: Error = Error::InvalidResponse("Invalid chunk size");
+        const TOO_LONG: Error = Error::InvalidResponse("Chunk size line too long");
+
+        let line_len = |len: usize| {
+            if len < MAX_SIZE_LINE {
+                Ok(len + 1)
+            } else {
+                Err(TOO_LONG)
+            }
+        };
+        Ok(match state {
+            ChunkState::Size { size, len } => match byte {
+                b'\r' if len > 0 => ChunkState::SizeLf { size },
+                b';' if len > 0 => ChunkState::Extension {
+                    size,
+                    len: line_len(len)?,
+                },
+                b' ' | b'\t' if len > 0 => ChunkState::SizeSpace {
+                    size,
+                    len: line_len(len)?,
+                },
+                _ => {
+                    let digit = hex_digit(byte).ok_or(INVALID_SIZE)?;
+                    let size = size
+                        .checked_mul(16)
+                        .and_then(|size| size.checked_add(digit))
+                        .ok_or(INVALID_SIZE)?;
+                    ChunkState::Size {
+                        size,
+                        len: line_len(len)?,
+                    }
+                }
+            },
+            ChunkState::SizeSpace { size, len } => match byte {
+                b' ' | b'\t' => ChunkState::SizeSpace {
+                    size,
+                    len: line_len(len)?,
+                },
+                b';' => ChunkState::Extension {
+                    size,
+                    len: line_len(len)?,
+                },
+                _ => return Err(INVALID_SIZE),
+            },
+            ChunkState::Extension { size, len } => match byte {
+                b'\r' => ChunkState::SizeLf { size },
+                b'\n' => return Err(INVALID_SIZE),
+                _ => ChunkState::Extension {
+                    size,
+                    len: line_len(len)?,
+                },
+            },
+            ChunkState::SizeLf { size } => match byte {
+                b'\n' if size == 0 => ChunkState::Trailer(0),
+                b'\n' => ChunkState::Data(size),
+                _ => return Err(INVALID_SIZE),
+            },
+            ChunkState::DataEnd(seen) => match (seen, byte) {
+                (0, b'\r') => ChunkState::DataEnd(1),
+                (1, b'\n') => ChunkState::SIZE_LINE,
+                _ => return Err(Error::InvalidResponse("Invalid chunk terminator")),
+            },
+            ChunkState::Trailer(len) => match byte {
+                b'\r' => ChunkState::TrailerLf(len == 0),
+                b'\n' => return Err(Error::InvalidResponse("Invalid chunk trailer")),
+                _ => ChunkState::Trailer(len + 1),
+            },
+            ChunkState::TrailerLf(empty) => match byte {
+                b'\n' if empty => ChunkState::Done,
+                b'\n' => ChunkState::Trailer(0),
+                _ => return Err(Error::InvalidResponse("Invalid chunk trailer")),
+            },
+            ChunkState::Data(_) | ChunkState::Done => state,
+        })
+    }
+}
+
+/// The value of an ASCII hex digit.
+fn hex_digit(byte: u8) -> Option<usize> {
+    char::from(byte)
+        .to_digit(16)
+        .and_then(|digit| usize::try_from(digit).ok())
+}
+
+/// Finds where a chunked body ends, as it arrives.
 ///
 /// It remembers how far the framing was walked, so checking a buffer after
 /// each read costs only the newly arrived bytes instead of rescanning the
 /// whole body (quadratic for many small reads).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ChunkScan {
-    /// Start of the first frame (chunk-size line or trailer line) not yet
-    /// fully seen.
+    decoder: ChunkDecoder,
+    /// Bytes of the body walked so far.
     pos: usize,
-    /// Past the last chunk: only trailer lines and the final empty line remain.
-    trailers: bool,
+    /// The framing is malformed.
+    invalid: bool,
 }
 
 impl ChunkScan {
@@ -384,50 +614,27 @@ impl ChunkScan {
         self.pos
     }
 
+    /// Whether the framing walked so far is well formed.
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        !self.invalid
+    }
+
     /// Walk the framing in `body` (everything after the headers, from its
     /// start) as far as it goes; `true` once the body is complete or its
     /// framing is malformed.
     pub fn advance(&mut self, body: &[u8]) -> bool {
-        loop {
-            let Some(line_len) = protocol::find_crlf(&body[self.pos..]) else {
-                return false;
-            };
-            if self.trailers {
-                if line_len == 0 {
-                    self.pos += CRLF_LEN;
-                    return true;
-                }
-                self.pos += line_len + CRLF_LEN;
-                continue;
-            }
-
-            let size = core::str::from_utf8(&body[self.pos..self.pos + line_len])
-                .ok()
-                .and_then(|line| line.split(';').next())
-                .and_then(|size| usize::from_str_radix(size.trim(), 16).ok());
-            let Some(size) = size else {
-                return true;
-            };
-
-            let data_start = self.pos + line_len + CRLF_LEN;
-            if size == 0 {
-                self.pos = data_start;
-                self.trailers = true;
-                continue;
-            }
-
-            // Chunk data is followed by its own CRLF.
-            let Some(next) = data_start
-                .checked_add(size)
-                .and_then(|end| end.checked_add(CRLF_LEN))
-            else {
-                return true;
-            };
-            if next > body.len() {
-                return false;
-            }
-            self.pos = next;
+        if self.invalid {
+            return true;
         }
+        while self.pos < body.len() && !self.decoder.is_done() {
+            let Ok(step) = self.decoder.step(&body[self.pos..]) else {
+                self.invalid = true;
+                return true;
+            };
+            self.pos += step.consumed;
+        }
+        self.decoder.is_done()
     }
 }
 
@@ -436,6 +643,8 @@ impl ChunkScan {
 enum ResponseEnd {
     /// The headers are not complete yet.
     Pending,
+    /// An interim (`1xx`) response, which a final response follows.
+    Interim,
     /// No body: complete at the end of the headers.
     Headers,
     /// A body of this many bytes.
@@ -502,7 +711,8 @@ impl ResponseScan {
 
     /// Whether `data`, everything read so far, holds a complete response.
     ///
-    /// `data` must only ever grow between calls.
+    /// `data` must only ever grow between calls. An interim `1xx` response
+    /// is never complete: see [`ResponseScan::interim_end`].
     pub fn is_complete(&mut self, data: &[u8]) -> bool {
         if matches!(self.end, ResponseEnd::Pending) {
             // A terminator split across reads starts up to 3 bytes back.
@@ -521,11 +731,38 @@ impl ResponseScan {
 
         let body = &data[self.headers_end..];
         match &mut self.end {
-            ResponseEnd::Pending | ResponseEnd::Close => false,
+            ResponseEnd::Pending | ResponseEnd::Interim | ResponseEnd::Close => false,
             ResponseEnd::Headers => true,
             ResponseEnd::Length(length) => body.len() >= *length,
             ResponseEnd::Chunked(scan) => scan.advance(body),
         }
+    }
+
+    /// The length of the interim (`1xx`) response at the start of the data,
+    /// once its head is complete.
+    ///
+    /// The caller drops those bytes and scans what follows with a fresh
+    /// `ResponseScan`: the final response comes after any number of interim
+    /// ones (`100 Continue`, `103 Early Hints`).
+    pub const fn interim_end(&self) -> Option<usize> {
+        if matches!(self.end, ResponseEnd::Interim) {
+            Some(self.headers_end)
+        } else {
+            None
+        }
+    }
+
+    /// Where the response in `data` ends, once [`ResponseScan::is_complete`]
+    /// returned `true` (or the connection closed): bytes after it are not
+    /// part of the response, even if the peer sent them.
+    pub const fn response_end(&self, data_len: usize) -> usize {
+        let end = match &self.end {
+            ResponseEnd::Headers => self.headers_end,
+            ResponseEnd::Length(length) => self.headers_end.saturating_add(*length),
+            ResponseEnd::Chunked(scan) => self.headers_end.saturating_add(scan.end()),
+            ResponseEnd::Pending | ResponseEnd::Interim | ResponseEnd::Close => data_len,
+        };
+        if end < data_len { end } else { data_len }
     }
 
     /// Whether the headers declared where the body ends (a length, chunked
@@ -538,8 +775,17 @@ impl ResponseScan {
         )
     }
 
+    /// Whether the body uses chunked framing (and needs [`dechunk`]).
+    pub const fn is_chunked(&self) -> bool {
+        matches!(self.end, ResponseEnd::Chunked(_))
+    }
+
     fn classify(&self, data: &[u8]) -> ResponseEnd {
-        match response_framing(self.method, &data[..self.headers_end]) {
+        let head = &data[..self.headers_end];
+        if is_interim(head) {
+            return ResponseEnd::Interim;
+        }
+        match response_framing(self.method, head) {
             BodyFraming::None => ResponseEnd::Headers,
             BodyFraming::Chunked => ResponseEnd::Chunked(ChunkScan::default()),
             BodyFraming::Length(length) => ResponseEnd::Length(length),
@@ -662,10 +908,12 @@ pub fn request_framing(header_bytes: &[u8]) -> Result<Framing, FramingError> {
         .map_err(|_| FramingError::Invalid("Invalid request headers encoding"))?;
     let length = check_content_length(header_bytes).map_err(FramingError::Invalid)?;
 
-    let Some(coding) = protocol::find_header_value(headers_str, TRANSFER_ENCODING) else {
+    if !has_transfer_encoding(headers_str) {
         return Ok(length.map_or(Framing::None, Framing::Length));
-    };
-    let mut codings = coding.split(',').map(str::trim).filter(|c| !c.is_empty());
+    }
+    // Every `Transfer-Encoding` header counts: a second header adds codings
+    // to the list, just as a comma does (RFC 9110 section 5.3).
+    let mut codings = transfer_codings(headers_str);
     match (codings.next(), codings.next()) {
         (Some(only), None) if only.eq_ignore_ascii_case(CHUNKED) => {
             if length.is_some() {
@@ -680,6 +928,14 @@ pub fn request_framing(header_bytes: &[u8]) -> Result<Framing, FramingError> {
     }
 }
 
+/// Decode a chunked message in place: the payload is moved right behind the
+/// headers and the new length of the message is returned. A message that is
+/// not chunked is left as it is.
+///
+/// # Errors
+///
+/// [`Error::InvalidResponse`] if the head is incomplete, the framing is
+/// malformed, or the body ends before its last chunk and final empty line.
 pub fn dechunk(buffer: &mut [u8], total_read: usize) -> Result<usize, Error> {
     let data = &buffer[..total_read];
     if !chunked(data) {
@@ -690,44 +946,23 @@ pub fn dechunk(buffer: &mut [u8], total_read: usize) -> Result<usize, Error> {
         .ok_or(Error::InvalidResponse("Invalid HTTP response format"))?
         + DOUBLE_CRLF_LEN;
 
+    let mut decoder = ChunkDecoder::new();
     let mut read_pos = headers_end;
     let mut write_pos = headers_end;
-
-    while read_pos < total_read {
-        let chunk_line_end = match protocol::find_crlf(&buffer[read_pos..total_read]) {
-            Some(pos) => read_pos + pos,
-            None => break,
-        };
-
-        let chunk_size_str = match core::str::from_utf8(&buffer[read_pos..chunk_line_end]) {
-            Ok(s) => s.trim(),
-            Err(_) => return Err(Error::InvalidResponse("Invalid chunk size encoding")),
-        };
-
-        let size_part = chunk_size_str.split(';').next().unwrap_or("0").trim();
-        let chunk_size = usize::from_str_radix(size_part, 16)
-            .map_err(|_| Error::InvalidResponse("Invalid chunk size"))?;
-
-        if chunk_size == 0 {
-            break;
+    while read_pos < total_read && !decoder.is_done() {
+        let step = decoder.step(&buffer[read_pos..total_read])?;
+        if let Some(range) = step.data {
+            let (start, end) = (read_pos + range.start, read_pos + range.end);
+            if write_pos != start {
+                buffer.copy_within(start..end, write_pos);
+            }
+            write_pos += end - start;
         }
-
-        let chunk_data_start = chunk_line_end + CRLF_LEN;
-        // A hostile chunk size must not overflow the offset arithmetic.
-        let chunk_data_end = chunk_data_start
-            .checked_add(chunk_size)
-            .ok_or(Error::InvalidResponse("Invalid chunk size"))?;
-        if chunk_data_end > total_read {
-            return Err(Error::InvalidResponse("Incomplete chunked body"));
-        }
-
-        if write_pos != chunk_data_start {
-            buffer.copy_within(chunk_data_start..chunk_data_end, write_pos);
-        }
-        write_pos += chunk_size;
-        read_pos = chunk_data_end + CRLF_LEN;
+        read_pos += step.consumed;
     }
-
+    if !decoder.is_done() {
+        return Err(Error::InvalidResponse("Incomplete chunked body"));
+    }
     Ok(write_pos)
 }
 
@@ -756,17 +991,40 @@ fn chunked(data: &[u8]) -> bool {
         None => return false,
     };
 
-    let header_bytes = &data[..headers_end];
-    if let Ok(headers_str) = core::str::from_utf8(header_bytes)
-        && let Some(value) = protocol::find_header_value(headers_str, TRANSFER_ENCODING)
-    {
-        // `Transfer-Encoding` may list several codings, e.g. "gzip, chunked";
-        // `chunked` must be the final coding and signals the chunked framing.
-        return value
-            .split(',')
-            .any(|encoding| encoding.trim().eq_ignore_ascii_case(CHUNKED));
-    }
-    false
+    // `Transfer-Encoding` may list several codings, e.g. "gzip, chunked",
+    // over one or more headers. Only a final `chunked` means chunked framing;
+    // otherwise the body runs to the end of the connection (RFC 9112 6.3).
+    core::str::from_utf8(&data[..headers_end]).is_ok_and(|headers_str| {
+        transfer_codings(headers_str)
+            .last()
+            .is_some_and(|coding| coding.eq_ignore_ascii_case(CHUNKED))
+    })
+}
+
+/// Whether any `Transfer-Encoding` header is present.
+fn has_transfer_encoding(headers_str: &str) -> bool {
+    header_values(headers_str, TRANSFER_ENCODING)
+        .next()
+        .is_some()
+}
+
+/// Every transfer coding listed by every `Transfer-Encoding` header, in order.
+fn transfer_codings(headers_str: &str) -> impl Iterator<Item = &str> {
+    header_values(headers_str, TRANSFER_ENCODING)
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|coding| !coding.is_empty())
+}
+
+/// The values of every header called `name`, in order.
+fn header_values<'h>(headers_str: &'h str, name: &'h str) -> impl Iterator<Item = &'h str> {
+    headers_str.split(CRLF_STR).filter_map(move |line| {
+        let (header, value) = line.split_once(':')?;
+        header
+            .trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim())
+    })
 }
 
 #[cfg(test)]
@@ -1165,9 +1423,16 @@ mod tests {
             Err(Error::InvalidResponse("Invalid chunk size"))
         ));
 
+        // A size that does not fit `usize` is malformed.
         let overflow =
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nhello\r\n";
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1ffffffffffffffff\r\nhello\r\n";
         assert!(complete(overflow));
+
+        // A size that fits but exceeds what arrived is just incomplete: the
+        // read loop runs out of buffer instead.
+        let huge =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nhello\r\n";
+        assert!(!complete(huge));
     }
 
     #[test]
@@ -1514,5 +1779,81 @@ mod tests {
             err,
             Error::InvalidResponse("Incomplete chunked body")
         ));
+    }
+
+    #[test]
+    fn test_build_req_rejects_framing_and_host_headers() {
+        let post = |headers: &[HttpHeader<'_>], body: Option<&[u8]>| {
+            build_req_with::<256>(HttpMethod::POST, "h", "/", None, headers, body, false)
+        };
+        assert!(post(&[HttpHeader::new("Content-Length", "5")], Some(b"hello")).is_ok());
+        assert!(matches!(
+            post(&[HttpHeader::new("Content-Length", "4")], Some(b"hello")),
+            Err(Error::HeaderError(_))
+        ));
+        assert!(matches!(
+            post(
+                &[HttpHeader::new("Transfer-Encoding", "chunked")],
+                Some(b"hello")
+            ),
+            Err(Error::HeaderError(_))
+        ));
+        assert!(matches!(
+            post(&[HttpHeader::new("host", "evil")], None),
+            Err(Error::HeaderError(_))
+        ));
+    }
+
+    #[test]
+    fn test_build_req_sends_one_connection_header() {
+        let headers = [HttpHeader::new("Connection", "keep-alive")];
+        let req =
+            build_req_with::<256>(HttpMethod::GET, "h", "/", None, &headers, None, false).unwrap();
+        assert_eq!(req.matches("Connection:").count(), 1, "{req}");
+        let req = build_req_chunked_with::<256>(HttpMethod::PUT, "h", "/", None, &headers, false)
+            .unwrap();
+        assert_eq!(req.matches("Connection:").count(), 1, "{req}");
+    }
+
+    #[test]
+    fn test_find_double_crlf_matches_a_plain_search() {
+        let naive = |data: &[u8]| data.windows(4).position(|w| w == b"\r\n\r\n");
+        let alphabet = [b'\r', b'\n', b'a'];
+        // Every string of up to 8 bytes over CR, LF and one other byte.
+        for len in 0..=8u32 {
+            for mut code in 0..3usize.pow(len) {
+                let mut data = std::vec::Vec::new();
+                for _ in 0..len {
+                    data.push(alphabet[code % 3]);
+                    code /= 3;
+                }
+                assert_eq!(protocol::find_double_crlf(&data), naive(&data), "{data:?}");
+                assert_eq!(
+                    protocol::find_crlf(&data),
+                    data.windows(2).position(|w| w == b"\r\n"),
+                    "{data:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dechunk_rejects_missing_last_chunk() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
+        let mut buf = [0u8; 128];
+        buf[..raw.len()].copy_from_slice(raw);
+        assert!(matches!(
+            dechunk(&mut buf, raw.len()),
+            Err(Error::InvalidResponse("Incomplete chunked body"))
+        ));
+    }
+
+    #[test]
+    fn test_chunk_scan_end_excludes_following_bytes() {
+        let body = b"3\r\nabc\r\n0\r\n\r\nGET / HTTP/1.1\r\n";
+        let mut scan = ChunkScan::default();
+        assert!(scan.advance(body));
+        assert!(scan.is_valid());
+        assert_eq!(scan.end(), b"3\r\nabc\r\n0\r\n\r\n".len());
     }
 }

@@ -14,7 +14,11 @@ use nanofish::client::io::{
 use nanofish::client::redirect::follow;
 use nanofish::client::stream::{BodySink, StreamedResponse};
 use nanofish::{
-    codec, error::Error, header::HttpHeader, method::HttpMethod, options::HttpClientOptions,
+    codec,
+    error::Error,
+    header::HttpHeader,
+    method::HttpMethod,
+    options::{HttpClientOptions, TimeoutDuration},
     response::HttpResponse,
 };
 
@@ -184,15 +188,7 @@ impl<
         let attempt =
             self.request_following_redirects(method, endpoint, headers, body, response_buffer);
 
-        match self.options.total_timeout {
-            Some(limit) => with_timeout(
-                embassy_time::Duration::from_millis(limit.as_millis()),
-                attempt,
-            )
-            .await
-            .unwrap_or(Err(Error::Timeout)),
-            None => attempt.await,
-        }
+        within_total_timeout(self.options.total_timeout, attempt).await
     }
 
     /// Send the request, then follow up to [`HttpClientOptions::max_redirects`]
@@ -396,15 +392,7 @@ impl<
             }
         };
 
-        match self.options.total_timeout {
-            Some(limit) => with_timeout(
-                embassy_time::Duration::from_millis(limit.as_millis()),
-                attempt,
-            )
-            .await
-            .unwrap_or(Err(Error::Timeout)),
-            None => attempt.await,
-        }
+        within_total_timeout(self.options.total_timeout, attempt).await
     }
 
     /// Send a request whose body is produced by `source`, with chunked
@@ -474,15 +462,7 @@ impl<
             }
         };
 
-        match self.options.total_timeout {
-            Some(limit) => with_timeout(
-                embassy_time::Duration::from_millis(limit.as_millis()),
-                attempt,
-            )
-            .await
-            .unwrap_or(Err(Error::Timeout)),
-            None => attempt.await,
-        }
+        within_total_timeout(self.options.total_timeout, attempt).await
     }
 
     /// Send a request described by a [`RequestBuilder`].
@@ -813,12 +793,43 @@ impl<
     }
 }
 
+/// Run `attempt` within the overall deadline `limit`, if there is one.
+///
+/// # Errors
+///
+/// [`Error::Timeout`] when the deadline passes first, otherwise the errors of
+/// `attempt`.
+async fn within_total_timeout<T>(
+    limit: Option<TimeoutDuration>,
+    attempt: impl Future<Output = Result<T, Error>>,
+) -> Result<T, Error> {
+    match limit {
+        Some(limit) => with_timeout(
+            embassy_time::Duration::from_millis(limit.as_millis()),
+            attempt,
+        )
+        .await
+        .unwrap_or(Err(Error::Timeout)),
+        None => attempt.await,
+    }
+}
+
+/// The name to resolve for a URL host: a URL writes an IPv6 address in
+/// brackets (`[::1]`), but the resolver only recognizes the bare address as a
+/// literal and would send the bracketed form to DNS.
+fn dns_name(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
 /// Resolve a hostname to an IP address, trying IPv4 (A) first then IPv6 (AAAA).
 #[expect(
     clippy::future_not_send,
     reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
 )]
 async fn resolve_host(stack: Stack<'_>, host: &str) -> Result<embassy_net::IpAddress, Error> {
+    let host = dns_name(host);
     let dns_socket = DnsSocket::new(stack);
 
     // Try A (IPv4) first — most common on embedded networks
@@ -845,7 +856,8 @@ async fn resolve_host(stack: Stack<'_>, host: &str) -> Result<embassy_net::IpAdd
 /// connection. A request that fails on a reused connection before any response
 /// byte arrives is repeated once on a fresh connection, but only for methods
 /// that are safe to repeat (`GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS` and
-/// `TRACE`).
+/// `TRACE`), and never for an upload, whose source cannot produce its body a
+/// second time.
 ///
 /// Sessions speak plain HTTP; use [`EmbassyHttpClient`] for `https` URLs.
 pub struct EmbassyHttpSession<'a, const RQ: usize = REQUEST_SIZE> {
@@ -951,24 +963,32 @@ impl<'a, const RQ: usize> EmbassyHttpSession<'a, RQ> {
         body: Option<&[u8]>,
         response_buffer: &'b mut [u8],
     ) -> Result<(HttpResponse<'b>, usize), Error> {
+        let (path, query) = split_target(target);
+        let client = BaseHttpClient::<RQ>::with_options(self.options);
+        let retry_delay = self.options.retry_delay;
         let total_timeout = self.options.total_timeout;
-        let attempt = self.request_inner(method, target, headers, body, response_buffer);
-        let used = match total_timeout {
-            Some(limit) => {
-                let result = with_timeout(
-                    embassy_time::Duration::from_millis(limit.as_millis()),
-                    attempt,
-                )
-                .await
-                .unwrap_or(Err(Error::Timeout));
-                if result.is_err() {
-                    // A half-finished exchange leaves the connection unusable.
-                    self.open = false;
-                }
-                result?
-            }
-            None => attempt.await?,
-        };
+        let buffer = &mut *response_buffer;
+        let attempt = self.run(
+            is_repeatable(method),
+            async |socket: &mut TcpSocket<'a>, host: &str| {
+                let request = HttpClientRequest {
+                    method,
+                    host,
+                    path,
+                    query,
+                    headers,
+                    body,
+                };
+                client
+                    .exchange_with_retry_delay(socket, request, &mut *buffer, true, || {
+                        delay(retry_delay)
+                    })
+                    .await
+                    .map(|exchange| (exchange.used, exchange.reusable))
+            },
+        );
+        let used = within_total_timeout(total_timeout, attempt).await;
+        let used = self.settle(used)?;
         // The response is parsed again from the buffer that now holds it.
         Ok((codec::parse_resp(&response_buffer[..used])?, used))
     }
@@ -979,10 +999,13 @@ impl<'a, const RQ: usize> EmbassyHttpSession<'a, RQ> {
     /// Like [`EmbassyHttpSession::request`], but the body comes from the
     /// source piece by piece, with no length and no buffering; see
     /// [`EmbassyHttpClient::request_upload`]. A chunked upload is fully
-    /// delimited, so the connection is reused under the same rules. When the
-    /// server dropped an idle connection, the request is repeated on a fresh
-    /// one only for methods that are safe to repeat — the source is consumed,
-    /// so it must be able to produce the body again.
+    /// delimited, so the connection is reused under the same rules.
+    ///
+    /// Unlike [`EmbassyHttpSession::request`], an upload is never repeated
+    /// when the server turns out to have dropped an idle connection: the
+    /// source was consumed by the first attempt and cannot produce the body
+    /// again, so a repeat would send an empty body. The error is returned
+    /// instead; upload again with a fresh source (the session reconnects).
     ///
     /// # Errors
     ///
@@ -999,83 +1022,65 @@ impl<'a, const RQ: usize> EmbassyHttpSession<'a, RQ> {
         source: &mut U,
         response_buffer: &'b mut [u8],
     ) -> Result<(HttpResponse<'b>, usize), Error> {
-        let total_timeout = self.options.total_timeout;
-        let attempt = self.upload_inner(method, target, headers, source, response_buffer);
-        let used = match total_timeout {
-            Some(limit) => {
-                let result = with_timeout(
-                    embassy_time::Duration::from_millis(limit.as_millis()),
-                    attempt,
-                )
-                .await
-                .unwrap_or(Err(Error::Timeout));
-                if result.is_err() {
-                    // A half-finished exchange leaves the connection unusable.
-                    self.open = false;
-                }
-                result?
-            }
-            None => attempt.await?,
-        };
-        // The response is parsed again from the buffer that now holds it.
-        Ok((codec::parse_resp(&response_buffer[..used])?, used))
-    }
-
-    #[expect(
-        clippy::future_not_send,
-        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
-    )]
-    async fn upload_inner<U: BodySource>(
-        &mut self,
-        method: HttpMethod,
-        target: &str,
-        headers: &[HttpHeader<'_>],
-        source: &mut U,
-        response_buffer: &mut [u8],
-    ) -> Result<usize, Error> {
-        let (path, query) = target
-            .split_once('?')
-            .map_or((target, None), |(path, query)| (path, Some(query)));
+        let (path, query) = split_target(target);
         let client = BaseHttpClient::<RQ>::with_options(self.options);
-
-        let mut reused = self.open;
-        loop {
-            if !self.open {
-                self.reconnect().await?;
-            }
-            let host_header = self.host_header.clone();
+        let retry_delay = self.options.retry_delay;
+        let total_timeout = self.options.total_timeout;
+        let buffer = &mut *response_buffer;
+        let attempt = self.run(false, async |socket: &mut TcpSocket<'a>, host: &str| {
             let request = HttpClientRequest {
                 method,
-                host: &host_header,
+                host,
                 path,
                 query,
                 headers,
                 body: None,
             };
-            let outcome = client
+            client
                 .exchange_upload_with_retry_delay(
-                    &mut self.socket,
+                    socket,
                     request,
                     source,
-                    &mut *response_buffer,
+                    &mut *buffer,
                     true,
-                    || {
-                        Timer::after(embassy_time::Duration::from_millis(
-                            self.options.retry_delay.as_millis(),
-                        ))
-                    },
+                    || delay(retry_delay),
                 )
                 .await
-                .map(|exchange| (exchange.used, exchange.reusable));
+                .map(|exchange| (exchange.used, exchange.reusable))
+        });
+        let used = within_total_timeout(total_timeout, attempt).await;
+        let used = self.settle(used)?;
+        // The response is parsed again from the buffer that now holds it.
+        Ok((codec::parse_resp(&response_buffer[..used])?, used))
+    }
 
-            match outcome {
+    /// Run one exchange on the session, connecting again first if needed.
+    ///
+    /// `exchange` gets the socket and the `Host` header value and returns how
+    /// much of the response buffer it used and whether the connection can be
+    /// reused. With `repeatable`, an exchange that fails on a reused
+    /// connection before any response arrived (the server dropped the idle
+    /// connection) is run once more on a fresh one.
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
+    async fn run(
+        &mut self,
+        repeatable: bool,
+        mut exchange: impl AsyncFnMut(&mut TcpSocket<'a>, &str) -> Result<(usize, bool), Error>,
+    ) -> Result<usize, Error> {
+        let mut reused = self.open;
+        loop {
+            if !self.open {
+                self.reconnect().await?;
+            }
+            match exchange(&mut self.socket, &self.host_header).await {
                 Ok((used, reusable)) => {
                     self.open = reusable;
                     return Ok(used);
                 }
-                // The server may have dropped an idle connection: repeat the
-                // request once on a new one, if repeating it is harmless.
-                Err(Error::NoResponse | Error::TcpError(_)) if reused && is_repeatable(method) => {
+                Err(Error::NoResponse | Error::TcpError(_)) if reused && repeatable => {
                     self.open = false;
                     reused = false;
                 }
@@ -1087,69 +1092,13 @@ impl<'a, const RQ: usize> EmbassyHttpSession<'a, RQ> {
         }
     }
 
-    #[expect(
-        clippy::future_not_send,
-        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
-    )]
-    async fn request_inner(
-        &mut self,
-        method: HttpMethod,
-        target: &str,
-        headers: &[HttpHeader<'_>],
-        body: Option<&[u8]>,
-        response_buffer: &mut [u8],
-    ) -> Result<usize, Error> {
-        let (path, query) = target
-            .split_once('?')
-            .map_or((target, None), |(path, query)| (path, Some(query)));
-        let client = BaseHttpClient::<RQ>::with_options(self.options);
-
-        let mut reused = self.open;
-        loop {
-            if !self.open {
-                self.reconnect().await?;
-            }
-            let host_header = self.host_header.clone();
-            let request = HttpClientRequest {
-                method,
-                host: &host_header,
-                path,
-                query,
-                headers,
-                body,
-            };
-            let outcome = client
-                .exchange_with_retry_delay(
-                    &mut self.socket,
-                    request,
-                    &mut *response_buffer,
-                    true,
-                    || {
-                        Timer::after(embassy_time::Duration::from_millis(
-                            self.options.retry_delay.as_millis(),
-                        ))
-                    },
-                )
-                .await
-                .map(|exchange| (exchange.used, exchange.reusable));
-
-            match outcome {
-                Ok((used, reusable)) => {
-                    self.open = reusable;
-                    return Ok(used);
-                }
-                // The server may have dropped an idle connection: repeat the
-                // request once on a new one, if repeating it is harmless.
-                Err(Error::NoResponse | Error::TcpError(_)) if reused && is_repeatable(method) => {
-                    self.open = false;
-                    reused = false;
-                }
-                Err(error) => {
-                    self.open = false;
-                    return Err(error);
-                }
-            }
+    /// Pass on the result of a request; a failed one, including one cut off
+    /// by the total timeout half way, leaves the connection unusable.
+    const fn settle(&mut self, result: Result<usize, Error>) -> Result<usize, Error> {
+        if result.is_err() {
+            self.open = false;
         }
+        result
     }
 
     /// Close the connection.
@@ -1164,6 +1113,18 @@ impl<'a, const RQ: usize> EmbassyHttpSession<'a, RQ> {
         ))
         .await;
     }
+}
+
+/// Split a request target into its path and optional query.
+fn split_target(target: &str) -> (&str, Option<&str>) {
+    target
+        .split_once('?')
+        .map_or((target, None), |(path, query)| (path, Some(query)))
+}
+
+/// Sleep for `duration`, between read retries.
+fn delay(duration: TimeoutDuration) -> Timer {
+    Timer::after(embassy_time::Duration::from_millis(duration.as_millis()))
 }
 
 /// Methods that can be sent again after a connection failed without a
@@ -1260,5 +1221,13 @@ mod tests {
             },
         );
         assert_eq!(client_small_custom.options.max_retries, 2);
+    }
+
+    #[test]
+    fn test_dns_name_strips_ipv6_brackets() {
+        assert_eq!(dns_name("[::1]"), "::1");
+        assert_eq!(dns_name("[fe80::1]"), "fe80::1");
+        assert_eq!(dns_name("example.com"), "example.com");
+        assert_eq!(dns_name("192.168.1.1"), "192.168.1.1");
     }
 }

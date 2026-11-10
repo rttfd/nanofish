@@ -6,7 +6,7 @@ use embassy_time::{Duration, Timer, with_timeout};
 use nanofish::{
     error::Error,
     handler::HttpHandler,
-    header::mime_types,
+    header::{headers::CONNECTION, mime_types},
     options::TimeoutDuration,
     request::HttpRequest,
     response::{HttpResponse, HttpResponseBuilder},
@@ -30,7 +30,9 @@ pub struct ServerTimeouts {
     /// handled: the connection is aborted when no traffic is seen for this
     /// long between socket reads and writes.
     pub read_timeout: TimeoutDuration,
-    /// Maximum time a request handler may run per request.
+    /// Maximum time a request handler may run per request. A handler that
+    /// takes longer is abandoned and the client gets `503 Service
+    /// Unavailable`.
     pub handler_timeout: TimeoutDuration,
     /// Maximum total time one connection may take, from accept to the end of
     /// the response.
@@ -318,10 +320,15 @@ where
             }
             Err(_) => {
                 warn!("Request handling timed out");
+                // The server, not the client, was too slow: `503`, not
+                // `408 Request Timeout`, which blames the client. The
+                // connection closes, since the abandoned handler may have
+                // left it mid-way.
                 HttpResponseBuilder::new()
-                    .status(StatusCode::RequestTimeout)
+                    .status(StatusCode::ServiceUnavailable)
                     .content_type(mime_types::TEXT)?
-                    .text("Request Timeout")
+                    .header(CONNECTION, "close")?
+                    .text("Service Unavailable")
                     .build()
             }
         }

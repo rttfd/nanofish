@@ -2,7 +2,7 @@ use heapless::Vec;
 use nanofish::{
     HttpHeader, StatusCode,
     error::Error,
-    header::headers::{CONTENT_LENGTH, CONTENT_TYPE},
+    header::headers::{CONTENT_LENGTH, CONTENT_TYPE, SET_COOKIE, TRANSFER_ENCODING},
     header::mime_types,
     method::HttpMethod,
     protocol::{
@@ -124,16 +124,28 @@ impl HttpResponse<'_> {
     /// # Errors
     ///
     /// - `Error::HeaderError` if a header name is not a valid token or a value
-    ///   contains control characters such as CR or LF.
+    ///   contains control characters such as CR or LF, or if the headers carry
+    ///   a `Transfer-Encoding` or a `Content-Length` that disagrees with the
+    ///   body: either would frame the body differently from how it is sent.
     /// - `Error::BufferOverflow` if the response exceeds `MAX_RESPONSE_SIZE`.
     pub fn build_bytes<const MAX_RESPONSE_SIZE: usize>(
         &self,
     ) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error> {
         let mut bytes = Vec::new();
         self.write_head_bytes::<MAX_RESPONSE_SIZE>(&mut bytes, true)?;
-        push_slice(&mut bytes, self.body.as_bytes())?;
+        push_slice(&mut bytes, self.sent_body())?;
 
         Ok(bytes)
+    }
+
+    /// The body as it goes on the wire: none for `1xx`, `204` and `304`,
+    /// which never carry one, even when the response was given one.
+    pub(crate) const fn sent_body(&self) -> &[u8] {
+        if self.status_code.allows_body() {
+            self.body.as_bytes()
+        } else {
+            &[]
+        }
     }
 
     /// Build HTTP response bytes for a response to a `method` request.
@@ -156,6 +168,17 @@ impl HttpResponse<'_> {
         } else {
             self.build_bytes()
         }
+    }
+
+    /// The head [`HttpResponse::build_bytes`] writes in front of the body,
+    /// `Content-Length` included, so the body can be written from its own
+    /// slice instead of being copied behind the head.
+    pub(crate) fn build_head_for<const MAX_RESPONSE_SIZE: usize>(
+        &self,
+    ) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error> {
+        let mut bytes = Vec::new();
+        self.write_head_bytes::<MAX_RESPONSE_SIZE>(&mut bytes, true)?;
+        Ok(bytes)
     }
 
     /// Build HTTP response bytes without the body.
@@ -183,6 +206,7 @@ impl HttpResponse<'_> {
         write_status_line(bytes, self.status_code)?;
 
         // Headers
+        let body_bytes = self.sent_body();
         let mut has_content_length = false;
         for header in &self.headers {
             // Refuse to serialize a header that could split the response, for
@@ -192,6 +216,9 @@ impl HttpResponse<'_> {
             }
             if !is_valid_header_value(header.value) {
                 return Err(Error::HeaderError("Invalid header value"));
+            }
+            if include_auto_content_length {
+                check_framing_header(header, body_bytes.len())?;
             }
             push_slice(bytes, header.name.as_bytes())?;
             push_slice(bytes, HEADER_SEPARATOR.as_bytes())?;
@@ -203,7 +230,6 @@ impl HttpResponse<'_> {
         }
 
         // Content-Length header if body is present and not already specified
-        let body_bytes = self.body.as_bytes();
         if include_auto_content_length && !has_content_length && !body_bytes.is_empty() {
             push_slice(bytes, CONTENT_LENGTH.as_bytes())?;
             push_slice(bytes, HEADER_SEPARATOR.as_bytes())?;
@@ -381,7 +407,9 @@ impl<'a> HttpResponseBuilder<'a> {
 
     /// Construct the final `HttpResponse`
     ///
-    /// Deduplicates headers by name — the last set value wins.
+    /// Deduplicates headers by name — the last set value wins — except
+    /// `Set-Cookie`, which is the one header that is sent once per value
+    /// (RFC 9110 section 5.3), so every one is kept.
     ///
     /// # Errors
     ///
@@ -392,9 +420,11 @@ impl<'a> HttpResponseBuilder<'a> {
         headers = headers.into_iter().rev().fold(
             Vec::new(),
             |mut acc: Vec<HttpHeader<'a>, MAX_HEADERS>, h| {
-                if !acc
-                    .iter()
-                    .any(|existing| existing.name.eq_ignore_ascii_case(h.name))
+                let repeatable = h.name.eq_ignore_ascii_case(SET_COOKIE);
+                if repeatable
+                    || !acc
+                        .iter()
+                        .any(|existing| existing.name.eq_ignore_ascii_case(h.name))
                 {
                     let _ = acc.push(h);
                 }
@@ -416,6 +446,28 @@ impl Default for HttpResponseBuilder<'_> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Refuse a framing header that contradicts a buffered body of `body_len`
+/// bytes.
+///
+/// A buffered body is always sent as is, so `Transfer-Encoding` would be a
+/// lie, and so would a `Content-Length` other than its length. An explicit
+/// length with an empty body is allowed: a `HEAD` handler may announce the
+/// length of the body a `GET` would get.
+fn check_framing_header(header: &HttpHeader<'_>, body_len: usize) -> Result<(), Error> {
+    if header.name.eq_ignore_ascii_case(TRANSFER_ENCODING) {
+        return Err(Error::HeaderError(
+            "Transfer-Encoding is not allowed on a buffered response",
+        ));
+    }
+    if header.name.eq_ignore_ascii_case(CONTENT_LENGTH)
+        && body_len > 0
+        && header.value.trim().parse() != Ok(body_len)
+    {
+        return Err(Error::HeaderError("Content-Length does not match the body"));
+    }
+    Ok(())
 }
 
 /// Push a byte slice into the buffer, returning `BufferOverflow` on failure.
@@ -446,7 +498,8 @@ fn write_decimal_to_buffer<const N: usize>(
         return bytes.push(b'0').map_err(|_| Error::BufferOverflow);
     }
 
-    let mut digits = [0u8; 10];
+    // `usize::MAX` has 20 decimal digits on 64-bit targets.
+    let mut digits = [0u8; 20];
     let mut i = 0;
 
     while num > 0 {
@@ -927,5 +980,80 @@ mod tests {
             .filter(|h| h.name.eq_ignore_ascii_case("Content-Type"))
             .count();
         assert_eq!(ct_count, 1);
+    }
+
+    #[test]
+    fn test_builder_keeps_every_set_cookie() {
+        let response = HttpResponseBuilder::new()
+            .header("Set-Cookie", "a=1")
+            .unwrap()
+            .header("X-Mode", "old")
+            .unwrap()
+            .header("set-cookie", "b=2")
+            .unwrap()
+            .header("X-Mode", "new")
+            .unwrap()
+            .build()
+            .unwrap();
+        let names: std::vec::Vec<_> = response.headers.iter().map(|h| (h.name, h.value)).collect();
+        assert_eq!(
+            names,
+            [
+                ("Set-Cookie", "a=1"),
+                ("set-cookie", "b=2"),
+                ("X-Mode", "new")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_bytes_rejects_framing_that_contradicts_the_body() {
+        let build = |name, value| {
+            let mut response = response_with_header(name, value);
+            response.status_code = StatusCode::Ok;
+            response.body = ResponseBody::Text("hello");
+            response.build_bytes::<256>()
+        };
+        assert!(build("Content-Length", "5").is_ok());
+        assert!(matches!(
+            build("Content-Length", "4"),
+            Err(Error::HeaderError("Content-Length does not match the body"))
+        ));
+        assert!(matches!(
+            build("Transfer-Encoding", "chunked"),
+            Err(Error::HeaderError(_))
+        ));
+
+        // An empty body may announce the length a GET would get (HEAD).
+        let mut head = response_with_header("Content-Length", "1234");
+        head.status_code = StatusCode::Ok;
+        assert!(head.build_bytes::<256>().is_ok());
+    }
+
+    #[test]
+    fn test_bodyless_status_sends_no_body() {
+        for status in [StatusCode::NoContent, StatusCode::NotModified] {
+            let response = HttpResponse {
+                status_code: status,
+                headers: Vec::new(),
+                body: ResponseBody::Text("ignored"),
+            };
+            let bytes = response.build_bytes::<256>().unwrap();
+            let text = core::str::from_utf8(&bytes).unwrap();
+            assert!(text.ends_with("\r\n\r\n"), "{text}");
+            assert!(!text.contains("Content-Length"), "{text}");
+        }
+    }
+
+    #[test]
+    fn test_write_decimal_handles_every_usize() {
+        for value in [0, 9, 10, 4_294_967_296, usize::MAX] {
+            let mut bytes = Vec::<u8, 32>::new();
+            write_decimal_to_buffer(&mut bytes, value).unwrap();
+            assert_eq!(
+                core::str::from_utf8(&bytes).unwrap(),
+                std::format!("{value}")
+            );
+        }
     }
 }

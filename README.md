@@ -778,7 +778,8 @@ let client = DefaultEmbassyHttpClient::with_options(
 );
 ```
 
-A `POST` answered by `301`, `302` or `303` is repeated as a `GET`; `Authorization` and `Cookie`
+A `POST` answered by `301`, `302` or `303` is repeated as a `GET`, without its body and its
+`Content-*` headers; `Authorization` and `Cookie`
 headers are dropped when a redirect leaves the original origin; a redirect from `https` to `http`
 is refused. `total_timeout` bounds the whole chain.
 
@@ -868,8 +869,8 @@ upload outright; there is nothing to fall back to but buffering.
 ## Reusing Connections
 
 `EmbassyHttpClient` opens a connection per request. An `EmbassyHttpSession` connects once and keeps
-the socket open while the server does, reconnecting by itself (and repeating safe requests once)
-when the server dropped it:
+the socket open while the server does, reconnecting by itself (and repeating safe requests once,
+but never an upload, whose source is already consumed) when the server dropped it:
 
 ```rust,ignore
 use nanofish::{EmbassyHttpSession, HttpClientOptions, HttpMethod};
@@ -986,11 +987,13 @@ impl StreamingHandler for Handler {
 }
 ```
 
-`serve` returns `false` for a path the store does not have, so a handler can fall through to its
-API routes. The semantics it owns: `GET` and `HEAD` only, everything else gets `405`; `/` and
-`/x` map to `index.html`; `If-None-Match` revalidation against the file's strong `ETag`
-(`304` when it matches); and gzip negotiation — when the client accepts `gzip` and the file has a
-pre-compressed variant, it is served with `Content-Encoding: gzip`. Content types come from the
+`serve` returns `false` for a path the store does not have, whatever the method, so a handler can
+fall through to its API routes. The semantics it owns: `GET` and `HEAD` only, any other method on
+one of its files gets `405`; the path is percent-decoded and refused if it could leave the site
+(`..`, `//`, backslashes); `/` and `/x` map to `index.html`; `If-None-Match` revalidation against
+the file's strong `ETag` (`304` when it matches); and gzip negotiation — when the client accepts
+`gzip` and the file has a pre-compressed variant, it is served with `Content-Encoding: gzip`, and
+files with a variant carry `Vary: Accept-Encoding`. A `HEAD` never reads the file. Content types come from the
 path's extension (`mime_for_extension` covers a browser UI's needs), and `serve_with` adds headers
 such as `Cache-Control` to every response.
 

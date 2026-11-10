@@ -125,33 +125,58 @@ where
     let (request, _) =
         receive_request::<S, MAX_RESPONSE_SIZE>(stream, &mut request_buffer, false).await?;
 
-    let response = handler.handle_request(&request).await.map_or_else(
-        |_| {
-            text_error::<MAX_RESPONSE_SIZE>(
-                StatusCode::InternalServerError,
-                "Internal Server Error",
-            )
-        },
-        |response| {
-            // One request per connection: say so, or an HTTP/1.1 client
-            // assumes the connection stays open and sends its next request
-            // into a socket that is already gone.
-            persistent_response::<MAX_RESPONSE_SIZE>(&response, request.method, true)
-                .map(|(bytes, _)| bytes)
-        },
-    );
+    // One request per connection: say so, or an HTTP/1.1 client assumes the
+    // connection stays open and sends its next request into a socket that is
+    // already gone.
+    let response = handler.handle_request(&request).await;
+    answer::<S, MAX_RESPONSE_SIZE>(stream, response, request.method, true)
+        .await
+        .map(|_| ())
+}
+
+/// Send the handler's `response` (or a `500` when it failed), framed for a
+/// connection that stays open unless `close`, and return whether the
+/// connection must be closed now.
+///
+/// The handler's error, or the error that kept its response from being
+/// serialized, is returned after the client got its `500`.
+async fn answer<S, const MAX_RESPONSE_SIZE: usize>(
+    stream: &mut S,
+    response: Result<HttpResponse<'_>, Error>,
+    method: HttpMethod,
+    close: bool,
+) -> Result<bool, Error>
+where
+    S: Write,
+{
     let response = match response {
         Ok(response) => response,
         Err(error) => {
+            send_status(stream, StatusCode::InternalServerError).await;
+            return Err(error);
+        }
+    };
+    let (head, close) = match persistent_head::<MAX_RESPONSE_SIZE>(&response, method, close) {
+        Ok(built) => built,
+        Err(error) => {
             // The response could not be serialized (for example an invalid
             // header or a body larger than the response buffer).
-            send_status::<S, MAX_RESPONSE_SIZE>(stream, StatusCode::InternalServerError).await;
+            send_status(stream, StatusCode::InternalServerError).await;
             return Err(error);
         }
     };
 
-    stream.write_all(&response).await.map_err(Error::io)?;
-    stream.flush().await.map_err(Error::io)
+    // The body is written straight from the handler's slice, not copied
+    // into the response buffer behind the head.
+    stream.write_all(&head).await.map_err(Error::io)?;
+    if method != HttpMethod::HEAD {
+        stream
+            .write_all(response.sent_body())
+            .await
+            .map_err(Error::io)?;
+    }
+    stream.flush().await.map_err(Error::io)?;
+    Ok(close)
 }
 
 /// Serve up to `max_requests` requests on one connection (HTTP/1.1
@@ -202,35 +227,10 @@ where
         served += 1;
         let close_requested = pipelined || served >= max_requests || !is_persistent(&request);
 
-        let (response, close) = match handler.handle_request(&request).await {
-            Ok(response) => {
-                match persistent_response::<MAX_RESPONSE_SIZE>(
-                    &response,
-                    request.method,
-                    close_requested,
-                ) {
-                    Ok(built) => built,
-                    Err(error) => {
-                        send_status::<S, MAX_RESPONSE_SIZE>(
-                            stream,
-                            StatusCode::InternalServerError,
-                        )
-                        .await;
-                        return Err(error);
-                    }
-                }
-            }
-            Err(_) => (
-                text_error::<MAX_RESPONSE_SIZE>(
-                    StatusCode::InternalServerError,
-                    "Internal Server Error",
-                )?,
-                true,
-            ),
-        };
-
-        stream.write_all(&response).await.map_err(Error::io)?;
-        stream.flush().await.map_err(Error::io)?;
+        let response = handler.handle_request(&request).await;
+        let close =
+            answer::<S, MAX_RESPONSE_SIZE>(stream, response, request.method, close_requested)
+                .await?;
         if close {
             return Ok(());
         }
@@ -252,13 +252,21 @@ fn has_connection_token(value: Option<&str>, token: &str) -> bool {
     })
 }
 
-/// Serialize `response` for a connection that stays open unless `close`.
+/// Serialize the head of `response` for a connection that stays open unless
+/// `close`.
 ///
-/// Returns the bytes and whether the connection must be closed afterwards.
+/// Returns the head and whether the connection must be closed afterwards.
 /// A response that must end the connection says `Connection: close`; one that
 /// keeps it open needs a length, so an empty body gets `Content-Length: 0`
 /// (except for statuses that never have a body).
-fn persistent_response<const MAX_RESPONSE_SIZE: usize>(
+///
+/// # Errors
+///
+/// The errors of [`HttpResponse::build_head_for`], including
+/// [`Error::BufferOverflow`] when head and body together exceed
+/// `MAX_RESPONSE_SIZE`: that bound still applies, although the body is no
+/// longer copied into the buffer.
+fn persistent_head<const MAX_RESPONSE_SIZE: usize>(
     response: &HttpResponse<'_>,
     method: HttpMethod,
     close: bool,
@@ -269,14 +277,14 @@ fn persistent_response<const MAX_RESPONSE_SIZE: usize>(
     let mut close = close || handler_closes;
 
     let mut headers = response.headers.clone();
-    if close && !handler_closes && headers.push(HttpHeader::new(CONNECTION, "close")).is_err() {
-        // No room to announce it; the connection still closes.
-        close = true;
+    if close && !handler_closes {
+        // Without room to announce it, the connection still closes.
+        let _ = headers.push(HttpHeader::new(CONNECTION, "close"));
     }
     let has_length = headers
         .iter()
         .any(|h| h.name.eq_ignore_ascii_case(CONTENT_LENGTH));
-    let bodyless_status = matches!(response.status_code.as_u16(), 100..=199 | 204 | 304);
+    let bodyless_status = !response.status_code.allows_body();
     if !close
         && !has_length
         && !bodyless_status
@@ -292,7 +300,11 @@ fn persistent_response<const MAX_RESPONSE_SIZE: usize>(
         headers,
         body: response.body,
     };
-    Ok((framed.build_bytes_for::<MAX_RESPONSE_SIZE>(method)?, close))
+    let head = framed.build_head_for::<MAX_RESPONSE_SIZE>()?;
+    if method != HttpMethod::HEAD && head.len() + response.sent_body().len() > MAX_RESPONSE_SIZE {
+        return Err(Error::BufferOverflow);
+    }
+    Ok((head, close))
 }
 
 /// Read, decode and parse one request into `buffer`.
@@ -316,29 +328,31 @@ pub(super) async fn receive_request<'b, S, const MAX_RESPONSE_SIZE: usize>(
 where
     S: Read + Write,
 {
-    let (total_read, pipelined) = match read_request(stream, buffer, allow_idle).await {
+    let (request_end, pipelined) = match read_request(stream, buffer, allow_idle).await {
         Ok(read) => read,
         Err(failure) => {
             if let Some(status) = failure.reply {
-                send_status::<S, MAX_RESPONSE_SIZE>(stream, status).await;
+                send_status(stream, status).await;
             }
             return Err(failure.error);
         }
     };
 
-    let total_read = match codec::dechunk(buffer, total_read) {
-        Ok(total_read) => total_read,
+    // Only the request itself: bytes of a pipelined request after it are not
+    // part of its body.
+    let request_end = match codec::dechunk(buffer, request_end) {
+        Ok(request_end) => request_end,
         Err(error) => {
-            send_status::<S, MAX_RESPONSE_SIZE>(stream, StatusCode::BadRequest).await;
+            send_status(stream, StatusCode::BadRequest).await;
             return Err(error);
         }
     };
 
     let buffer: &'b [u8] = buffer;
-    match HttpRequest::try_from(&buffer[..total_read]) {
+    match HttpRequest::try_from(&buffer[..request_end]) {
         Ok(request) => Ok((request, pipelined)),
         Err(error) => {
-            send_status::<S, MAX_RESPONSE_SIZE>(stream, StatusCode::BadRequest).await;
+            send_status(stream, StatusCode::BadRequest).await;
             Err(error)
         }
     }
@@ -366,6 +380,9 @@ impl ReadFailure {
 
 /// Read one complete HTTP request (headers plus any `Content-Length` body).
 ///
+/// Returns where the request ends in `buf` and whether more bytes followed
+/// it (a pipelined request).
+///
 /// A body is delimited by `Content-Length` or by chunked transfer coding.
 /// Requests with neither are considered complete once the headers end; the
 /// peer is expected to close the connection after such a request. Chunked
@@ -392,6 +409,9 @@ where
 {
     let mut total_read = 0;
     let mut header_end = None;
+    // Where to resume looking for the end of the headers, so a client that
+    // sends one byte per read costs linear rather than quadratic time.
+    let mut searched: usize = 0;
     let mut framing = None;
     let mut chunk_scan = codec::ChunkScan::default();
 
@@ -412,7 +432,10 @@ where
         total_read += n;
 
         if header_end.is_none() {
-            header_end = protocol::find_double_crlf(&buf[..total_read]);
+            // A terminator split across reads starts up to 3 bytes back.
+            let from = searched.saturating_sub(DOUBLE_CRLF_LEN - 1);
+            header_end = protocol::find_double_crlf(&buf[from..total_read]).map(|pos| from + pos);
+            searched = total_read;
         }
 
         if let Some(hdr_end) = header_end {
@@ -426,7 +449,7 @@ where
             let body_start = hdr_end + DOUBLE_CRLF_LEN;
             match framing {
                 // Headers are complete and no body is expected.
-                Framing::None => return Ok((total_read, total_read > body_start)),
+                Framing::None => return Ok((body_start, total_read > body_start)),
                 Framing::Length(content_length) => {
                     let needed = body_start.saturating_add(content_length);
                     if needed > buf.len() {
@@ -436,12 +459,19 @@ where
                         ));
                     }
                     if total_read >= needed {
-                        return Ok((total_read, total_read > needed));
+                        return Ok((needed, total_read > needed));
                     }
                 }
                 Framing::Chunked => {
                     if chunk_scan.advance(&buf[body_start..total_read]) {
-                        return Ok((total_read, total_read > body_start + chunk_scan.end()));
+                        // On malformed framing `end` stops short of the bad
+                        // bytes; keep them all so `dechunk` reports the error.
+                        let end = body_start + chunk_scan.end();
+                        return Ok(if chunk_scan.is_valid() {
+                            (end, total_read > end)
+                        } else {
+                            (total_read, false)
+                        });
                     }
                 }
             }
@@ -471,34 +501,30 @@ const fn framing_failure(error: FramingError) -> ReadFailure {
     }
 }
 
+/// Room for an error response: a status line, two headers and the reason
+/// phrase as the body. Independent of the configured response size, so error
+/// paths do not put another response-sized buffer in every future.
+const ERROR_RESPONSE_SIZE: usize = 256;
+
 /// Best-effort plain-text error response; a failure to send it is ignored
 /// because the caller already has an error to report.
-pub(super) async fn send_status<S, const MAX_RESPONSE_SIZE: usize>(
-    stream: &mut S,
-    status: StatusCode,
-) where
+pub(super) async fn send_status<S>(stream: &mut S, status: StatusCode)
+where
     S: Write,
 {
-    if let Ok(response) = text_error::<MAX_RESPONSE_SIZE>(status, status.text())
+    let mut headers = Vec::new();
+    let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
+    let _ = headers.push(HttpHeader::new(CONNECTION, "close"));
+    let response = HttpResponse {
+        status_code: status,
+        headers,
+        body: ResponseBody::Text(status.text()),
+    };
+    if let Ok(response) = response.build_bytes::<ERROR_RESPONSE_SIZE>()
         && stream.write_all(&response).await.is_ok()
     {
         let _ = stream.flush().await;
     }
-}
-
-fn text_error<const MAX_RESPONSE_SIZE: usize>(
-    status: StatusCode,
-    body: &str,
-) -> Result<Vec<u8, MAX_RESPONSE_SIZE>, Error> {
-    let mut headers = Vec::new();
-    let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
-    let _ = headers.push(HttpHeader::new(CONNECTION, "close"));
-    let resp = HttpResponse {
-        status_code: status,
-        headers,
-        body: ResponseBody::Text(body),
-    };
-    resp.build_bytes::<MAX_RESPONSE_SIZE>()
 }
 
 #[cfg(test)]
@@ -1144,6 +1170,7 @@ mod tests {
                     .text(match request.body {
                         b"hello" => "got-hello",
                         b"abc" => "got-abc",
+                        b"" => "got-empty",
                         _ => "got-other",
                     })
                     .build(),
@@ -1262,7 +1289,8 @@ mod tests {
     fn test_keep_alive_handler_error_ends_the_connection() {
         let fail = b"GET /nope HTTP/1.1\r\nHost: h\r\n\r\n";
         let (result, consumed, output) = serve_keep_alive::<1024>(&[fail, GET_ROOT], 10);
-        result.unwrap();
+        // The handler's error is returned after the client got its 500.
+        assert!(matches!(result, Err(Error::NoResponse)), "{result:?}");
         assert_eq!(consumed, 1);
         assert!(output.starts_with("HTTP/1.1 500 Internal Server Error\r\n"));
         assert!(output.contains("Connection: close\r\n"));
@@ -1350,24 +1378,25 @@ mod tests {
     }
 
     #[test]
-    fn test_handler_error_gets_500() {
+    fn test_handler_error_gets_500_and_is_returned() {
         let request = b"GET / HTTP/1.1\r\nHost: h\r\n\r\n";
         let mut stream = MockStream::<128, 512>::new(request);
         let mut handler = FailingHandler;
 
-        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
-            &mut stream,
-            &mut handler,
-        ))
-        .unwrap();
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
 
+        assert!(matches!(err, Error::NoResponse), "{err:?}");
         assert_status(&stream.output, "500 Internal Server Error");
     }
 
     #[test]
-    fn test_oversized_response_and_error_response_return_error() {
-        // The `GET /` page does not fit a 64-byte response buffer and neither
-        // does the 500, so nothing is sent but the error is still returned.
+    fn test_oversized_response_in_tiny_buffer_still_gets_500() {
+        // The `GET /` page does not fit a 64-byte response buffer. The 500
+        // has a buffer of its own, so the client is still told, and the
+        // error is returned.
         let request = b"GET / HTTP/1.1\r\nHost: h\r\n\r\n";
         let mut stream = MockStream::<128, 512>::new(request);
         let mut handler = SimpleHandler;
@@ -1378,7 +1407,7 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, Error::BufferOverflow));
-        assert!(stream.output.is_empty());
+        assert_status(&stream.output, "500 Internal Server Error");
     }
 
     #[test]
@@ -1430,5 +1459,160 @@ mod tests {
 
         assert!(matches!(err, Error::InvalidResponse("Incomplete request")));
         assert!(stream.output.is_empty());
+    }
+
+    /// Serve one connection whose bytes arrive in a single read, and return
+    /// the result and everything the server wrote.
+    fn serve_raw(input: &[u8]) -> (Result<(), Error>, std::string::String) {
+        let mut stream = MockStream::<512, 2048>::new(input);
+        let result =
+            futures_lite::future::block_on(serve_http_connection_with_sizes::<_, _, 512, 512>(
+                &mut stream,
+                &mut KeepAliveHandler,
+                10,
+            ));
+        let output = core::str::from_utf8(&stream.output).unwrap().into();
+        (result, output)
+    }
+
+    #[test]
+    fn test_pipelined_bytes_are_not_part_of_the_body() {
+        // The next request arrives in the same read as this one's body.
+        let (result, output) = serve_raw(
+            b"POST /echo HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhelloGET / HTTP/1.1\r\nHost: h\r\n\r\n",
+        );
+        result.unwrap();
+        assert!(output.contains("\r\n\r\ngot-hello"), "{output}");
+
+        let (result, output) =
+            serve_raw(b"GET /echo HTTP/1.1\r\nHost: h\r\n\r\nGET / HTTP/1.1\r\nHost: h\r\n\r\n");
+        result.unwrap();
+        assert!(output.contains("\r\n\r\ngot-empty"), "{output}");
+
+        let (result, output) = serve_raw(
+            b"POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\nGET / HTTP/1.1\r\n\r\n",
+        );
+        result.unwrap();
+        assert!(output.contains("\r\n\r\ngot-abc"), "{output}");
+    }
+
+    #[test]
+    fn test_lax_chunk_framing_gets_400() {
+        for body in [
+            &b"+5\r\nhello\r\n0\r\n\r\n"[..],
+            b" 5\r\nhello\r\n0\r\n\r\n",
+            b"5 x\r\nhello\r\n0\r\n\r\n",
+            b"5\r\nhelloXX0\r\n\r\n",
+            b"5\nhello\r\n0\r\n\r\n",
+            b"5\r\nhello\r\n0\r\n\n",
+            b"0x5\r\nhello\r\n0\r\n\r\n",
+        ] {
+            let mut request = std::vec::Vec::from(
+                &b"POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
+            );
+            request.extend_from_slice(body);
+            let (result, output) = serve_raw(&request);
+            assert!(result.is_err(), "{body:?}");
+            assert!(
+                output.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+                "{body:?}: {output}"
+            );
+            assert!(!output.contains("got-"), "{body:?}: {output}");
+        }
+    }
+
+    #[test]
+    fn test_chunk_extensions_and_whitespace_before_them_are_accepted() {
+        let (result, output) = serve_raw(
+            b"POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3 ;a=b\r\nabc\r\n0\r\nX-T: 1\r\n\r\n",
+        );
+        result.unwrap();
+        assert!(output.contains("got-abc"), "{output}");
+    }
+
+    #[test]
+    fn test_split_transfer_encoding_headers_count_as_one_list() {
+        // `chunked` then `gzip` is the list `chunked, gzip`: not decodable.
+        let (result, output) = serve_raw(
+            b"POST /echo HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
+        );
+        assert!(result.is_err());
+        assert!(
+            output.starts_with("HTTP/1.1 501 Not Implemented\r\n"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn test_malformed_request_heads_get_400() {
+        for request in [
+            // A bare LF hides a header from one parser but not another.
+            &b"POST /echo HTTP/1.1\r\nX: a\nContent-Length: 5\r\n\r\nhello"[..],
+            b"GET / HTTP/1.1 junk\r\nHost: h\r\n\r\n",
+            b"GET  / HTTP/1.1\r\nHost: h\r\n\r\n",
+            b"GET / HTTP/2.0\r\nHost: h\r\n\r\n",
+            b"GET / HTTP/1.1\r\nno colon here\r\n\r\n",
+            b"GET / HTTP/1.1\r\nHost : h\r\n\r\n",
+            b"GET / HTTP/1.1\r\nHost: h\r\n folded\r\n\r\n",
+            b"GET / HTTP/1.1\r\nX: a\x00b\r\n\r\n",
+        ] {
+            let (result, output) = serve_raw(request);
+            assert!(result.is_err(), "{request:?}");
+            assert!(
+                output.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+                "{request:?}: {output}"
+            );
+        }
+    }
+
+    /// Hands the request out one byte per read.
+    struct TrickleStream<'a> {
+        input: &'a [u8],
+        reads: usize,
+        output: std::vec::Vec<u8>,
+    }
+
+    impl ErrorType for TrickleStream<'_> {
+        type Error = Infallible;
+    }
+
+    impl Read for TrickleStream<'_> {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let Some((&first, rest)) = self.input.split_first() else {
+                return Ok(0);
+            };
+            buf[0] = first;
+            self.input = rest;
+            self.reads += 1;
+            Ok(1)
+        }
+    }
+
+    impl Write for TrickleStream<'_> {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.output.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_request_trickled_one_byte_per_read_is_served() {
+        let request = b"GET / HTTP/1.1\r\nHost: h\r\nX-Pad: aaaaaaaaaaaaaaaa\r\n\r\n";
+        let mut stream = TrickleStream {
+            input: request,
+            reads: 0,
+            output: std::vec::Vec::new(),
+        };
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 256, 256>(
+            &mut stream,
+            &mut KeepAliveHandler,
+        ))
+        .unwrap();
+        assert_eq!(stream.reads, request.len());
+        assert!(stream.output.ends_with(b"hi"));
     }
 }

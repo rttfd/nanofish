@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-10
+
+### Fixed
+
+- `serve`/`serve_with` answered `405` to every method but `GET` and `HEAD` before looking at the path, so `POST /api/...` behind a static site never reached the API routes. The path is now resolved first: a path the store lacks returns `Ok(false)` for any method, and only the site's own files get `405`.
+- `EmbassyHttpSession::request_upload` repeated an upload on a fresh connection when the server had dropped the idle one, but the `BodySource` was already consumed, so the repeat sent an empty body that the server accepted. Uploads are no longer repeated; the error is returned.
+- The server handed a handler bytes past the end of its request as body: with a pipelined request in the same read, `Content-Length: 5` gave `hello` plus the next request, and a request without a body got the next request as its body. The body now ends where the framing says.
+- The client took an interim `1xx` response (`100 Continue`, `103 Early Hints`) as the final response and left the real one in the socket, where the next request on a reused connection read it. Interim responses are skipped, in buffered and streaming requests.
+- Chunked framing was parsed three times, by three parsers that disagreed: two accepted a size of `+5` or ` 5`, skipped whatever two bytes followed chunk data instead of requiring CRLF, and accepted a missing last chunk. One strict decoder now serves the server, the buffered client and the streaming client.
+- Only the first `Transfer-Encoding` header was read, so `chunked` in one header and `gzip` in another passed as chunked. All of them now form one list, and `chunked` counts only as the final coding.
+- Request heads are parsed strictly: a bare LF (which split one header into two for the handler but not for the framing), whitespace before a header's colon, folded lines, header lines without a colon, extra tokens on the request line and versions other than `HTTP/1.0`/`HTTP/1.1` get `400`.
+- IPv6 literal URLs (`http://[::1]/`) never connected: the bracketed host was sent to DNS. The Embassy clients now resolve the bare address.
+- A redirect that turns a `POST` into a `GET` dropped the body but kept a caller's `Content-Length`, so the server waited for bytes that never came. `Content-*` headers now go with the body.
+- Files with a gzip variant are served with `Vary: Accept-Encoding`, so a cache does not hand gzip to a client that cannot decode it.
+- The client kept bytes after a `Content-Length` body (or after the head of a body-less response) in `response.body`; the response now ends where its framing says.
+- `handle_http_connection` and `serve_http_connection_with_sizes` swallowed a handler's error after sending the `500`, although the docs said it was returned. It is now returned.
+- A handler that exceeded `ServerTimeouts::handler_timeout` was answered `408 Request Timeout`, which blames the client. It now gets `503 Service Unavailable` with `Connection: close`.
+- `HttpResponseBuilder::build` deduplicated `Set-Cookie`, keeping only the last cookie. Every `Set-Cookie` is now kept.
+- A response or request whose `Content-Length` header disagrees with its buffered body, or that carries `Transfer-Encoding` with a buffered body, is refused with `HeaderError` instead of being sent with contradictory framing. A request with its own `Host` header is refused too (a second `Host` makes servers answer `400`), and a caller's `Connection` header is no longer joined by a second `Connection: close`.
+- `1xx`, `204` and `304` responses never carry a body or framing headers: `build_bytes` drops a body given to them, and `ResponseWriter` no longer sends `Content-Length: 0` on a `304` or chunked coding on a `204`.
+- Formatting a length of 10¹⁰ or more could panic (a 10-digit buffer); it now holds every `usize`.
+- `HttpClientOptions::max_retries = 0` failed every request without reading; `0` now means one attempt.
+- Static file paths are percent-decoded before lookup (`/my%20file.txt` finds `/my file.txt`), and checked after decoding: `%2e%2e`, backslashes, empty segments and control characters can no longer reach a `FileStore`.
+
+### Performance
+
+- The server searches for the end of the request head only in new bytes, so a client sending one byte per read costs linear rather than quadratic time.
+- The server writes a buffered response body straight from the handler's slice instead of copying it into the response buffer, and error responses use a small buffer of their own instead of a second response-sized one in every connection future.
+- A `HEAD` request for a static file no longer reads the file from the store.
+- Faster CRLF searches over response and request heads; the client decodes chunked coding only when the response uses it.
+
+### Added
+
+- `percent_decode_path`, which percent-decodes a path segment without turning `+` into a space, as `percent_decode` does for query components.
+- `headers::SET_COOKIE`.
+
 ## [0.15.0] - 2026-11-10
 
 ### Added
@@ -431,7 +467,8 @@ HttpResponseBuilder::new()
 - Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, and CONNECT methods.
 - Configurable client options (retries, timeouts, delays).
 
-[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/rttfd/nanofish/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/rttfd/nanofish/compare/v0.14.2...v0.15.0
 [0.14.2]: https://github.com/rttfd/nanofish/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/rttfd/nanofish/compare/v0.14.0...v0.14.1

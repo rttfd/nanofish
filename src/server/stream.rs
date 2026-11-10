@@ -88,7 +88,9 @@ where
     /// Send the status line and headers.
     ///
     /// `Content-Length`, `Transfer-Encoding` and `Connection` are set by the
-    /// writer from `length`; passing them in `headers` is an error.
+    /// writer from `length`; passing them in `headers` is an error. A status
+    /// that never has a body (`1xx`, `204`, `304`) gets neither framing
+    /// header, whatever `length` says, and refuses body bytes.
     ///
     /// # Errors
     ///
@@ -120,6 +122,9 @@ where
         }
 
         let state = match length {
+            // `1xx`, `204` and `304` responses never have a body, so they
+            // announce neither a length nor chunked coding.
+            _ if !status.allows_body() => BodyState::Known(0),
             BodyLength::Known(len) => {
                 write!(length_text, "{len}").map_err(|_| Error::BufferOverflow)?;
                 all.push(HttpHeader::new(headers::CONTENT_LENGTH, &length_text))
@@ -185,6 +190,15 @@ where
             self.stream.write_all(b"\r\n").await.map_err(Error::io)
         } else {
             self.stream.write_all(data).await.map_err(Error::io)
+        }
+    }
+
+    /// Count `len` body bytes of a `HEAD` response as written without
+    /// producing them: the client gets no body anyway, so a caller that would
+    /// only read the bytes to discard them skips the work.
+    pub(crate) const fn skip(&mut self, len: usize) {
+        if let (HttpMethod::HEAD, BodyState::Known(remaining)) = (self.method, self.state) {
+            self.state = BodyState::Known(remaining.saturating_sub(len));
         }
     }
 
@@ -314,11 +328,8 @@ where
         Err(error) => {
             // Only an unstarted response can still be turned into an error page.
             if !writer.head_sent() {
-                nanofish::server::io::send_status::<S, HEAD_SIZE>(
-                    writer.stream,
-                    StatusCode::InternalServerError,
-                )
-                .await;
+                nanofish::server::io::send_status(writer.stream, StatusCode::InternalServerError)
+                    .await;
             }
             Err(error)
         }
@@ -723,5 +734,28 @@ mod tests {
             32,
         >(&mut stream, &mut handler));
         assert!(matches!(result, Err(Error::BufferOverflow)));
+    }
+
+    #[test]
+    fn test_bodyless_statuses_get_no_framing_headers() {
+        use nanofish::{request::HttpRequest, status_code::StatusCode};
+
+        let request = HttpRequest::try_from(GET).unwrap();
+        for (status, length) in [
+            (StatusCode::NotModified, BodyLength::Known(0)),
+            (StatusCode::NoContent, BodyLength::Unknown),
+        ] {
+            let mut stream = MockStream::<512>::new(b"");
+            let mut writer = ResponseWriter::<_, 256>::new(&mut stream, &request);
+            futures_lite::future::block_on(async {
+                writer.send_head(status, &[], length).await.unwrap();
+                assert!(writer.write(b"x").await.is_err());
+                writer.finish().await.unwrap();
+            });
+            let output = stream.output();
+            assert!(!output.contains("Content-Length"), "{output}");
+            assert!(!output.contains("Transfer-Encoding"), "{output}");
+            assert!(output.ends_with("Connection: close\r\n\r\n"), "{output}");
+        }
     }
 }

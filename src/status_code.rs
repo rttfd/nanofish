@@ -221,6 +221,12 @@ impl StatusCode {
         let code = self.as_u16();
         (500..600).contains(&code)
     }
+
+    /// Whether a response with this status may carry a body: `1xx`, `204`
+    /// and `304` responses never do (RFC 9110 section 6.4.1).
+    pub(crate) const fn allows_body(self) -> bool {
+        !matches!(self.as_u16(), 100..=199 | 204 | 304)
+    }
 }
 
 impl From<u16> for StatusCode {

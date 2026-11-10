@@ -56,7 +56,7 @@ pub use method::HttpMethod;
 pub use options::{HttpClientOptions, TimeoutDuration};
 pub use request::{
     HttpRequest, PathParams, QueryPair, QueryPairs, QueryValues, etag_matches, match_path,
-    percent_decode,
+    percent_decode, percent_decode_path,
 };
 pub use response::{HttpResponse, HttpResponseBuilder, ResponseBody};
 pub use server::{

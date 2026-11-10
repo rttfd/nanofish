@@ -1,8 +1,6 @@
 //! Streaming response bodies: hand a body to a sink piece by piece instead of
 //! holding all of it in the response buffer.
 
-use core::ops::Range;
-use heapless::Vec;
 use nanofish::{error::Error, response::HttpResponse, status_code::StatusCode};
 
 /// Receives a response as it is read by
@@ -40,139 +38,10 @@ pub struct StreamedResponse {
     pub body_len: usize,
 }
 
-/// Longest chunk-size line (hex size plus extensions) that is accepted.
-const MAX_SIZE_LINE: usize = 64;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChunkState {
-    /// Reading a chunk-size line.
-    Size,
-    /// Inside chunk data, with this many bytes left.
-    Data(usize),
-    /// After chunk data: expecting CR (0) or LF (1).
-    DataEnd(u8),
-    /// After the last chunk: reading trailer lines up to the empty line.
-    /// The flag records whether the current line has any content yet.
-    Trailer(bool),
-    Done,
-}
-
-/// Incremental decoder for chunked transfer coding.
-///
-/// Unlike [`dechunk`](nanofish::codec::dechunk), which needs the whole body in
-/// memory, it consumes the body in arbitrary pieces and reports where the
-/// payload is in each piece.
-#[derive(Debug, Clone)]
-pub struct ChunkDecoder {
-    state: ChunkState,
-    line: Vec<u8, MAX_SIZE_LINE>,
-}
-
-/// Result of [`ChunkDecoder::step`].
-#[derive(Debug, PartialEq, Eq)]
-pub struct Step {
-    /// Bytes of the input consumed.
-    pub consumed: usize,
-    /// Payload within the consumed input, if any.
-    pub data: Option<Range<usize>>,
-}
-
-impl ChunkDecoder {
-    pub const fn new() -> Self {
-        Self {
-            state: ChunkState::Size,
-            line: Vec::new(),
-        }
-    }
-
-    /// Whether the last chunk and the trailers have been read.
-    pub fn is_done(&self) -> bool {
-        self.state == ChunkState::Done
-    }
-
-    /// Consume input until some payload is found, the body ends or the input
-    /// runs out. Call again with the rest of the input (`consumed..`) until
-    /// `consumed == input.len()` or [`ChunkDecoder::is_done`].
-    pub fn step(&mut self, input: &[u8]) -> Result<Step, Error> {
-        let mut pos = 0;
-        while pos < input.len() {
-            match self.state {
-                ChunkState::Done => break,
-                ChunkState::Data(remaining) => {
-                    let take = remaining.min(input.len() - pos);
-                    let remaining = remaining - take;
-                    self.state = if remaining == 0 {
-                        ChunkState::DataEnd(0)
-                    } else {
-                        ChunkState::Data(remaining)
-                    };
-                    return Ok(Step {
-                        consumed: pos + take,
-                        data: Some(pos..pos + take),
-                    });
-                }
-                ChunkState::DataEnd(seen) => {
-                    let expected = if seen == 0 { b'\r' } else { b'\n' };
-                    if input[pos] != expected {
-                        return Err(Error::InvalidResponse("Invalid chunk terminator"));
-                    }
-                    pos += 1;
-                    self.state = if seen == 0 {
-                        ChunkState::DataEnd(1)
-                    } else {
-                        ChunkState::Size
-                    };
-                }
-                ChunkState::Size => {
-                    let byte = input[pos];
-                    pos += 1;
-                    if byte == b'\n' {
-                        self.finish_size_line()?;
-                    } else {
-                        self.line
-                            .push(byte)
-                            .map_err(|_| Error::InvalidResponse("Chunk size line too long"))?;
-                    }
-                }
-                ChunkState::Trailer(has_content) => {
-                    let byte = input[pos];
-                    pos += 1;
-                    self.state = match (byte, has_content) {
-                        // The empty line that ends the trailers.
-                        (b'\n', false) => ChunkState::Done,
-                        (b'\n', true) | (b'\r', false) => ChunkState::Trailer(false),
-                        _ => ChunkState::Trailer(true),
-                    };
-                }
-            }
-        }
-        Ok(Step {
-            consumed: pos,
-            data: None,
-        })
-    }
-
-    fn finish_size_line(&mut self) -> Result<(), Error> {
-        let line = core::mem::take(&mut self.line);
-        let line = line.strip_suffix(b"\r").unwrap_or(&line);
-        let size = core::str::from_utf8(line)
-            .ok()
-            .and_then(|line| line.split(';').next())
-            .and_then(|size| usize::from_str_radix(size.trim(), 16).ok())
-            .ok_or(Error::InvalidResponse("Invalid chunk size"))?;
-        self.state = if size == 0 {
-            ChunkState::Trailer(false)
-        } else {
-            ChunkState::Data(size)
-        };
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use nanofish::client::stream::*;
-    use nanofish::codec;
+    use nanofish::codec::{self, ChunkDecoder};
+    use nanofish::error::Error;
 
     /// Decode `raw` in pieces of `step` bytes, returning the payload.
     fn decode(raw: &[u8], step: usize) -> Result<std::vec::Vec<u8>, Error> {

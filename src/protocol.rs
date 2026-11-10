@@ -55,14 +55,37 @@ pub const MAX_HEADERS: usize = 16;
 /// Returns the byte index of the start of `\r\n\r\n`.
 #[must_use]
 pub fn find_double_crlf(data: &[u8]) -> Option<usize> {
-    data.windows(DOUBLE_CRLF_LEN).position(|w| w == DOUBLE_CRLF)
+    // Look at the last byte of each candidate window and skip ahead as far as
+    // it allows: a byte that is neither CR nor LF cannot be part of any match
+    // overlapping it, so most of a header block is stepped over 4 bytes at a
+    // time instead of comparing every window.
+    let mut start = 0;
+    while let Some(window) = data.get(start..start + DOUBLE_CRLF_LEN) {
+        match window[DOUBLE_CRLF_LEN - 1] {
+            b'\n' if window == DOUBLE_CRLF => return Some(start),
+            // An LF can only be the 2nd or 4th byte of a match.
+            b'\n' => start += 2,
+            // A CR can only be the 1st or 3rd byte of a match.
+            b'\r' => start += 1,
+            _ => start += DOUBLE_CRLF_LEN,
+        }
+    }
+    None
 }
 
 /// Find the position of CRLF in raw bytes starting from a given slice.
 /// Returns the byte index relative to the start of the provided slice.
 #[must_use]
 pub fn find_crlf(data: &[u8]) -> Option<usize> {
-    data.windows(CRLF_LEN).position(|w| w == CRLF)
+    let mut from = 0;
+    while let Some(lf) = data.get(from..)?.iter().position(|&b| b == b'\n') {
+        let lf = from + lf;
+        if lf > 0 && data[lf - 1] == b'\r' {
+            return Some(lf - 1);
+        }
+        from = lf + 1;
+    }
+    None
 }
 
 /// Check if a header name matches (case-insensitive) and return its value.
