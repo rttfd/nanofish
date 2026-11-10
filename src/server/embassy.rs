@@ -1,4 +1,7 @@
-use embassy_net::{Stack, tcp::TcpSocket};
+use embassy_net::{
+    Stack,
+    tcp::{State, TcpSocket},
+};
 use embassy_time::{Duration, Timer, with_timeout};
 use nanofish::{
     error::Error,
@@ -131,9 +134,12 @@ impl<
     /// **Important**: This server only accepts plain HTTP connections.
     /// HTTPS/TLS is not supported by the server (only by the client).
     ///
-    /// Connections are handled one at a time on a single socket. To serve
-    /// several clients at once, run this method in several tasks: each task
-    /// owns its socket and buffers, and all of them accept on the same port.
+    /// Connections are handled one at a time on a single socket, and there is
+    /// no listen backlog: while every task is busy, a new connection is
+    /// refused. To serve several clients at once, run this method in several
+    /// tasks (a browser opens about six connections per page, so run about
+    /// six): each task owns its socket and buffers, and all of them accept on
+    /// the same port.
     #[expect(
         clippy::future_not_send,
         reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
@@ -235,11 +241,52 @@ impl<
                 Err(_) => {
                     warn!("Connection timed out");
                     socket.abort();
+                    let _ = with_timeout(CLOSE_GRACE, socket.flush()).await;
                 }
             }
 
-            socket.close();
+            finish_socket(&mut socket).await;
         }
+    }
+}
+
+/// How long [`finish_socket`] waits for the peer to acknowledge our FIN.
+const CLOSE_GRACE: Duration = Duration::from_secs(2);
+
+/// How often [`finish_socket`] looks at the socket state while it waits.
+const CLOSE_POLL: Duration = Duration::from_millis(10);
+
+/// Whether a socket is still waiting for the peer to acknowledge our FIN.
+const fn is_closing(state: State) -> bool {
+    matches!(state, State::FinWait1 | State::Closing | State::LastAck)
+}
+
+/// Close `socket` and give the stack time to put the FIN on the wire.
+///
+/// `TcpSocket::close` only queues the FIN; the network task sends it on its
+/// next poll. Dropping the socket (or reusing its buffers for the next
+/// `accept`) right after `close` removes it from the stack before that poll,
+/// so the peer never sees the end of the stream and the late FIN from the
+/// client is answered with an RST. Waiting here keeps the response and the
+/// FIN in order. If the peer stays silent past [`CLOSE_GRACE`], the socket is
+/// aborted so a dead client cannot hold the listener.
+#[expect(
+    clippy::future_not_send,
+    reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+)]
+async fn finish_socket(socket: &mut TcpSocket<'_>) {
+    socket.close();
+    let _ = with_timeout(CLOSE_GRACE, async {
+        // Wait for unsent data and the FIN to go out, then for the FIN's ACK.
+        let _ = socket.flush().await;
+        while is_closing(socket.state()) {
+            Timer::after(CLOSE_POLL).await;
+        }
+    })
+    .await;
+    if socket.state() != State::Closed && socket.state() != State::TimeWait {
+        socket.abort();
+        let _ = with_timeout(CLOSE_GRACE, socket.flush()).await;
     }
 }
 
@@ -293,6 +340,26 @@ pub type SmallEmbassyHttpServer = EmbassyHttpServer<1024, 1024, 1024, 1024>;
 #[cfg(test)]
 mod tests {
     use nanofish::server::embassy::*;
+
+    #[test]
+    fn closing_states_are_the_ones_waiting_for_our_fin_to_be_acked() {
+        use embassy_net::tcp::State;
+
+        for state in [State::FinWait1, State::Closing, State::LastAck] {
+            assert!(is_closing(state), "{state:?} still owes an ACK");
+        }
+        for state in [
+            State::Closed,
+            State::TimeWait,
+            State::FinWait2,
+            State::Established,
+        ] {
+            assert!(
+                !is_closing(state),
+                "{state:?} is not waiting for our FIN's ACK"
+            );
+        }
+    }
 
     #[test]
     fn test_http_server_creation() {

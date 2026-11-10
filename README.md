@@ -522,6 +522,33 @@ async fn run_server(stack: Stack<'_>) -> Result<(), nanofish::Error> {
 }
 ```
 
+### Serving Several Clients at Once
+
+One server task owns one socket, so it serves **one connection at a time**. There is no listen
+backlog: while every task is busy, a new connection is refused on the spot. A browser opens about
+six connections to load a page with a few files, so a lone task makes it look broken
+(`ERR_CONNECTION_REFUSED`) even though each request works fine on its own.
+
+Run one task per connection you want in parallel. Each owns its socket and buffers, and all of them
+accept on the same port:
+
+```rust,ignore
+#[embassy_executor::task(pool_size = 6)]
+async fn http_server(stack: Stack<'static>) -> ! {
+    let mut server = DefaultEmbassyHttpServer::new(80);
+    server.serve(stack, MyHandler).await
+}
+
+// in main: one spawn per task in the pool
+for _ in 0..6 {
+    spawner.spawn(http_server(stack)).unwrap();
+}
+```
+
+Size `StackResources` for them too: every task needs a socket.
+Each task costs its RX and TX buffers (4 KB each with `DefaultEmbassyHttpServer`), so pick
+`SmallEmbassyHttpServer` or custom sizes if RAM is tight.
+
 ### Response Builder
 
 Use `HttpResponseBuilder` to construct responses with a fluent API:
