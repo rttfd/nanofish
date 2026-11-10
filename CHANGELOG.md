@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Chunked request upload, the fourth and last chunked piece (issue #59): `HttpClient::request_upload` and `exchange_upload` (each with a `_with_retry_delay` variant), `EmbassyHttpClient::request_upload` and `EmbassyHttpSession::request_upload` send a request body from a `BodySource` piece by piece, with chunked transfer coding — no `Content-Length`, no buffering, any method. `SliceSource` sends a slice in bounded pieces. A chunked upload is fully delimited, so keep-alive connections stay reusable. With this, chunked responses in both directions (0.11.4+) and chunked requests in both directions all work.
+- Static file serving over any store: `serve`/`serve_with` answer `GET`/`HEAD` from a `FileStore` — index mapping (`/` and `/x` to `index.html`), strong-`ETag` revalidation (`304`), gzip negotiation with pre-compressed variants, content types from the path's extension, `405` for other methods, `Cache-Control`-style extra headers — reading file bytes through a caller buffer, so any file size serves without buffering. `StaticSite` embeds the files in the image as a const table; a `FileStore` over littlefs or SD/FatFs (a trait, implemented in user code) serves files that update at runtime, without a rebuild or reflash.
 
 ## [0.14.2] - 2026-11-10
 

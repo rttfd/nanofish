@@ -943,6 +943,62 @@ sits idle keeps the server's socket busy until `read_timeout` expires, so lower 
 enabling it, and note that one socket serves one client at a time. To serve several clients at once,
 run `serve` in several tasks: each owns its socket and buffers and all accept on the same port.
 
+## Server: Static Files From Any Store
+
+`serve` answers a request with a static file, reading the bytes through a small reusable buffer —
+no copy into a heap or a fixed-size response buffer, any file size:
+
+```rust,ignore
+use nanofish::{serve, ResponseWriter, StaticFile, StaticSite};
+
+static SITE: StaticSite<2> = StaticSite::new([
+    StaticFile {
+        path: "/",
+        content_type: Some("text/html"),
+        body: INDEX_HTML,
+        etag: "\"i1\"",
+        gzip: None,
+    },
+    StaticFile {
+        path: "/app.js",
+        content_type: None,
+        body: APP_JS,
+        etag: "\"a1\"",
+        gzip: Some(APP_JS_GZ),
+    },
+]);
+
+impl StreamingHandler for Handler {
+    type Error = nanofish::Error;
+
+    async fn handle(
+        &mut self,
+        request: &HttpRequest<'_>,
+        response: &mut ResponseWriter<'_>,
+    ) -> Result<(), Self::Error> {
+        let mut buf = [0u8; 512];
+        if serve(&SITE, request, response, &mut buf).await? {
+            return Ok(());
+        }
+        // not a static path: API routes follow
+        Ok(())
+    }
+}
+```
+
+`serve` returns `false` for a path the store does not have, so a handler can fall through to its
+API routes. The semantics it owns: `GET` and `HEAD` only, everything else gets `405`; `/` and
+`/x` map to `index.html`; `If-None-Match` revalidation against the file's strong `ETag`
+(`304` when it matches); and gzip negotiation — when the client accepts `gzip` and the file has a
+pre-compressed variant, it is served with `Content-Encoding: gzip`. Content types come from the
+path's extension (`mime_for_extension` covers a browser UI's needs), and `serve_with` adds headers
+such as `Cache-Control` to every response.
+
+The files do not have to live in the image. `FileStore` is the seam: `stat` describes a file,
+`read` fills a buffer from an offset. `StaticSite` implements it over a const table; a littlefs or
+SD/FatFs adapter implements it in about twenty lines of user code, and its files update at runtime
+— without rebuilding or reflashing.
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for a full list of changes across all versions.
