@@ -11,8 +11,8 @@ use nanofish::{
     method::HttpMethod,
     protocol::MAX_HEADERS,
     request::HttpRequest,
-    response::{HttpResponse, ResponseBody},
     server::io::{DEFAULT_REQUEST_SIZE, DEFAULT_RESPONSE_SIZE, receive_request},
+    server::response::ServerResponse,
     status_code::StatusCode,
 };
 
@@ -88,7 +88,9 @@ where
     /// Send the status line and headers.
     ///
     /// `Content-Length`, `Transfer-Encoding` and `Connection` are set by the
-    /// writer from `length`; passing them in `headers` is an error.
+    /// writer from `length`; passing them in `headers` is an error. A status
+    /// that never has a body (`1xx`, `204`, `304`) gets neither framing
+    /// header, whatever `length` says, and refuses body bytes.
     ///
     /// # Errors
     ///
@@ -120,6 +122,9 @@ where
         }
 
         let state = match length {
+            // `1xx`, `204` and `304` responses never have a body, so they
+            // announce neither a length nor chunked coding.
+            _ if !status.allows_body() => BodyState::Known(0),
             BodyLength::Known(len) => {
                 write!(length_text, "{len}").map_err(|_| Error::BufferOverflow)?;
                 all.push(HttpHeader::new(headers::CONTENT_LENGTH, &length_text))
@@ -136,10 +141,10 @@ where
         all.push(HttpHeader::connection("close"))
             .map_err(|_| Error::HeaderError("Too many headers"))?;
 
-        let head = HttpResponse {
+        let head = ServerResponse {
             status_code: status,
             headers: all,
-            body: ResponseBody::Empty,
+            body: &[],
         }
         .build_head_bytes::<HEAD_SIZE>()?;
 
@@ -154,18 +159,18 @@ where
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidResponse`] if the head was not sent, the response
+    /// - [`Error::InvalidState`] if the head was not sent, the response
     ///   is finished, or `data` would exceed a declared [`BodyLength::Known`].
     /// - [`Error::TcpError`] if the stream fails.
     pub async fn write(&mut self, data: &[u8]) -> Result<(), Error> {
         match self.state {
             BodyState::NotStarted => {
-                return Err(Error::InvalidResponse("Response head not sent"));
+                return Err(Error::InvalidState("Response head not sent"));
             }
-            BodyState::Finished => return Err(Error::InvalidResponse("Response already finished")),
+            BodyState::Finished => return Err(Error::InvalidState("Response already finished")),
             BodyState::Known(remaining) => {
                 if data.len() > remaining {
-                    return Err(Error::InvalidResponse(
+                    return Err(Error::InvalidState(
                         "Response body longer than its Content-Length",
                     ));
                 }
@@ -188,22 +193,31 @@ where
         }
     }
 
+    /// Count `len` body bytes of a `HEAD` response as written without
+    /// producing them: the client gets no body anyway, so a caller that would
+    /// only read the bytes to discard them skips the work.
+    pub(crate) const fn skip(&mut self, len: usize) {
+        if let (HttpMethod::HEAD, BodyState::Known(remaining)) = (self.method, self.state) {
+            self.state = BodyState::Known(remaining.saturating_sub(len));
+        }
+    }
+
     /// Complete the response and flush the stream.
     ///
     /// Finishing twice is allowed.
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidResponse`] if the head was not sent, or fewer bytes
+    /// - [`Error::InvalidState`] if the head was not sent, or fewer bytes
     ///   than a declared [`BodyLength::Known`] were written (the connection
     ///   must be dropped then: the peer is still waiting for the rest).
     /// - [`Error::TcpError`] if the stream fails.
     pub async fn finish(&mut self) -> Result<(), Error> {
         match self.state {
-            BodyState::NotStarted => return Err(Error::InvalidResponse("Response head not sent")),
+            BodyState::NotStarted => return Err(Error::InvalidState("Response head not sent")),
             BodyState::Finished => return Ok(()),
             BodyState::Known(remaining) if remaining > 0 => {
-                return Err(Error::InvalidResponse(
+                return Err(Error::InvalidState(
                     "Response body shorter than its Content-Length",
                 ));
             }
@@ -314,11 +328,8 @@ where
         Err(error) => {
             // Only an unstarted response can still be turned into an error page.
             if !writer.head_sent() {
-                nanofish::server::io::send_status::<S, HEAD_SIZE>(
-                    writer.stream,
-                    StatusCode::InternalServerError,
-                )
-                .await;
+                nanofish::server::io::send_status(writer.stream, StatusCode::InternalServerError)
+                    .await;
             }
             Err(error)
         }
@@ -507,7 +518,7 @@ mod tests {
                     response.finish().await?;
                     assert!(matches!(
                         response.write(b"late").await,
-                        Err(Error::InvalidResponse("Response already finished"))
+                        Err(Error::InvalidState("Response already finished"))
                     ));
                     Ok(())
                 }
@@ -615,7 +626,7 @@ mod tests {
         let (result, stream) = serve(GET, Scenario::WriteBeforeHead);
         assert!(matches!(
             result,
-            Err(Error::InvalidResponse("Response head not sent"))
+            Err(Error::InvalidState("Response head not sent"))
         ));
         // The handler failed before any head: the client gets a 500.
         assert!(
@@ -627,7 +638,7 @@ mod tests {
         let (result, stream) = serve(GET, Scenario::TooLong);
         assert!(matches!(
             result,
-            Err(Error::InvalidResponse(
+            Err(Error::InvalidState(
                 "Response body longer than its Content-Length"
             ))
         ));
@@ -641,7 +652,7 @@ mod tests {
         let (result, stream) = serve(GET, Scenario::TooShort);
         assert!(matches!(
             result,
-            Err(Error::InvalidResponse(
+            Err(Error::InvalidState(
                 "Response body shorter than its Content-Length"
             ))
         ));
@@ -708,7 +719,7 @@ mod tests {
     #[test]
     fn test_bad_requests_are_answered_before_the_handler() {
         let (result, stream) = serve(b"GARBAGE\r\n\r\n", Scenario::Known);
-        assert!(matches!(result, Err(Error::InvalidResponse(_))));
+        assert!(matches!(result, Err(Error::InvalidRequest(_))));
         assert!(stream.output().starts_with("HTTP/1.1 400 Bad Request\r\n"));
     }
 
@@ -723,5 +734,28 @@ mod tests {
             32,
         >(&mut stream, &mut handler));
         assert!(matches!(result, Err(Error::BufferOverflow)));
+    }
+
+    #[test]
+    fn test_bodyless_statuses_get_no_framing_headers() {
+        use nanofish::{request::HttpRequest, status_code::StatusCode};
+
+        let request = HttpRequest::try_from(GET).unwrap();
+        for (status, length) in [
+            (StatusCode::NotModified, BodyLength::Known(0)),
+            (StatusCode::NoContent, BodyLength::Unknown),
+        ] {
+            let mut stream = MockStream::<512>::new(b"");
+            let mut writer = ResponseWriter::<_, 256>::new(&mut stream, &request);
+            futures_lite::future::block_on(async {
+                writer.send_head(status, &[], length).await.unwrap();
+                assert!(writer.write(b"x").await.is_err());
+                writer.finish().await.unwrap();
+            });
+            let output = stream.output();
+            assert!(!output.contains("Content-Length"), "{output}");
+            assert!(!output.contains("Transfer-Encoding"), "{output}");
+            assert!(output.ends_with("Connection: close\r\n\r\n"), "{output}");
+        }
     }
 }

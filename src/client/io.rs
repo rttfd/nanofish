@@ -6,9 +6,9 @@ use nanofish::{
     client::{
         BodySource,
         builder::RequestBuilder,
-        stream::{BodySink, ChunkDecoder, StreamedResponse},
+        stream::{BodySink, StreamedResponse},
     },
-    codec::{self, BodyFraming},
+    codec::{self, BodyFraming, ChunkDecoder},
     error::Error,
     header::HttpHeader,
     method::HttpMethod,
@@ -163,15 +163,25 @@ pub struct Exchange<'b> {
     pub reusable: bool,
 }
 
-/// Whether the response asks for the connection to be closed.
-fn wants_close(response: &HttpResponse<'_>) -> bool {
-    response
-        .get_header(nanofish::header::headers::CONNECTION)
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .any(|token| token.trim().eq_ignore_ascii_case("close"))
+/// A response read into a buffer but not parsed yet; see
+/// [`HttpClient::exchange_raw`].
+#[derive(Debug, Clone, Copy)]
+pub struct RawExchange {
+    /// How many bytes of the response buffer hold the response.
+    pub used: usize,
+    /// Whether the stream may carry another request.
+    pub reusable: bool,
+}
+
+impl RawExchange {
+    /// Parse the response this exchange left in `buffer`.
+    fn parse(self, buffer: &[u8]) -> Result<Exchange<'_>, Error> {
+        Ok(Exchange {
+            response: codec::parse_resp(&buffer[..self.used])?,
+            used: self.used,
+            reusable: self.reusable,
         })
+    }
 }
 
 /// Request metadata for [`HttpClient`].
@@ -330,6 +340,28 @@ impl<const RQ: usize> HttpClient<RQ> {
         keep_alive: bool,
         retry_delay: D,
     ) -> Result<Exchange<'b>, Error>
+    where
+        S: Read + Write,
+        D: Fn() -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let raw = self
+            .exchange_raw(stream, request, response_buffer, keep_alive, retry_delay)
+            .await?;
+        raw.parse(response_buffer)
+    }
+
+    /// Like [`HttpClient::exchange_with_retry_delay`], but leaves the response
+    /// unparsed in `response_buffer`, for a caller that loops over attempts
+    /// and parses only the one it returns.
+    pub(crate) async fn exchange_raw<S, D, Fut>(
+        &self,
+        stream: &mut S,
+        request: HttpClientRequest<'_>,
+        response_buffer: &mut [u8],
+        keep_alive: bool,
+        retry_delay: D,
+    ) -> Result<RawExchange, Error>
     where
         S: Read + Write,
         D: Fn() -> Fut,
@@ -560,6 +592,36 @@ impl<const RQ: usize> HttpClient<RQ> {
         D: Fn() -> Fut,
         Fut: Future<Output = ()>,
     {
+        let raw = self
+            .exchange_upload_raw(
+                stream,
+                request,
+                source,
+                response_buffer,
+                keep_alive,
+                retry_delay,
+            )
+            .await?;
+        raw.parse(response_buffer)
+    }
+
+    /// Like [`HttpClient::exchange_upload_with_retry_delay`], but leaves the
+    /// response unparsed; see [`HttpClient::exchange_raw`].
+    pub(crate) async fn exchange_upload_raw<S, U, D, Fut>(
+        &self,
+        stream: &mut S,
+        request: HttpClientRequest<'_>,
+        source: &mut U,
+        response_buffer: &mut [u8],
+        keep_alive: bool,
+        retry_delay: D,
+    ) -> Result<RawExchange, Error>
+    where
+        S: Read + Write,
+        U: BodySource,
+        D: Fn() -> Fut,
+        Fut: Future<Output = ()>,
+    {
         self.send_request_chunked(stream, &request, source, keep_alive)
             .await?;
         read_exchange(
@@ -635,29 +697,9 @@ impl<const RQ: usize> HttpClient<RQ> {
         let method = request.method;
         self.send_request(stream, &request, false).await?;
 
-        let mut retries = self.options.max_retries;
-        let mut held = 0;
-        let mut searched: usize = 0;
-        let head_end = loop {
-            if held == buffer.len() {
-                return Err(Error::BufferOverflow);
-            }
-            let n =
-                read_retrying(stream, &mut buffer[held..], &mut retries, &mut retry_delay).await?;
-            if n == 0 {
-                return Err(if held == 0 {
-                    Error::NoResponse
-                } else {
-                    Error::InvalidResponse("Incomplete response head")
-                });
-            }
-            held += n;
-            let from = searched.saturating_sub(DOUBLE_CRLF_LEN - 1);
-            if let Some(pos) = protocol::find_double_crlf(&buffer[from..held]) {
-                break from + pos + DOUBLE_CRLF_LEN;
-            }
-            searched = held;
-        };
+        let mut retries = attempts(self.options.max_retries);
+        let (head_end, mut held) =
+            read_final_head(stream, buffer, &mut retries, &mut retry_delay).await?;
 
         codec::check_response_framing(&buffer[..head_end])?;
         let framing = codec::response_framing(method, &buffer[..head_end]);
@@ -705,7 +747,9 @@ impl<const RQ: usize> HttpClient<RQ> {
                 loop {
                     let mut pos = 0;
                     while pos < held && !decoder.is_done() {
-                        let step = decoder.step(&buffer[pos..held])?;
+                        let step = decoder
+                            .step(&buffer[pos..held])
+                            .map_err(Error::InvalidResponse)?;
                         if let Some(range) = step.data {
                             sink.chunk(&buffer[pos + range.start..pos + range.end])
                                 .await?;
@@ -854,6 +898,70 @@ impl<const RQ: usize> HttpClient<RQ> {
     }
 }
 
+/// Read until `buffer` holds the head of the final response, dropping any
+/// interim (`1xx`) responses before it.
+///
+/// Returns where the head ends and how many bytes the buffer holds (the head
+/// and whatever part of the body came with it).
+///
+/// # Errors
+///
+/// - [`Error::BufferOverflow`] if the head does not fit in `buffer`.
+/// - [`Error::NoResponse`] if the connection closes before any byte arrives.
+/// - [`Error::InvalidResponse`] if it closes in the middle of a head.
+/// - The read errors of [`read_retrying`].
+async fn read_final_head<S, D, Fut>(
+    stream: &mut S,
+    buffer: &mut [u8],
+    retries: &mut usize,
+    retry_delay: &mut D,
+) -> Result<(usize, usize), Error>
+where
+    S: Read,
+    D: FnMut() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let mut held = 0;
+    let mut searched: usize = 0;
+    let mut received = false;
+    loop {
+        let from = searched.saturating_sub(DOUBLE_CRLF_LEN - 1);
+        if let Some(pos) = protocol::find_double_crlf(&buffer[from..held]) {
+            let head_end = from + pos + DOUBLE_CRLF_LEN;
+            if !codec::is_interim(&buffer[..head_end]) {
+                return Ok((head_end, held));
+            }
+            // `100 Continue` and the like precede the final response; drop
+            // them and look for the next head.
+            buffer.copy_within(head_end..held, 0);
+            held -= head_end;
+            searched = 0;
+            continue;
+        }
+        searched = held;
+
+        if held == buffer.len() {
+            return Err(Error::BufferOverflow);
+        }
+        let n = read_retrying(stream, &mut buffer[held..], retries, retry_delay).await?;
+        if n == 0 {
+            return Err(if received {
+                Error::InvalidResponse("Incomplete response head")
+            } else {
+                Error::NoResponse
+            });
+        }
+        received = true;
+        held += n;
+    }
+}
+
+/// The number of read attempts for a `max_retries` option: at least one, so
+/// `0` still reads the response instead of failing without trying.
+const fn attempts(max_retries: usize) -> usize {
+    if max_retries == 0 { 1 } else { max_retries }
+}
+
 /// One read from `stream`, retrying transient errors like [`read_response`]:
 /// `retries` counts the read attempts left across the whole response.
 async fn read_retrying<S, D, Fut>(
@@ -884,8 +992,9 @@ where
     }
 }
 
-/// Read the response to a sent request, parse it, and decide whether the
-/// connection can carry another request.
+/// Read the response to a sent request and decide whether the connection can
+/// carry another request. The response is left in the buffer, decoded but
+/// not parsed.
 ///
 /// Shared by the buffered and the chunked-upload exchange paths, so both see
 /// responses exactly the same way: read to the end of the framing, reject a
@@ -893,43 +1002,56 @@ where
 /// connection only when `keep_alive` was asked for, the framing (not the
 /// connection close) delimited the response, the peer is HTTP/1.1 and it did
 /// not ask to close.
-async fn read_exchange<'b, S, D, Fut>(
+async fn read_exchange<S, D, Fut>(
     stream: &mut S,
     method: HttpMethod,
-    response_buffer: &'b mut [u8],
+    response_buffer: &mut [u8],
     max_retries: usize,
     keep_alive: bool,
     retry_delay: D,
-) -> Result<Exchange<'b>, Error>
+) -> Result<RawExchange, Error>
 where
     S: Read,
     D: Fn() -> Fut,
     Fut: Future<Output = ()>,
 {
-    let (total_read, framed) =
-        read_response(stream, method, response_buffer, max_retries, retry_delay).await?;
-    codec::check_response_framing(&response_buffer[..total_read])?;
-    let http11 = response_buffer[..total_read].starts_with(b"HTTP/1.1 ");
-    let total_read = codec::dechunk(response_buffer, total_read)?;
-    let response = codec::parse_resp(&response_buffer[..total_read])?;
-    let reusable = keep_alive && framed && http11 && !wants_close(&response);
-    Ok(Exchange {
-        response,
-        used: total_read,
+    let read = read_response(stream, method, response_buffer, max_retries, retry_delay).await?;
+    let end = read.end;
+    codec::check_response_framing(&response_buffer[..end])?;
+    let http11 = response_buffer[..end].starts_with(b"HTTP/1.1 ");
+    let end = if read.chunked {
+        codec::dechunk_with(response_buffer, end, Error::InvalidResponse)?
+    } else {
+        end
+    };
+    let reusable =
+        keep_alive && read.framed && http11 && !codec::asks_to_close(&response_buffer[..end]);
+    Ok(RawExchange {
+        used: end,
         reusable,
     })
 }
 
+/// What [`read_response`] found.
+struct ReadResponse {
+    /// Where the response ends in the buffer. Bytes the peer sent beyond its
+    /// declared length are not part of it.
+    end: usize,
+    /// Whether the end was delimited by the framing (`true`) rather than by
+    /// the connection closing.
+    framed: bool,
+    /// Whether the body uses chunked framing.
+    chunked: bool,
+}
+
 /// Read a full HTTP response into `buffer`, retrying transient read errors.
-///
-/// Returns the number of bytes read and whether the response end was
-/// delimited by its framing (`true`) rather than by the connection closing.
 ///
 /// `retry_delay` is awaited between retries. A response is complete once its
 /// headers plus `Content-Length` body bytes or the chunked terminator arrive;
 /// a body without either is delimited by connection close. Responses to `HEAD`
-/// requests and `1xx`, `204` and `304` responses have no body and are complete
-/// at the end of the headers.
+/// requests and `204` and `304` responses have no body and are complete at the
+/// end of the headers. Interim `1xx` responses (`100 Continue`, `103 Early
+/// Hints`) are dropped from the buffer: the final response follows them.
 ///
 /// # Errors
 ///
@@ -937,7 +1059,8 @@ where
 /// - [`Error::TcpError`] if `max_retries` read attempts fail, with the kind of
 ///   the last failure.
 /// - [`Error::InvalidResponse`] if the peer closes the connection before a
-///   length-delimited (or chunked) body is complete.
+///   length-delimited (or chunked) body is complete, or after interim
+///   responses only.
 /// - [`Error::BufferOverflow`] if the buffer fills before the response is
 ///   complete.
 async fn read_response<S, D, Fut>(
@@ -946,18 +1069,37 @@ async fn read_response<S, D, Fut>(
     response_buffer: &mut [u8],
     max_retries: usize,
     retry_delay: D,
-) -> Result<(usize, bool), Error>
+) -> Result<ReadResponse, Error>
 where
     S: Read,
     D: Fn() -> Fut,
     Fut: Future<Output = ()>,
 {
     let mut total_read = 0;
-    let mut retries = max_retries;
+    let mut retries = attempts(max_retries);
+    let mut received = false;
     let mut saw_eof = false;
     let mut scan = codec::ResponseScan::new(method);
 
-    while total_read < response_buffer.len() && retries > 0 {
+    loop {
+        if total_read > 0 {
+            if scan.is_complete(&response_buffer[..total_read]) {
+                return Ok(ReadResponse {
+                    end: scan.response_end(total_read),
+                    framed: true,
+                    chunked: scan.is_chunked(),
+                });
+            }
+            if let Some(interim_end) = scan.interim_end() {
+                response_buffer.copy_within(interim_end..total_read, 0);
+                total_read -= interim_end;
+                scan = codec::ResponseScan::new(method);
+                continue;
+            }
+        }
+        if total_read == response_buffer.len() {
+            break;
+        }
         match stream.read(&mut response_buffer[total_read..]).await {
             Ok(0) => {
                 saw_eof = true;
@@ -965,9 +1107,7 @@ where
             }
             Ok(n) => {
                 total_read += n;
-                if scan.is_complete(&response_buffer[..total_read]) {
-                    return Ok((total_read, true));
-                }
+                received = true;
             }
             Err(error) => {
                 retries -= 1;
@@ -979,20 +1119,20 @@ where
         }
     }
 
-    if total_read == 0 {
+    if !received {
         return Err(Error::NoResponse);
     }
 
-    if scan.is_complete(&response_buffer[..total_read]) {
-        return Ok((total_read, true));
-    }
-
     if saw_eof {
-        if scan.declares_length() {
+        if scan.declares_length() || total_read == 0 {
             return Err(Error::InvalidResponse("Incomplete response body"));
         }
         // No length was declared: connection close delimits the body.
-        return Ok((total_read, false));
+        return Ok(ReadResponse {
+            end: total_read,
+            framed: false,
+            chunked: false,
+        });
     }
 
     // The buffer filled before the response was complete.
@@ -2780,5 +2920,152 @@ mod tests {
         ));
         // max_retries counts total attempts: 2 failures, 1 delay in between.
         assert_eq!(delays.get(), 1);
+    }
+
+    const INTERIM_THEN_OK: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </a.css>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+
+    #[test]
+    fn test_interim_responses_are_skipped() {
+        for max in [1, 3, 1000] {
+            let mut stream = Trickle {
+                inner: MockStream::<256, 256>::new(INTERIM_THEN_OK),
+                max,
+            };
+            let client = HttpClient::new();
+            let mut buffer = [0; 256];
+            let exchange = futures_lite::future::block_on(client.exchange(
+                &mut stream,
+                get_request(HttpMethod::GET),
+                &mut buffer,
+                true,
+            ))
+            .unwrap();
+            assert_eq!(exchange.response.status_code, StatusCode::Ok, "max {max}");
+            assert_eq!(exchange.response.body.as_str(), Some("hello"), "max {max}");
+            assert!(exchange.reusable, "max {max}");
+        }
+    }
+
+    #[test]
+    fn test_streaming_skips_interim_responses() {
+        for max in [1, 3, 1000] {
+            let mut stream = Trickle {
+                inner: MockStream::<256, 256>::new(INTERIM_THEN_OK),
+                max,
+            };
+            let client = HttpClient::new();
+            let mut buffer = [0; 64];
+            let mut sink = Collect::default();
+            let streamed = futures_lite::future::block_on(client.request_streaming(
+                &mut stream,
+                get_request(HttpMethod::GET),
+                &mut buffer,
+                &mut sink,
+            ))
+            .unwrap();
+            assert_eq!(streamed.status_code, StatusCode::Ok, "max {max}");
+            assert_eq!(sink.body, b"hello", "max {max}");
+        }
+    }
+
+    #[test]
+    fn test_only_interim_response_before_close_is_an_error() {
+        let mut stream = MockStream::<128, 256>::new(b"HTTP/1.1 100 Continue\r\n\r\n");
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+        let result = futures_lite::future::block_on(client.request(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+        ));
+        assert!(
+            matches!(result, Err(Error::InvalidResponse(_))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn test_switching_protocols_is_final() {
+        let mut stream =
+            MockStream::<128, 256>::new(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\n\r\n");
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+        let (response, _) = futures_lite::future::block_on(client.request(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+        ))
+        .unwrap();
+        assert_eq!(response.status_code, StatusCode::SwitchingProtocols);
+    }
+
+    #[test]
+    fn test_bytes_past_content_length_are_not_body() {
+        let mut stream =
+            MockStream::<128, 256>::new(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhelloEXTRA");
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+        let (response, used) = futures_lite::future::block_on(client.request(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+        ))
+        .unwrap();
+        assert_eq!(response.body.as_str(), Some("hello"));
+        assert_eq!(
+            used,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello".len()
+        );
+
+        // A body-less response has no body, whatever follows its head.
+        let mut stream = MockStream::<128, 256>::new(b"HTTP/1.1 204 No Content\r\n\r\njunk");
+        let mut buffer = [0; 128];
+        let (response, _) = futures_lite::future::block_on(client.request(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+        ))
+        .unwrap();
+        assert_eq!(response.body, ResponseBody::Empty);
+    }
+
+    #[test]
+    fn test_zero_max_retries_still_reads_once() {
+        let mut stream =
+            MockStream::<128, 256>::new(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        let client = DefaultHttpClient::with_options(nanofish::HttpClientOptions {
+            max_retries: 0,
+            ..nanofish::HttpClientOptions::default()
+        });
+        let mut buffer = [0; 128];
+        let (response, _) = futures_lite::future::block_on(client.request(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+        ))
+        .unwrap();
+        assert_eq!(response.body.as_str(), Some("ok"));
+    }
+
+    #[test]
+    fn test_chunked_must_be_the_last_coding() {
+        // `chunked, gzip` is not chunked framing: the body runs to the close.
+        let raw =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        let mut stream = MockStream::<128, 256>::new(raw);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+        let exchange = futures_lite::future::block_on(client.exchange(
+            &mut stream,
+            get_request(HttpMethod::GET),
+            &mut buffer,
+            true,
+        ))
+        .unwrap();
+        assert!(!exchange.reusable);
+        assert_eq!(
+            exchange.response.body.as_bytes(),
+            b"5\r\nhello\r\n0\r\n\r\n"
+        );
     }
 }

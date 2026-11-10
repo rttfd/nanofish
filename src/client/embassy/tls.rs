@@ -1,10 +1,12 @@
 //! HTTPS for the Embassy client, compiled with the `tls` feature.
 
 use embassy_net::tcp::TcpSocket;
-use embassy_time::{Instant, Timer, with_timeout};
+use embassy_time::{Instant, Timer};
 use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
 use nanofish::client::BodySource;
-use nanofish::client::embassy::{EmbassyHttpClient, HOST_HEADER_SIZE, resolve_host};
+use nanofish::client::embassy::{
+    EmbassyHttpClient, HOST_HEADER_SIZE, resolve_host, within_total_timeout,
+};
 use nanofish::client::io::{
     HttpClient as BaseHttpClient, HttpClientRequest, HttpEndpoint, parse_endpoint,
 };
@@ -228,15 +230,7 @@ impl<
             .await
         };
 
-        match self.options.total_timeout {
-            Some(limit) => with_timeout(
-                embassy_time::Duration::from_millis(limit.as_millis()),
-                attempt,
-            )
-            .await
-            .unwrap_or(Err(Error::Timeout)),
-            None => attempt.await,
-        }
+        within_total_timeout(self.options.total_timeout, attempt).await
     }
 }
 

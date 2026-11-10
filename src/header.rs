@@ -28,6 +28,8 @@ pub mod headers {
     pub const IF_NONE_MATCH: &str = "If-None-Match";
     /// Location header
     pub const LOCATION: &str = "Location";
+    /// Set-Cookie header
+    pub const SET_COOKIE: &str = "Set-Cookie";
 }
 
 /// Common MIME types for Content-Type header values

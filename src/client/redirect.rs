@@ -8,7 +8,7 @@ use nanofish::{
     error::Error,
     header::{HttpHeader, headers},
     method::HttpMethod,
-    protocol::MAX_HEADERS,
+    protocol::{self, CRLF_STR, MAX_HEADERS},
     response::HttpResponse,
     status_code::StatusCode,
 };
@@ -141,11 +141,35 @@ fn push_relative_path<const N: usize>(
     Ok(())
 }
 
+/// The value of the first header called `name` in the message head in
+/// `data`, without parsing the rest of the message.
+fn head_value<'d>(data: &'d [u8], name: &str) -> Option<&'d str> {
+    let head_end = protocol::find_double_crlf(data).unwrap_or(data.len());
+    let head = core::str::from_utf8(&data[..head_end]).ok()?;
+    // The status line has no colon before its first space, so it never
+    // matches a header name.
+    head.split(CRLF_STR).skip(1).find_map(|line| {
+        let (header, value) = line.split_once(':')?;
+        header
+            .trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim())
+    })
+}
+
 /// Headers that must not follow a redirect to a different origin.
 fn is_sensitive(name: &str) -> bool {
     [headers::AUTHORIZATION, "Cookie", "Proxy-Authorization"]
         .iter()
         .any(|sensitive| name.eq_ignore_ascii_case(sensitive))
+}
+
+/// Headers that describe the request body (`Content-Length`, `Content-Type`,
+/// ...), which go when a redirect turns the request into one without a body
+/// (RFC 9110 section 15.4).
+fn is_content_header(name: &str) -> bool {
+    name.get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Content-"))
 }
 
 /// Send a request with `send`, following up to `max_redirects` redirects.
@@ -181,16 +205,25 @@ where
     let (mut method, endpoint, headers, mut body) = request;
     let mut next_url: Option<String<REDIRECT_URL_SIZE>> = None;
     let mut sensitive_headers_allowed = true;
+    let mut body_dropped = false;
     let mut redirects = 0;
 
     let used = loop {
         let target = next_url.as_deref().unwrap_or(endpoint);
 
         let mut kept = Vec::<HttpHeader<'h>, MAX_HEADERS>::new();
-        let headers = if sensitive_headers_allowed {
+        let headers = if sensitive_headers_allowed && !body_dropped {
             headers
         } else {
-            kept.extend(headers.iter().filter(|h| !is_sensitive(h.name)).cloned());
+            kept.extend(
+                headers
+                    .iter()
+                    .filter(|h| sensitive_headers_allowed || !is_sensitive(h.name))
+                    // A `Content-Length` left behind without its body would
+                    // make the server wait for bytes that never come.
+                    .filter(|h| !body_dropped || !is_content_header(h.name))
+                    .cloned(),
+            );
             &kept
         };
 
@@ -201,19 +234,17 @@ where
 
         // Decide in a scope of its own: the response borrows the buffer, which
         // the next hop reuses.
-        let redirect = {
-            let response = codec::parse_resp(&buffer[..used])?;
-            if is_redirect(response.status_code) {
-                response
-                    .get_header(headers::LOCATION)
-                    .map(|location| {
-                        resolve_location::<REDIRECT_URL_SIZE>(&parse_endpoint(target)?, location)
-                            .map(|url| (response.status_code, url))
-                    })
-                    .transpose()?
-            } else {
-                None
-            }
+        // Only the status line and `Location` decide; the response is
+        // parsed in full once, when it is the final one.
+        let head = &buffer[..used];
+        let redirect = match codec::status_code(head).map(StatusCode::from) {
+            Some(status) if is_redirect(status) => head_value(head, headers::LOCATION)
+                .map(|location| {
+                    resolve_location::<REDIRECT_URL_SIZE>(&parse_endpoint(target)?, location)
+                        .map(|url| (status, url))
+                })
+                .transpose()?,
+            _ => None,
         };
         let Some((status, url)) = redirect else {
             break used;
@@ -231,6 +262,7 @@ where
         method = next_method;
         if !keep_body {
             body = None;
+            body_dropped = true;
         }
         next_url = Some(url);
     };
@@ -640,5 +672,38 @@ mod tests {
             async |_, _, _, _, _: &mut [u8]| Err(Error::NoResponse),
         ));
         assert!(matches!(result, Err(Error::NoResponse)));
+    }
+
+    #[test]
+    fn test_follow_drops_body_headers_with_the_body() {
+        let headers = [
+            HttpHeader::new("Content-Length", "4"),
+            HttpHeader::new("content-type", "text/plain"),
+            HttpHeader::new("Accept", "text/plain"),
+        ];
+        let (result, calls) = run(
+            2,
+            HttpMethod::POST,
+            "http://h/a",
+            &headers,
+            Some(b"data"),
+            &[FOUND_B, OK_DONE],
+        );
+        assert_eq!(result.unwrap().0, StatusCode::Ok);
+        assert_eq!(calls[0].headers.len(), 3);
+        // A `Content-Length: 4` on the body-less GET would hang the server.
+        assert_eq!(calls[1].headers, ["Accept"]);
+
+        // 307 keeps the body, so it keeps the headers that describe it.
+        let temporary: &[u8] = b"HTTP/1.1 307 Temporary Redirect\r\nLocation: /b\r\n\r\n";
+        let (_, calls) = run(
+            2,
+            HttpMethod::POST,
+            "http://h/a",
+            &headers,
+            Some(b"data"),
+            &[temporary, OK_DONE],
+        );
+        assert_eq!(calls[1].headers.len(), 3);
     }
 }

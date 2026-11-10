@@ -29,7 +29,8 @@ impl TimeoutDuration {
 /// Options for configuring the HTTP client
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpClientOptions {
-    /// Maximum number of read attempts for response reads
+    /// Maximum number of read attempts for response reads. `0` counts as
+    /// one attempt.
     pub max_retries: usize,
     /// Timeout duration for socket operations
     pub socket_timeout: TimeoutDuration,
@@ -52,7 +53,7 @@ pub struct HttpClientOptions {
     /// `Cookie` and `Proxy-Authorization` headers are dropped when a redirect
     /// leaves the original origin, a redirect from `https` to `http` is
     /// refused, and a `POST` answered by `301`, `302` or `303` is repeated as
-    /// a `GET` without its body.
+    /// a `GET` without its body and without its `Content-*` headers.
     pub max_redirects: usize,
     /// Delay between read retry attempts.
     ///

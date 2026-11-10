@@ -3,7 +3,7 @@ use nanofish::{
     error::Error,
     header::{HttpHeader, mime_types},
     request::HttpRequest,
-    response::{HttpResponse, ResponseBody},
+    server::ServerResponse,
     status_code::StatusCode,
 };
 
@@ -17,7 +17,7 @@ pub trait HttpHandler {
     async fn handle_request(
         &mut self,
         request: &HttpRequest<'_>,
-    ) -> Result<HttpResponse<'_>, Error>;
+    ) -> Result<ServerResponse<'_>, Error>;
 }
 
 /// A simple handler that serves basic endpoints for testing
@@ -28,31 +28,31 @@ impl HttpHandler for SimpleHandler {
     async fn handle_request(
         &mut self,
         request: &HttpRequest<'_>,
-    ) -> Result<HttpResponse<'_>, Error> {
+    ) -> Result<ServerResponse<'_>, Error> {
         let mut headers = Vec::new();
         match request.path {
             "/" => {
                 let _ = headers.push(HttpHeader::content_type(mime_types::HTML));
-                Ok(HttpResponse {
+                Ok(ServerResponse {
                     status_code: StatusCode::Ok,
                     headers,
-                    body: ResponseBody::Text("<h1>Hello from nanofish HTTP server!</h1>"),
+                    body: b"<h1>Hello from nanofish HTTP server!</h1>",
                 })
             }
             "/health" => {
                 let _ = headers.push(HttpHeader::content_type(mime_types::JSON));
-                Ok(HttpResponse {
+                Ok(ServerResponse {
                     status_code: StatusCode::Ok,
                     headers,
-                    body: ResponseBody::Text("{\"status\":\"ok\"}"),
+                    body: b"{\"status\":\"ok\"}",
                 })
             }
             _ => {
                 let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
-                Ok(HttpResponse {
+                Ok(ServerResponse {
                     status_code: StatusCode::NotFound,
                     headers,
-                    body: ResponseBody::Text("404 Not Found"),
+                    body: b"404 Not Found",
                 })
             }
         }
@@ -79,10 +79,7 @@ mod tests {
 
         let response = futures_lite::future::block_on(handler.handle_request(&request)).unwrap();
         assert_eq!(response.status_code, StatusCode::Ok);
-        assert_eq!(
-            response.body.as_str(),
-            Some("<h1>Hello from nanofish HTTP server!</h1>")
-        );
+        assert_eq!(response.body, b"<h1>Hello from nanofish HTTP server!</h1>");
 
         // Test health endpoint
         let mut handler = SimpleHandler;
@@ -96,7 +93,7 @@ mod tests {
 
         let response = futures_lite::future::block_on(handler.handle_request(&request)).unwrap();
         assert_eq!(response.status_code, StatusCode::Ok);
-        assert_eq!(response.body.as_str(), Some("{\"status\":\"ok\"}"));
+        assert_eq!(response.body, b"{\"status\":\"ok\"}");
 
         // Test 404 path
         let mut handler = SimpleHandler;
@@ -110,6 +107,6 @@ mod tests {
 
         let response = futures_lite::future::block_on(handler.handle_request(&request)).unwrap();
         assert_eq!(response.status_code, StatusCode::NotFound);
-        assert_eq!(response.body.as_str(), Some("404 Not Found"));
+        assert_eq!(response.body, b"404 Not Found");
     }
 }
