@@ -194,6 +194,32 @@ pub fn build_req_with<const RQ: usize>(
     Ok(req)
 }
 
+/// Write `len` as `HEX\r\n` into `out` and return the used part.
+///
+/// The shared framing of one chunk, used by the client (chunked upload) and
+/// the server (chunked response). `out` must hold up to 16 hex digits plus
+/// CRLF, the size of `usize::MAX`.
+pub(crate) fn chunk_size_line(len: usize, out: &mut [u8; 18]) -> &[u8] {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut digits = [0u8; 16];
+    let mut count = 0;
+    let mut rest = len;
+    loop {
+        digits[count] = HEX[rest & 0xf];
+        count += 1;
+        rest >>= 4;
+        if rest == 0 {
+            break;
+        }
+    }
+    for (index, slot) in out.iter_mut().take(count).enumerate() {
+        *slot = digits[count - 1 - index];
+    }
+    out[count] = b'\r';
+    out[count + 1] = b'\n';
+    &out[..count + 2]
+}
+
 #[cfg(test)]
 pub fn complete(data: &[u8]) -> bool {
     let headers_end = match protocol::find_double_crlf(data) {
@@ -1294,6 +1320,23 @@ mod tests {
                 matches!(result, Err(Error::InvalidResponse(_))),
                 "chunk size {size} should be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn test_chunk_size_line() {
+        let mut out = [0u8; 18];
+        for (len, expected) in [
+            (1, "1\r\n"),
+            (9, "9\r\n"),
+            (10, "a\r\n"),
+            (15, "f\r\n"),
+            (16, "10\r\n"),
+            (255, "ff\r\n"),
+            (4096, "1000\r\n"),
+            (usize::MAX, "ffffffffffffffff\r\n"),
+        ] {
+            assert_eq!(chunk_size_line(len, &mut out), expected.as_bytes(), "{len}");
         }
     }
 
