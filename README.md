@@ -23,7 +23,7 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 - **Smart Response Parsing** - Automatic text/binary detection based on Content-Type headers
 - **Easy Header Management** - Pre-defined constants and helper methods for common headers
 - **SSE-Friendly Headers** - `text/event-stream`, `Cache-Control`, and `Connection` helpers for streaming endpoints
-- **Optional TLS Support** - HTTPS client support with embedded-tls when enabled (server is HTTP-only)
+- **Optional TLS Support** - HTTPS client support with embedded-tls when enabled (the Embassy server speaks plain HTTP; see the TLS note under Server)
 - **Optional Logging** - Choose between `defmt` or `log` for diagnostics, or disable both for zero overhead
 - **Timeout & Retry Support** - Built-in handling for network issues, plus optional overall request deadlines
 - **Streaming Bodies** - Download large responses through a small buffer into a `BodySink`, and send large or incremental responses with a `ResponseWriter`
@@ -79,7 +79,7 @@ The default build includes the transport-neutral HTTP types, parsing, response b
 - **`smoltcp`** - Enables `SmolTcpStream`, an `embedded-io-async` adapter for `smoltcp` TCP sockets.
 - **`tls`** - Enables HTTPS/TLS support via `embedded-tls`
   - When disabled: Only HTTP requests are supported
-  - When enabled: HTTPS client support with TLS 1.2/1.3 (server remains HTTP-only)
+  - When enabled: HTTPS client support with TLS 1.2/1.3 (the server side is not covered by this feature)
 - **`defmt`** - Enables logging via the [`defmt`](https://github.com/knurling-rs/defmt) framework (commonly used with probe-rs)
 - **`log`** - Enables logging via the [`log`](https://docs.rs/log) crate
 
@@ -461,7 +461,7 @@ Nanofish includes a built-in HTTP server perfect for embedded systems and `IoT` 
 
 For streaming endpoints such as server-sent events, use the `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and `Connection: keep-alive` helpers, plus the response head builder when you need to send headers before the body stream starts.
 
-> **Important Note**: The server only supports plain HTTP connections, not HTTPS/TLS. While the Nanofish client supports both HTTP and HTTPS, the server implementation is HTTP-only. For secure connections in production, use a reverse proxy (like nginx) or load balancer that handles TLS termination.
+> **TLS note**: Nanofish does not terminate TLS itself. `EmbassyHttpServer` accepts plain TCP, and the `tls` feature covers only the client. The server core is transport-free, though: `HttpServer` and `handle_http_connection()` run over any `embedded-io-async` stream, so you can hand them a stream from a TLS server library that you bring. Otherwise, terminate TLS in front of the device with a reverse proxy (like nginx) or a load balancer.
 
 ### Generic IO Server Without Embassy
 

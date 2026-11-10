@@ -7,14 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-11-10
+
 ### Fixed
 
 - `EmbassyHttpServer` now waits for its FIN to go out before reusing the socket. It used to call `TcpSocket::close` and drop the socket straight away, before the network task could send the FIN, so clients that read until the connection closes hung until they timed out, and the client's own FIN was answered with an RST. A peer that never acknowledges is aborted after 2 seconds.
-
 - `EmbassyHttpServer::serve` and `handle_http_connection` closed the connection after every response without saying so. They now send `Connection: close`, so an HTTP/1.1 client such as a browser stops sending its next request into a connection that is already gone (a reset). The keep-alive and streaming paths already did this.
 
 ### Documentation
 
+- The TLS note no longer says the server is HTTP-only. The Embassy server accepts plain TCP, and the server core runs over any `embedded-io-async` stream, so a TLS stream you bring works too.
 - Explained that each server task serves one connection at a time and that parallel clients (a browser loading a page) need one task per connection, with an example.
 
 ## [0.14.1] - 2026-10-31
@@ -422,7 +424,8 @@ HttpResponseBuilder::new()
 - Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, and CONNECT methods.
 - Configurable client options (retries, timeouts, delays).
 
-[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.14.2...HEAD
+[0.14.2]: https://github.com/rttfd/nanofish/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/rttfd/nanofish/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/rttfd/nanofish/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/rttfd/nanofish/compare/v0.12.1...v0.13.0
