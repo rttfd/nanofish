@@ -6,6 +6,7 @@ use embassy_net::{
 };
 use embassy_time::{Timer, with_timeout};
 use heapless::String;
+use nanofish::client::BodySource;
 use nanofish::client::builder::RequestBuilder;
 use nanofish::client::io::{
     HttpClient as BaseHttpClient, HttpClientRequest, HttpEndpoint, parse_endpoint,
@@ -385,6 +386,84 @@ impl<
                                 request,
                                 buffer,
                                 sink,
+                                || self.retry_delay(),
+                            )
+                            .await
+                    })
+                    .await
+                }
+                _ => Err(Error::UnsupportedScheme("unknown")),
+            }
+        };
+
+        match self.options.total_timeout {
+            Some(limit) => with_timeout(
+                embassy_time::Duration::from_millis(limit.as_millis()),
+                attempt,
+            )
+            .await
+            .unwrap_or(Err(Error::Timeout)),
+            None => attempt.await,
+        }
+    }
+
+    /// Send a request whose body is produced by `source`, with chunked
+    /// transfer coding.
+    ///
+    /// The body needs no length and no buffer: each piece the source yields
+    /// goes out as one chunk, so a body of any size streams to the server
+    /// through bounded memory. See
+    /// [`HttpClient::request_upload`](nanofish::HttpClient::request_upload)
+    /// for the semantics of the upload itself.
+    ///
+    /// Redirects are not followed: a redirect would ask for the same body
+    /// again, but the source is consumed; check the status yourself and
+    /// upload to the `Location` with a fresh source.
+    /// [`HttpClientOptions::total_timeout`] applies.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`EmbassyHttpClient::request`] that apply before
+    /// and during the upload, and those of `request_upload` while reading the
+    /// response.
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
+    pub async fn request_upload<'b, U: BodySource>(
+        &self,
+        method: HttpMethod,
+        endpoint: &str,
+        headers: &[HttpHeader<'_>],
+        source: &mut U,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        let attempt = async {
+            let endpoint = parse_endpoint(endpoint)?;
+            let host_header = endpoint.host_header::<HOST_HEADER_SIZE>()?;
+            let client = BaseHttpClient::<RQ>::with_options(self.options);
+            let request = HttpClientRequest {
+                method,
+                host: &host_header,
+                path: endpoint.path,
+                query: endpoint.query,
+                headers,
+                body: None,
+            };
+
+            match endpoint.scheme {
+                "https" => {
+                    self.https_upload(&endpoint, &client, request, source, response_buffer)
+                        .await
+                }
+                "http" => {
+                    self.with_http_connection(&endpoint, async |socket| {
+                        client
+                            .request_upload_with_retry_delay(
+                                socket,
+                                request,
+                                source,
+                                response_buffer,
                                 || self.retry_delay(),
                             )
                             .await
@@ -892,6 +971,120 @@ impl<'a, const RQ: usize> EmbassyHttpSession<'a, RQ> {
         };
         // The response is parsed again from the buffer that now holds it.
         Ok((codec::parse_resp(&response_buffer[..used])?, used))
+    }
+
+    /// Send a request whose body is produced by `source`, with chunked
+    /// transfer coding, on the session.
+    ///
+    /// Like [`EmbassyHttpSession::request`], but the body comes from the
+    /// source piece by piece, with no length and no buffering; see
+    /// [`EmbassyHttpClient::request_upload`]. A chunked upload is fully
+    /// delimited, so the connection is reused under the same rules. When the
+    /// server dropped an idle connection, the request is repeated on a fresh
+    /// one only for methods that are safe to repeat — the source is consumed,
+    /// so it must be able to produce the body again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`EmbassyHttpSession::request`].
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
+    pub async fn request_upload<'b, U: BodySource>(
+        &mut self,
+        method: HttpMethod,
+        target: &str,
+        headers: &[HttpHeader<'_>],
+        source: &mut U,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        let total_timeout = self.options.total_timeout;
+        let attempt = self.upload_inner(method, target, headers, source, response_buffer);
+        let used = match total_timeout {
+            Some(limit) => {
+                let result = with_timeout(
+                    embassy_time::Duration::from_millis(limit.as_millis()),
+                    attempt,
+                )
+                .await
+                .unwrap_or(Err(Error::Timeout));
+                if result.is_err() {
+                    // A half-finished exchange leaves the connection unusable.
+                    self.open = false;
+                }
+                result?
+            }
+            None => attempt.await?,
+        };
+        // The response is parsed again from the buffer that now holds it.
+        Ok((codec::parse_resp(&response_buffer[..used])?, used))
+    }
+
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
+    async fn upload_inner<U: BodySource>(
+        &mut self,
+        method: HttpMethod,
+        target: &str,
+        headers: &[HttpHeader<'_>],
+        source: &mut U,
+        response_buffer: &mut [u8],
+    ) -> Result<usize, Error> {
+        let (path, query) = target
+            .split_once('?')
+            .map_or((target, None), |(path, query)| (path, Some(query)));
+        let client = BaseHttpClient::<RQ>::with_options(self.options);
+
+        let mut reused = self.open;
+        loop {
+            if !self.open {
+                self.reconnect().await?;
+            }
+            let host_header = self.host_header.clone();
+            let request = HttpClientRequest {
+                method,
+                host: &host_header,
+                path,
+                query,
+                headers,
+                body: None,
+            };
+            let outcome = client
+                .exchange_upload_with_retry_delay(
+                    &mut self.socket,
+                    request,
+                    source,
+                    &mut *response_buffer,
+                    true,
+                    || {
+                        Timer::after(embassy_time::Duration::from_millis(
+                            self.options.retry_delay.as_millis(),
+                        ))
+                    },
+                )
+                .await
+                .map(|exchange| (exchange.used, exchange.reusable));
+
+            match outcome {
+                Ok((used, reusable)) => {
+                    self.open = reusable;
+                    return Ok(used);
+                }
+                // The server may have dropped an idle connection: repeat the
+                // request once on a new one, if repeating it is harmless.
+                Err(Error::NoResponse | Error::TcpError(_)) if reused && is_repeatable(method) => {
+                    self.open = false;
+                    reused = false;
+                }
+                Err(error) => {
+                    self.open = false;
+                    return Err(error);
+                }
+            }
+        }
     }
 
     #[expect(

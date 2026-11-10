@@ -1,5 +1,6 @@
 //! Without the `tls` feature the Embassy client refuses `https` URLs.
 
+use nanofish::client::BodySource;
 use nanofish::client::embassy::EmbassyHttpClient;
 use nanofish::client::io::{HttpClient as BaseHttpClient, HttpClientRequest, HttpEndpoint};
 use nanofish::client::stream::{BodySink, StreamedResponse};
@@ -44,6 +45,22 @@ impl<
         _buffer: &mut [u8],
         _sink: &mut K,
     ) -> Result<StreamedResponse, Error> {
+        Err(NO_TLS)
+    }
+
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
+    #[expect(clippy::unused_async, reason = "same signature as the TLS variant")]
+    pub(super) async fn https_upload<'b, U: BodySource>(
+        &self,
+        _endpoint: &HttpEndpoint<'_>,
+        _client: &BaseHttpClient<RQ>,
+        _request: HttpClientRequest<'_>,
+        _source: &mut U,
+        _response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
         Err(NO_TLS)
     }
 }

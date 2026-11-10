@@ -26,7 +26,7 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 - **Optional TLS Support** - HTTPS client support with embedded-tls when enabled (the Embassy server speaks plain HTTP; see the TLS note under Server)
 - **Optional Logging** - Choose between `defmt` or `log` for diagnostics, or disable both for zero overhead
 - **Timeout & Retry Support** - Built-in handling for network issues, plus optional overall request deadlines
-- **Streaming Bodies** - Download large responses through a small buffer into a `BodySink`, and send large or incremental responses with a `ResponseWriter`
+- **Streaming Bodies** - Download large responses through a small buffer into a `BodySink`, upload large request bodies piece by piece from a `BodySource`, and send large or incremental responses with a `ResponseWriter`
 - **Request Builder & Encoders** - `RequestBuilder`, JSON/form helpers, percent-encoding, Base64 and `Authorization` header builders, with no allocation
 - **Keep-Alive & Redirects** - Reusable connections (`EmbassyHttpSession`, `HttpClient::exchange`, server keep-alive) and opt-in, bounded redirect following
 - **Server Helpers** - Path parameters (`/led/:id`), `ETag`/`304` handling, chunked request bodies and proper error responses
@@ -816,6 +816,55 @@ let streamed = client
 
 A response that is cut short is an error, never a silent partial download.
 
+## Uploading Without Buffering
+
+`request_upload` sends a request body whose length is not known in advance, with chunked transfer
+coding: each piece a `BodySource` yields goes out as one chunk, so a body of any size streams to the
+server through bounded memory. `SliceSource` sends a slice in bounded pieces:
+
+```rust,ignore
+use nanofish::{HttpMethod, client::SliceSource};
+
+let image = include_bytes!("firmware.bin");          // or a flash-resident slice
+let mut source = SliceSource::new(image, 4096);      // one chunk per piece
+let (response, _) = client
+    .request_upload(HttpMethod::PUT, "http://example.com/fw/7", &[], &mut source, &mut buffer)
+    .await?;
+```
+
+Your own source decides what a piece is, for example one page of external flash or one SPI
+transaction:
+
+```rust,ignore
+use nanofish::client::BodySource;
+use nanofish::Error;
+
+struct FlashReader { address: u32, end: u32, page: [u8; 4096] }
+
+impl BodySource for FlashReader {
+    async fn next_chunk(&mut self) -> Result<Option<&[u8]>, Error> {
+        if self.address >= self.end {
+            return Ok(None);                         // the body is done
+        }
+        let len = self.read_page_into(&mut self.page).await?;   // your flash driver
+        self.address += len as u32;
+        Ok(Some(&self.page[..len]))
+    }
+}
+```
+
+An empty source is a legal body: it sends the final marker only, which is distinct from
+`Content-Length: 0`. Any method may carry a chunked body, and `request.body` must stay `None` — the
+body comes from the source. A keep-alive connection is reusable after an upload, since a chunked
+body is fully delimited.
+
+Retries are read retries, as everywhere: once the head is written the source is consumed, so a
+failure mid-upload is final — drop the connection and start over. Redirects are not followed for
+the same reason: a `307`/`308` would ask for the same body again. No `Expect: 100-continue` is
+sent; the body goes out unconditionally, which embedded peers expect (an opt-in `100-continue`
+handshake may follow). Servers that answer `411 Length Required` to unknown lengths refuse chunked
+upload outright; there is nothing to fall back to but buffering.
+
 ## Reusing Connections
 
 `EmbassyHttpClient` opens a connection per request. An `EmbassyHttpSession` connects once and keeps
@@ -893,6 +942,62 @@ impl StreamingHandler for Log {
 sits idle keeps the server's socket busy until `read_timeout` expires, so lower that timeout when
 enabling it, and note that one socket serves one client at a time. To serve several clients at once,
 run `serve` in several tasks: each owns its socket and buffers and all accept on the same port.
+
+## Server: Static Files From Any Store
+
+`serve` answers a request with a static file, reading the bytes through a small reusable buffer —
+no copy into a heap or a fixed-size response buffer, any file size:
+
+```rust,ignore
+use nanofish::{serve, ResponseWriter, StaticFile, StaticSite};
+
+static SITE: StaticSite<2> = StaticSite::new([
+    StaticFile {
+        path: "/",
+        content_type: Some("text/html"),
+        body: INDEX_HTML,
+        etag: "\"i1\"",
+        gzip: None,
+    },
+    StaticFile {
+        path: "/app.js",
+        content_type: None,
+        body: APP_JS,
+        etag: "\"a1\"",
+        gzip: Some(APP_JS_GZ),
+    },
+]);
+
+impl StreamingHandler for Handler {
+    type Error = nanofish::Error;
+
+    async fn handle(
+        &mut self,
+        request: &HttpRequest<'_>,
+        response: &mut ResponseWriter<'_>,
+    ) -> Result<(), Self::Error> {
+        let mut buf = [0u8; 512];
+        if serve(&SITE, request, response, &mut buf).await? {
+            return Ok(());
+        }
+        // not a static path: API routes follow
+        Ok(())
+    }
+}
+```
+
+`serve` returns `false` for a path the store does not have, so a handler can fall through to its
+API routes. The semantics it owns: `GET` and `HEAD` only, everything else gets `405`; `/` and
+`/x` map to `index.html`; `If-None-Match` revalidation against the file's strong `ETag`
+(`304` when it matches); and gzip negotiation — when the client accepts `gzip` and the file has a
+pre-compressed variant, it is served with `Content-Encoding: gzip`. Content types come from the
+path's extension (`mime_for_extension` covers a browser UI's needs), and `serve_with` adds headers
+such as `Cache-Control` to every response.
+
+The files do not have to live in the image. `FileStore` is the seam: `stat` describes a file,
+`read` fills a buffer from an offset. `StaticSite` implements it over a const table; a littlefs or
+SD/FatFs adapter implements it in about twenty lines of user code, and its files update at runtime
+— without rebuilding or reflashing.
 
 ## Changelog
 

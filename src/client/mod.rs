@@ -14,6 +14,7 @@ pub(crate) mod redirect;
 mod stream;
 #[cfg(feature = "tls")]
 mod tls;
+mod upload;
 
 pub use builder::RequestBuilder;
 #[cfg(feature = "embassy")]
@@ -29,3 +30,4 @@ pub use stream::{BodySink, StreamedResponse};
 pub use tls::{
     DefaultHttpTlsClient, HttpTlsClient, SmallHttpTlsClient, TlsVerification, TlsVerifier,
 };
+pub use upload::{BodySource, SliceSource};

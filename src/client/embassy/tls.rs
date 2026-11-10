@@ -3,6 +3,7 @@
 use embassy_net::tcp::TcpSocket;
 use embassy_time::{Instant, Timer, with_timeout};
 use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
+use nanofish::client::BodySource;
 use nanofish::client::embassy::{EmbassyHttpClient, HOST_HEADER_SIZE, resolve_host};
 use nanofish::client::io::{
     HttpClient as BaseHttpClient, HttpClientRequest, HttpEndpoint, parse_endpoint,
@@ -131,6 +132,30 @@ impl<
         self.with_https_connection(endpoint, async |tls| {
             client
                 .request_streaming_with_retry_delay(tls, request, buffer, sink, || {
+                    self.retry_delay()
+                })
+                .await
+        })
+        .await
+    }
+
+    /// Upload with a chunked body to an `https` endpoint; see
+    /// [`EmbassyHttpClient::request_upload`].
+    #[expect(
+        clippy::future_not_send,
+        reason = "Embassy sockets are not `Send`; embedded executors run tasks on one thread"
+    )]
+    pub(super) async fn https_upload<'b, U: BodySource>(
+        &self,
+        endpoint: &HttpEndpoint<'_>,
+        client: &BaseHttpClient<RQ>,
+        request: HttpClientRequest<'_>,
+        source: &mut U,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error> {
+        self.with_https_connection(endpoint, async |tls| {
+            client
+                .request_upload_with_retry_delay(tls, request, source, response_buffer, || {
                     self.retry_delay()
                 })
                 .await

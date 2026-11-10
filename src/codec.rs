@@ -113,19 +113,17 @@ pub fn build_req<const RQ: usize>(
     build_req_with(method, host, path, query, headers, body, false)
 }
 
-/// Like [`build_req`]. With `keep_alive`, no `Connection: close` is sent, so an
-/// HTTP/1.1 server keeps the connection open for another request.
-pub fn build_req_with<const RQ: usize>(
-    method: HttpMethod,
-    host: &str,
+/// Whether `path`, `query`, `host` and the caller's headers can be written
+/// into a request as they are.
+///
+/// Anything that could end the request line or a header early would let the
+/// caller's data inject headers or whole requests.
+fn check_request_parts(
     path: &str,
     query: Option<&str>,
+    host: &str,
     headers: &[HttpHeader<'_>],
-    body: Option<&[u8]>,
-    keep_alive: bool,
-) -> Result<String<RQ>, Error> {
-    // Anything that could end the request line or a header early would let
-    // the caller's data inject headers or whole requests.
+) -> Result<(), Error> {
     if path.is_empty() || !protocol::is_valid_request_token(path) {
         return Err(Error::InvalidUrl);
     }
@@ -143,6 +141,21 @@ pub fn build_req_with<const RQ: usize>(
             return Err(Error::HeaderError("Invalid header value"));
         }
     }
+    Ok(())
+}
+
+/// Like [`build_req`]. With `keep_alive`, no `Connection: close` is sent, so an
+/// HTTP/1.1 server keeps the connection open for another request.
+pub fn build_req_with<const RQ: usize>(
+    method: HttpMethod,
+    host: &str,
+    path: &str,
+    query: Option<&str>,
+    headers: &[HttpHeader<'_>],
+    body: Option<&[u8]>,
+    keep_alive: bool,
+) -> Result<String<RQ>, Error> {
+    check_request_parts(path, query, host, headers)?;
 
     let mut req = String::<RQ>::new();
 
@@ -192,6 +205,100 @@ pub fn build_req_with<const RQ: usize>(
         try_push!(req.push_str(CONNECTION_CLOSE_END));
     }
     Ok(req)
+}
+
+/// Like [`build_req_with`], for a body sent with chunked transfer coding.
+///
+/// The head announces `Transfer-Encoding: chunked` instead of a
+/// `Content-Length`, so the body can follow piece by piece, each piece
+/// framed by its own size line, without its total length being known first.
+/// The body itself is written by the caller after the head.
+///
+/// Any method may carry a chunked body; the framing does not depend on the
+/// method.
+///
+/// # Errors
+///
+/// - [`Error::HeaderError`] if `headers` contain `Content-Length` or
+///   `Transfer-Encoding`, which the chunked framing sets itself.
+/// - The errors of [`build_req_with`] for the other inputs.
+pub fn build_req_chunked_with<const RQ: usize>(
+    method: HttpMethod,
+    host: &str,
+    path: &str,
+    query: Option<&str>,
+    headers: &[HttpHeader<'_>],
+    keep_alive: bool,
+) -> Result<String<RQ>, Error> {
+    check_request_parts(path, query, host, headers)?;
+    for header in headers {
+        if header.name.eq_ignore_ascii_case(CONTENT_LENGTH)
+            || header.name.eq_ignore_ascii_case(TRANSFER_ENCODING)
+        {
+            return Err(Error::HeaderError(
+                "Content-Length and Transfer-Encoding are set by the chunked upload",
+            ));
+        }
+    }
+
+    let mut req = String::<RQ>::new();
+
+    try_push!(req.push_str(method.as_str()));
+    try_push!(req.push_str(" "));
+    try_push!(req.push_str(path));
+    if let Some(query) = query {
+        try_push!(req.push_str("?"));
+        try_push!(req.push_str(query));
+    }
+    try_push!(req.push_str(HTTP_VERSION_LINE_SUFFIX));
+    try_push!(req.push_str("Host: "));
+    try_push!(req.push_str(host));
+    try_push!(req.push_str(CRLF_STR));
+
+    for header in headers {
+        try_push!(req.push_str(header.name));
+        try_push!(req.push_str(HEADER_SEPARATOR));
+        try_push!(req.push_str(header.value));
+        try_push!(req.push_str(CRLF_STR));
+    }
+
+    try_push!(req.push_str(TRANSFER_ENCODING));
+    try_push!(req.push_str(HEADER_SEPARATOR));
+    try_push!(req.push_str(CHUNKED));
+    try_push!(req.push_str(CRLF_STR));
+
+    if keep_alive {
+        try_push!(req.push_str(CRLF_STR));
+    } else {
+        try_push!(req.push_str(CONNECTION_CLOSE_END));
+    }
+    Ok(req)
+}
+
+/// Write `len` as `HEX\r\n` into `out` and return the used part.
+///
+/// The shared framing of one chunk, used by the client (chunked upload) and
+/// the server (chunked response). `out` must hold up to 16 hex digits plus
+/// CRLF, the size of `usize::MAX`.
+pub fn chunk_size_line(len: usize, out: &mut [u8; 18]) -> &[u8] {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut digits = [0u8; 16];
+    let mut count = 0;
+    let mut rest = len;
+    loop {
+        digits[count] = HEX[rest & 0xf];
+        count += 1;
+        rest >>= 4;
+        if rest == 0 {
+            break;
+        }
+    }
+    for (index, slot) in out.iter_mut().take(count).enumerate() {
+        *slot = digits[count - 1 - index];
+    }
+    out[count] = b'\r';
+    out[count + 1] = b'\n';
+    &out[..count + 2]
 }
 
 #[cfg(test)]
@@ -1294,6 +1401,105 @@ mod tests {
                 matches!(result, Err(Error::InvalidResponse(_))),
                 "chunk size {size} should be rejected"
             );
+        }
+    }
+
+    #[test]
+    fn test_build_req_chunked_with_writes_transfer_encoding() {
+        let req = build_req_chunked_with::<128>(HttpMethod::POST, "h", "/upload", None, &[], false)
+            .unwrap();
+        assert_eq!(
+            req.as_str(),
+            "POST /upload HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        );
+        // Never a Content-Length, not even for a method that carries a body.
+        assert!(!req.contains("Content-Length"));
+    }
+
+    #[test]
+    fn test_build_req_chunked_with_appends_query_and_keep_alive() {
+        let req = build_req_chunked_with::<128>(
+            HttpMethod::PUT,
+            "h",
+            "/u",
+            Some("a=1"),
+            &[HttpHeader::new("X-Trace", "7")],
+            true,
+        )
+        .unwrap();
+        assert!(req.starts_with("PUT /u?a=1 HTTP/1.1\r\nHost: h\r\n"));
+        assert!(req.contains("X-Trace: 7\r\n"));
+        assert!(req.contains("Transfer-Encoding: chunked\r\n\r\n"));
+        assert!(!req.contains("Connection:"));
+    }
+
+    #[test]
+    fn test_build_req_chunked_with_rejects_framing_headers() {
+        for name in [
+            "Content-Length",
+            "content-length",
+            "Transfer-Encoding",
+            "TRANSFER-ENCODING",
+        ] {
+            let headers = [HttpHeader::new(name, "5")];
+            assert!(
+                matches!(
+                    build_req_chunked_with::<128>(
+                        HttpMethod::POST,
+                        "h",
+                        "/u",
+                        None,
+                        &headers,
+                        false
+                    ),
+                    Err(Error::HeaderError(_))
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_req_chunked_with_validates_like_build_req_with() {
+        // The same path, query, host and header validation as the buffered
+        // builder: nothing else may change about the head.
+        let bad = |path: &str, query: Option<&str>, host: &str, value: &[HttpHeader<'_>]| {
+            build_req_chunked_with::<128>(HttpMethod::POST, host, path, query, value, false)
+        };
+        assert!(matches!(bad("", None, "h", &[]), Err(Error::InvalidUrl)));
+        assert!(matches!(
+            bad("/a b", None, "h", &[]),
+            Err(Error::InvalidUrl)
+        ));
+        assert!(matches!(
+            bad("/a", Some("x\r\ny"), "h", &[]),
+            Err(Error::InvalidUrl)
+        ));
+        assert!(matches!(
+            bad("/a", None, "h\r\nX: y", &[]),
+            Err(Error::InvalidUrl)
+        ));
+        let injected = [HttpHeader::new("X-Token", "a\r\nX-Injected: 1")];
+        assert!(matches!(
+            bad("/a", None, "h", &injected),
+            Err(Error::HeaderError("Invalid header value"))
+        ));
+    }
+
+    #[test]
+    fn test_chunk_size_line() {
+        let mut out = [0u8; 18];
+        for (len, expected) in [
+            (1, "1\r\n"),
+            (9, "9\r\n"),
+            (10, "a\r\n"),
+            (15, "f\r\n"),
+            (16, "10\r\n"),
+            (255, "ff\r\n"),
+            (4096, "1000\r\n"),
+            (usize::MAX, "ffffffffffffffff\r\n"),
+        ] {
+            assert_eq!(chunk_size_line(len, &mut out), expected.as_bytes(), "{len}");
         }
     }
 

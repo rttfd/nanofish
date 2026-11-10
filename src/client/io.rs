@@ -4,6 +4,7 @@ use embedded_io_async::{Read, Write};
 use heapless::String;
 use nanofish::{
     client::{
+        BodySource,
         builder::RequestBuilder,
         stream::{BodySink, ChunkDecoder, StreamedResponse},
     },
@@ -335,25 +336,15 @@ impl<const RQ: usize> HttpClient<RQ> {
         Fut: Future<Output = ()>,
     {
         self.send_request(stream, &request, keep_alive).await?;
-
-        let (total_read, framed) = read_response(
+        read_exchange(
             stream,
             request.method,
             response_buffer,
             self.options.max_retries,
+            keep_alive,
             retry_delay,
         )
-        .await?;
-        codec::check_response_framing(&response_buffer[..total_read])?;
-        let http11 = response_buffer[..total_read].starts_with(b"HTTP/1.1 ");
-        let total_read = codec::dechunk(response_buffer, total_read)?;
-        let response = codec::parse_resp(&response_buffer[..total_read])?;
-        let reusable = keep_alive && framed && http11 && !wants_close(&response);
-        Ok(Exchange {
-            response,
-            used: total_read,
-            reusable,
-        })
+        .await
     }
 
     /// Write a request (head and body) to the stream and flush it.
@@ -384,6 +375,202 @@ impl<const RQ: usize> HttpClient<RQ> {
             stream.write_all(body_data).await.map_err(Error::io)?;
         }
         stream.flush().await.map_err(Error::io)
+    }
+
+    /// Write a request head announcing chunked transfer coding, then the
+    /// body from `source` (one chunk per non-empty piece), then the final
+    /// marker, and flush.
+    ///
+    /// Once the head is written the source is being consumed: a failure
+    /// mid-upload is final, and the caller drops the stream.
+    async fn send_request_chunked<S, U>(
+        &self,
+        stream: &mut S,
+        request: &HttpClientRequest<'_>,
+        source: &mut U,
+        keep_alive: bool,
+    ) -> Result<(), Error>
+    where
+        S: Write,
+        U: BodySource,
+    {
+        if request.body.is_some() {
+            return Err(Error::HeaderError(
+                "Buffered body and upload source are both set",
+            ));
+        }
+        let head = codec::build_req_chunked_with::<RQ>(
+            request.method,
+            request.host,
+            request.path,
+            request.query,
+            request.headers,
+            keep_alive,
+        )?;
+        stream.write_all(head.as_bytes()).await.map_err(Error::io)?;
+        loop {
+            let Some(data) = source.next_chunk().await? else {
+                break;
+            };
+            if data.is_empty() {
+                continue;
+            }
+            let mut size_line = [0u8; 18];
+            stream
+                .write_all(codec::chunk_size_line(data.len(), &mut size_line))
+                .await
+                .map_err(Error::io)?;
+            stream.write_all(data).await.map_err(Error::io)?;
+            stream.write_all(protocol::CRLF).await.map_err(Error::io)?;
+        }
+        stream
+            .write_all(protocol::CHUNKED_END_MARKER)
+            .await
+            .map_err(Error::io)?;
+        stream.flush().await.map_err(Error::io)
+    }
+
+    /// Send a request whose body is produced by `source`, with chunked
+    /// transfer coding, over an already-connected stream.
+    ///
+    /// The request needs no `Content-Length`: each piece the source yields
+    /// goes out as one chunk, so a body of any size is sent through bounded
+    /// memory. An empty source sends the final marker only, which is a legal
+    /// body, distinct from `Content-Length: 0`. Any method may carry a
+    /// chunked body. `request.body` must be `None`; the body comes from the
+    /// source.
+    ///
+    /// No `Expect: 100-continue` is sent; the body goes out unconditionally.
+    /// Servers that answer `411 Length Required` refuse unknown lengths
+    /// outright; chunked transfer coding is the answer to that, not
+    /// buffering.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::HeaderError`] if `request.body` is set, or `request.headers`
+    ///   contain `Content-Length` or `Transfer-Encoding`.
+    /// - Any error the source returns, or [`HttpClient::request`] otherwise.
+    pub async fn request_upload<'b, S, U>(
+        &self,
+        stream: &mut S,
+        request: HttpClientRequest<'_>,
+        source: &mut U,
+        response_buffer: &'b mut [u8],
+    ) -> Result<(HttpResponse<'b>, usize), Error>
+    where
+        S: Read + Write,
+        U: BodySource,
+    {
+        self.request_upload_with_retry_delay(stream, request, source, response_buffer, || {
+            core::future::ready(())
+        })
+        .await
+    }
+
+    /// Like [`HttpClient::request_upload`], sleeping via `retry_delay`
+    /// between read retries.
+    ///
+    /// The retries are read retries, as in
+    /// [`HttpClient::request_with_retry_delay`]: once the head is written the
+    /// source is consumed, so a failure mid-upload is final and the connection
+    /// must be dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpClient::request_upload`].
+    pub async fn request_upload_with_retry_delay<'b, S, U, D, Fut>(
+        &self,
+        stream: &mut S,
+        request: HttpClientRequest<'_>,
+        source: &mut U,
+        response_buffer: &'b mut [u8],
+        retry_delay: D,
+    ) -> Result<(HttpResponse<'b>, usize), Error>
+    where
+        S: Read + Write,
+        U: BodySource,
+        D: Fn() -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let exchange = self
+            .exchange_upload_with_retry_delay(
+                stream,
+                request,
+                source,
+                response_buffer,
+                false,
+                retry_delay,
+            )
+            .await?;
+        Ok((exchange.response, exchange.used))
+    }
+
+    /// Send a request whose body is produced by `source` and report whether
+    /// the connection can carry another.
+    ///
+    /// A chunked upload is fully delimited, so with `keep_alive` the
+    /// connection can be reused when the response allows it; see
+    /// [`HttpClient::exchange`]. Redirects are not followed: a `307`/`308`
+    /// would ask for the same body again, but the source is consumed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpClient::request_upload`].
+    pub async fn exchange_upload<'b, S, U>(
+        &self,
+        stream: &mut S,
+        request: HttpClientRequest<'_>,
+        source: &mut U,
+        response_buffer: &'b mut [u8],
+        keep_alive: bool,
+    ) -> Result<Exchange<'b>, Error>
+    where
+        S: Read + Write,
+        U: BodySource,
+    {
+        self.exchange_upload_with_retry_delay(
+            stream,
+            request,
+            source,
+            response_buffer,
+            keep_alive,
+            || core::future::ready(()),
+        )
+        .await
+    }
+
+    /// Like [`HttpClient::exchange_upload`], sleeping via `retry_delay`
+    /// between read retries.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`HttpClient::request_upload`].
+    pub async fn exchange_upload_with_retry_delay<'b, S, U, D, Fut>(
+        &self,
+        stream: &mut S,
+        request: HttpClientRequest<'_>,
+        source: &mut U,
+        response_buffer: &'b mut [u8],
+        keep_alive: bool,
+        retry_delay: D,
+    ) -> Result<Exchange<'b>, Error>
+    where
+        S: Read + Write,
+        U: BodySource,
+        D: Fn() -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        self.send_request_chunked(stream, &request, source, keep_alive)
+            .await?;
+        read_exchange(
+            stream,
+            request.method,
+            response_buffer,
+            self.options.max_retries,
+            keep_alive,
+            retry_delay,
+        )
+        .await
     }
 
     /// Send one HTTP request and hand the response body to `sink` piece by
@@ -697,6 +884,42 @@ where
     }
 }
 
+/// Read the response to a sent request, parse it, and decide whether the
+/// connection can carry another request.
+///
+/// Shared by the buffered and the chunked-upload exchange paths, so both see
+/// responses exactly the same way: read to the end of the framing, reject a
+/// malformed `Content-Length`, decode chunked coding, parse, and keep the
+/// connection only when `keep_alive` was asked for, the framing (not the
+/// connection close) delimited the response, the peer is HTTP/1.1 and it did
+/// not ask to close.
+async fn read_exchange<'b, S, D, Fut>(
+    stream: &mut S,
+    method: HttpMethod,
+    response_buffer: &'b mut [u8],
+    max_retries: usize,
+    keep_alive: bool,
+    retry_delay: D,
+) -> Result<Exchange<'b>, Error>
+where
+    S: Read,
+    D: Fn() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let (total_read, framed) =
+        read_response(stream, method, response_buffer, max_retries, retry_delay).await?;
+    codec::check_response_framing(&response_buffer[..total_read])?;
+    let http11 = response_buffer[..total_read].starts_with(b"HTTP/1.1 ");
+    let total_read = codec::dechunk(response_buffer, total_read)?;
+    let response = codec::parse_resp(&response_buffer[..total_read])?;
+    let reusable = keep_alive && framed && http11 && !wants_close(&response);
+    Ok(Exchange {
+        response,
+        used: total_read,
+        reusable,
+    })
+}
+
 /// Read a full HTTP response into `buffer`, retrying transient read errors.
 ///
 /// Returns the number of bytes read and whether the response end was
@@ -782,7 +1005,8 @@ mod tests {
     use embedded_io_async::ErrorType;
     use heapless::Vec;
     use nanofish::client::io::*;
-    use nanofish::{ResponseBody, StatusCode};
+    use nanofish::client::{BodySource, SliceSource};
+    use nanofish::{ResponseBody, StatusCode, codec};
 
     struct MockStream<const IN: usize, const OUT: usize> {
         input: Vec<u8, IN>,
@@ -1761,6 +1985,344 @@ mod tests {
         .unwrap();
 
         assert!(stream.requests[0].contains("Connection: close\r\n"));
+    }
+
+    /// Yields the given pieces in order, then ends; returns an error instead
+    /// of the piece at index `fail_on`.
+    struct Pieces<'p> {
+        script: &'p [&'p [u8]],
+        next: usize,
+        fail_on: Option<usize>,
+    }
+
+    impl<'p> Pieces<'p> {
+        fn new(script: &'p [&'p [u8]]) -> Self {
+            Self {
+                script,
+                next: 0,
+                fail_on: None,
+            }
+        }
+    }
+
+    impl BodySource for Pieces<'_> {
+        async fn next_chunk(&mut self) -> Result<Option<&[u8]>, Error> {
+            if self.fail_on == Some(self.next) {
+                return Err(Error::BufferOverflow);
+            }
+            let piece = self.script.get(self.next).copied();
+            self.next += 1;
+            Ok(piece)
+        }
+    }
+
+    /// A POST to `path` whose body comes from a source, not `body`.
+    fn upload_request(path: &'static str) -> HttpClientRequest<'static> {
+        HttpClientRequest {
+            method: HttpMethod::POST,
+            host: "example.com",
+            path,
+            query: None,
+            headers: &[],
+            body: None,
+        }
+    }
+
+    #[test]
+    fn test_io_client_chunked_upload_wire_format() {
+        let response = b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n";
+        let mut stream = MockStream::<128, 256>::new(response);
+        let client = HttpClient::new();
+        let mut buffer = [0; 64];
+        let mut source = Pieces::new(&[b"hello", b" world"]);
+
+        let (response, _) = futures_lite::future::block_on(client.request_upload(
+            &mut stream,
+            HttpClientRequest {
+                method: HttpMethod::POST,
+                host: "example.com",
+                path: "/upload",
+                query: None,
+                headers: &[HttpHeader::new("Content-Type", "application/octet-stream")],
+                body: None,
+            },
+            &mut source,
+            &mut buffer,
+        ))
+        .unwrap();
+
+        assert_eq!(response.status_code, StatusCode::Created);
+        assert_eq!(
+            core::str::from_utf8(&stream.output).unwrap(),
+            "POST /upload HTTP/1.1\r\n\
+             Host: example.com\r\n\
+             Content-Type: application/octet-stream\r\n\
+             Transfer-Encoding: chunked\r\n\
+             Connection: close\r\n\
+             \r\n\
+             5\r\nhello\r\n\
+             6\r\n world\r\n\
+             0\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn test_io_client_chunked_upload_round_trips_through_codec() {
+        // What the client writes must be one complete, well-formed chunked
+        // request to the codec's server side.
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        let mut stream = MockStream::<128, 256>::new(response);
+        let client = HttpClient::new();
+        let mut buffer = [0; 64];
+        let mut source = SliceSource::new(b"hello world", 4);
+
+        futures_lite::future::block_on(client.request_upload(
+            &mut stream,
+            upload_request("/upload"),
+            &mut source,
+            &mut buffer,
+        ))
+        .unwrap();
+
+        let mut raw = [0u8; 256];
+        raw[..stream.output.len()].copy_from_slice(&stream.output);
+        let len = stream.output.len();
+        assert!(codec::complete(&raw[..len]));
+        let total = codec::dechunk(&mut raw, len).unwrap();
+        let head_end = nanofish::protocol::find_double_crlf(&raw[..total]).unwrap()
+            + nanofish::protocol::DOUBLE_CRLF_LEN;
+        assert_eq!(&raw[head_end..total], b"hello world");
+    }
+
+    #[test]
+    fn test_io_client_chunked_upload_empty_source_sends_only_final_marker() {
+        let response = b"HTTP/1.1 204 No Content\r\n\r\n";
+        let mut stream = MockStream::<64, 256>::new(response);
+        let client = HttpClient::new();
+        let mut buffer = [0; 64];
+        let mut source = SliceSource::new(b"", 8);
+
+        futures_lite::future::block_on(client.request_upload(
+            &mut stream,
+            upload_request("/trigger"),
+            &mut source,
+            &mut buffer,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            core::str::from_utf8(&stream.output).unwrap(),
+            "POST /trigger HTTP/1.1\r\n\
+             Host: example.com\r\n\
+             Transfer-Encoding: chunked\r\n\
+             Connection: close\r\n\
+             \r\n\
+             0\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn test_io_client_chunked_upload_skips_empty_slices() {
+        let response = b"HTTP/1.1 204 No Content\r\n\r\n";
+        let mut stream = MockStream::<64, 256>::new(response);
+        let client = HttpClient::new();
+        let mut buffer = [0; 64];
+        let mut source = Pieces::new(&[b"", b"ab", b""]);
+
+        futures_lite::future::block_on(client.request_upload(
+            &mut stream,
+            upload_request("/upload"),
+            &mut source,
+            &mut buffer,
+        ))
+        .unwrap();
+
+        assert!(
+            core::str::from_utf8(&stream.output)
+                .unwrap()
+                .ends_with("2\r\nab\r\n0\r\n\r\n"),
+            "{:?}",
+            stream.output
+        );
+    }
+
+    #[test]
+    fn test_io_client_chunked_upload_source_error_is_returned() {
+        let mut stream = MockStream::<8, 256>::new(b"");
+        let client = HttpClient::new();
+        let mut buffer = [0; 64];
+        let mut source = Pieces {
+            fail_on: Some(1),
+            ..Pieces::new(&[b"ab", b"cd"])
+        };
+
+        let result = futures_lite::future::block_on(client.request_upload(
+            &mut stream,
+            upload_request("/upload"),
+            &mut source,
+            &mut buffer,
+        ));
+
+        assert!(matches!(result, Err(Error::BufferOverflow)));
+        // The first chunk went out, then the upload stopped short of the
+        // final marker.
+        let request = core::str::from_utf8(&stream.output).unwrap();
+        assert!(request.ends_with("2\r\nab\r\n"), "{request}");
+    }
+
+    #[test]
+    fn test_io_client_chunked_upload_rejects_buffered_body() {
+        let mut stream = MockStream::<8, 256>::new(b"");
+        let client = HttpClient::new();
+        let mut buffer = [0; 64];
+        let mut source = SliceSource::new(b"hello", 2);
+
+        let result = futures_lite::future::block_on(client.request_upload(
+            &mut stream,
+            HttpClientRequest {
+                method: HttpMethod::POST,
+                host: "example.com",
+                path: "/upload",
+                query: None,
+                headers: &[],
+                body: Some(b"hello"),
+            },
+            &mut source,
+            &mut buffer,
+        ));
+
+        assert!(matches!(
+            result,
+            Err(Error::HeaderError(
+                "Buffered body and upload source are both set"
+            ))
+        ));
+        // Nothing was sent.
+        assert!(stream.output.is_empty());
+    }
+
+    #[test]
+    fn test_io_client_chunked_upload_rejects_explicit_framing_headers() {
+        for name in [
+            "Content-Length",
+            "content-length",
+            "Transfer-Encoding",
+            "transfer-encoding",
+        ] {
+            let mut stream = MockStream::<8, 256>::new(b"");
+            let client = HttpClient::new();
+            let mut buffer = [0; 64];
+            let mut source = SliceSource::new(b"hello", 2);
+
+            let result = futures_lite::future::block_on(client.request_upload(
+                &mut stream,
+                HttpClientRequest {
+                    method: HttpMethod::POST,
+                    host: "example.com",
+                    path: "/upload",
+                    query: None,
+                    headers: &[HttpHeader::new(name, "5")],
+                    body: None,
+                },
+                &mut source,
+                &mut buffer,
+            ));
+
+            assert!(matches!(result, Err(Error::HeaderError(_))), "{name}");
+            assert!(stream.output.is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn test_io_client_chunked_upload_keep_alive_is_reusable() {
+        // A chunked upload is fully delimited, so a keep-alive connection
+        // carries another request after it.
+        let replies: [&[u8]; 2] = [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\none",
+            b"HTTP/1.1 204 No Content\r\n\r\n",
+        ];
+        let mut stream = ReplyStream::new(&replies);
+        let client = HttpClient::new();
+        let mut buffer = [0; 128];
+
+        for (path, body) in [("/1", Some("one")), ("/2", None)] {
+            let mut source = SliceSource::new(b"hello world", 5);
+            let exchange = futures_lite::future::block_on(client.exchange_upload(
+                &mut stream,
+                upload_request(path),
+                &mut source,
+                &mut buffer,
+                true,
+            ))
+            .unwrap();
+            assert!(exchange.reusable, "{path}");
+            assert_eq!(exchange.response.body.as_str(), body, "{path}");
+        }
+
+        for (request, path) in stream.requests.iter().zip(["/1", "/2"]) {
+            assert!(request.starts_with(&std::format!("POST {path} HTTP/1.1\r\n")));
+            assert!(!request.contains("Connection:"), "{request}");
+            assert!(request.ends_with("0\r\n\r\n"), "{request}");
+        }
+    }
+
+    #[test]
+    fn test_io_client_chunked_upload_no_content_length_in_head() {
+        // Chunked framing does not depend on the method, and never announces
+        // a length, not even for methods that carry one.
+        for method in [HttpMethod::GET, HttpMethod::POST, HttpMethod::DELETE] {
+            let response = b"HTTP/1.1 204 No Content\r\n\r\n";
+            let mut stream = MockStream::<64, 256>::new(response);
+            let client = HttpClient::new();
+            let mut buffer = [0; 64];
+            let mut source = Pieces::new(&[b"x"]);
+
+            futures_lite::future::block_on(client.request_upload(
+                &mut stream,
+                HttpClientRequest {
+                    method,
+                    host: "example.com",
+                    path: "/upload",
+                    query: None,
+                    headers: &[],
+                    body: None,
+                },
+                &mut source,
+                &mut buffer,
+            ))
+            .unwrap();
+
+            let request = core::str::from_utf8(&stream.output).unwrap();
+            assert!(
+                request.contains("Transfer-Encoding: chunked\r\n"),
+                "{method:?}: {request}"
+            );
+            assert!(!request.contains("Content-Length"), "{method:?}: {request}");
+        }
+    }
+
+    #[test]
+    fn test_io_client_chunked_upload_response_is_parsed() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let mut stream = MockStream::<128, 256>::new(response);
+        let client = HttpClient::new();
+        let mut buffer = [0; 64];
+        let mut source = SliceSource::new(b"hello", 2);
+
+        let (response, used) = futures_lite::future::block_on(client.request_upload(
+            &mut stream,
+            upload_request("/upload"),
+            &mut source,
+            &mut buffer,
+        ))
+        .unwrap();
+
+        assert_eq!(response.status_code, StatusCode::Ok);
+        assert_eq!(response.body.as_str(), Some("ok"));
+        assert_eq!(
+            used,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".len()
+        );
     }
 
     #[test]

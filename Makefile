@@ -101,16 +101,16 @@ BASELINE ?= main
 BENCH ?=
 
 .PHONY: bench
-bench: ## Run the benchmarks (BENCH=name runs a subset)
-	cargo +$(RUST_VERSION) bench --bench http -- $(BENCH)
+bench: ## Run the benchmarks (BENCH=regex runs a subset)
+	cargo +$(RUST_VERSION) bench --bench http -- "$(BENCH)"
 
 .PHONY: bench-save
 bench-save: ## Save the benchmarks as BASELINE (default main)
-	cargo +$(RUST_VERSION) bench --bench http -- --save-baseline $(BASELINE) $(BENCH)
+	cargo +$(RUST_VERSION) bench --bench http -- --save-baseline "$(BASELINE)" "$(BENCH)"
 
 .PHONY: bench-compare
 bench-compare: ## Compare the benchmarks with BASELINE (default main)
-	cargo +$(RUST_VERSION) bench --bench http -- --baseline $(BASELINE) $(BENCH)
+	cargo +$(RUST_VERSION) bench --bench http -- --baseline "$(BASELINE)" "$(BENCH)"
 
 .PHONY: build
 build: ## Build the crate
