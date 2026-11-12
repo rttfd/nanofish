@@ -13,7 +13,6 @@ pub(crate) mod fmt;
 /// HTTP protocol constants and shared utilities.
 pub mod protocol;
 
-/// HTTP client ports and adapters.
 pub mod client;
 /// Percent-encoding, Base64 and `Authorization` header builders.
 pub mod encode;
@@ -31,7 +30,6 @@ pub mod options;
 pub mod request;
 /// HTTP response types and body handling.
 pub mod response;
-/// HTTP server ports and adapters.
 pub mod server;
 /// smoltcp adapters for transport-generic IO APIs.
 #[cfg(feature = "smoltcp")]

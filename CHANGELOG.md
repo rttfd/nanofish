@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The README is now a short overview. The guides moved into the API documentation: the `client` and `server` module docs, and examples on `EmbassyHttpClient`, `EmbassyHttpSession`, `EmbassyHttpServer` and `HttpTlsClient`. Every example is compiled as a doctest, so it fails CI when the API changes instead of going stale. The old README's outdated examples (`BodySink::head` taking a `ServerResponse`, version `0.16`) are gone.
+
 ## [0.17.0] - 2026-11-12
 
 ### Breaking changes

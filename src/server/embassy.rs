@@ -82,6 +82,37 @@ impl ServerTimeouts {
 /// For HTTPS, run [`handle_http_connection`](nanofish::handle_http_connection)
 /// over a TLS stream you bring, or put a reverse proxy or load balancer that
 /// handles TLS termination in front of the device.
+///
+/// # Example
+///
+/// ```rust
+/// use embassy_net::Stack;
+/// use nanofish::{SimpleHandler, SmallEmbassyHttpServer, ServerTimeouts, TimeoutDuration};
+///
+/// async fn http_task(stack: Stack<'static>) -> ! {
+///     let timeouts = ServerTimeouts::new(
+///         TimeoutDuration::from_secs(5),  // to accept a connection
+///         TimeoutDuration::from_secs(15), // of socket inactivity
+///         TimeoutDuration::from_secs(30), // for the handler, body reads included
+///         TimeoutDuration::from_secs(60), // per connection in total
+///     );
+///     let mut server = SmallEmbassyHttpServer::with_timeouts(80, timeouts).with_keep_alive(4);
+///     server.serve(stack, SimpleHandler).await
+/// }
+/// ```
+///
+/// # One connection per task
+///
+/// A server owns one socket, so it serves one connection at a time, and
+/// there is no listen backlog: while every server is busy, a new connection
+/// is refused. A browser opens about six connections to load a page, so a
+/// lone server looks broken (`ERR_CONNECTION_REFUSED`) even though each
+/// request works. Run the function above from a task pool
+/// (`#[embassy_executor::task(pool_size = 6)]`) and spawn it once per
+/// connection to serve in parallel; every task accepts on the same port.
+/// Each costs its own socket in `StackResources` and its buffers
+/// (`RX_SIZE + TX_SIZE + REQ_SIZE + MAX_RESPONSE_SIZE`), so use
+/// [`SmallEmbassyHttpServer`] when RAM is tight.
 pub struct EmbassyHttpServer<
     const RX_SIZE: usize,
     const TX_SIZE: usize,
