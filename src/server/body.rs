@@ -9,8 +9,8 @@
 //! can sit next to a [`ResponseWriter`] that owns the stream. [`RequestBody`]
 //! pairs it with a stream for handlers that only read.
 
-use core::ops::Range;
-use embedded_io_async::{Read, Write};
+use core::{fmt, ops::Range};
+use embedded_io_async::{Error as _, ErrorKind, Read, Write};
 use nanofish::{
     codec::{ChunkDecoder, Framing},
     error::Error,
@@ -23,37 +23,75 @@ const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
 
 /// How much of an unread body the server reads and discards after answering,
 /// so that closing the connection does not reset it under the response.
-pub(super) const DRAIN_LIMIT_BYTES: usize = 16 * 1024;
+pub(super) const DRAIN_BYTES_MAX: usize = 16 * 1024;
 
-/// Why the connection failed while the body was read, and so how the peer is
-/// answered if the handler returns the error.
+/// A failed body read: how the peer is answered, and the error the read
+/// returned, to recognise it if the handler passes it on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BodyFailure {
-    /// The peer is still there and gets this status.
-    Status(StatusCode),
-    /// The peer is gone or the stream failed: nothing can be sent.
-    PeerGone,
+pub(super) struct BodyFailure {
+    /// The status the peer gets, or `None` when the peer is gone or the
+    /// stream failed and nothing can be sent.
+    reply: Option<StatusCode>,
+    cause: Cause,
+}
+
+/// The error a failed body read returned, kept as a copy because [`Error`]
+/// is not `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cause {
+    /// [`Error::BufferOverflow`].
+    Overflow,
+    /// [`Error::InvalidRequest`] with this reason.
+    Request(&'static str),
+    /// [`Error::TcpError`] of this kind.
+    Io(ErrorKind),
+}
+
+impl Cause {
+    const fn error(self) -> Error {
+        match self {
+            Self::Overflow => Error::BufferOverflow,
+            Self::Request(reason) => Error::InvalidRequest(reason),
+            Self::Io(kind) => Error::TcpError(kind),
+        }
+    }
+
+    /// Whether `error` is the error this cause was returned as.
+    fn is(self, error: &Error) -> bool {
+        match (self, error) {
+            (Self::Overflow, Error::BufferOverflow) => true,
+            (Self::Request(reason), Error::InvalidRequest(other)) => reason == *other,
+            (Self::Io(kind), Error::TcpError(other)) => kind == *other,
+            _ => false,
+        }
+    }
 }
 
 /// The status to answer a handler's failure with, if the peer can be answered.
 ///
-/// An error that comes from a failed body read (`failure` says so) is
-/// answered like the failure: `400` for bad framing, `413` for a body that
-/// does not fit, nothing for a peer that is gone. Any other error is the
-/// handler's own, a `500`.
-pub(super) const fn reply_status(
-    failure: Option<BodyFailure>,
-    error: &Error,
-) -> Option<StatusCode> {
-    let from_body = matches!(
-        error,
-        Error::BufferOverflow | Error::InvalidRequest(_) | Error::TcpError(_)
-    );
+/// The error of a failed body read (`failure` records it), passed on by the
+/// handler, is answered like the failure: `400` for bad framing, `413` for a
+/// body that does not fit, nothing for a peer that is gone. Any other error
+/// is the handler's own, a `500`, even after a body read failed.
+pub(super) fn reply_status(failure: Option<BodyFailure>, error: &Error) -> Option<StatusCode> {
     match failure {
-        Some(BodyFailure::PeerGone) if from_body => None,
-        Some(BodyFailure::Status(status)) if from_body => Some(status),
+        Some(failure) if failure.cause.is(error) => failure.reply,
         _ => Some(StatusCode::InternalServerError),
     }
+}
+
+/// Where the `100 Continue` a client may wait for stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interim {
+    /// Nothing is owed: none was asked for, it was sent, or the final
+    /// response has started and it may no longer be sent.
+    Settled,
+    /// The client waits for it; it is sent on the first read.
+    Owed,
+    /// Writing it started and did not finish: the read was abandoned or the
+    /// write failed, so part of it may be on the wire and nothing sent after
+    /// it would be framed.
+    Sending,
 }
 
 /// How much of the body is left.
@@ -114,12 +152,29 @@ pub struct BodyReader<'a> {
     /// be overwritten.
     keep: usize,
     mode: Mode,
-    expect_continue: bool,
+    interim: Interim,
     /// Payload has been handed out by [`chunk`](Self::chunk).
     delivered: bool,
     /// [`all`](Self::all) has collected the body, which is `buf[..n]`.
     collected: Option<usize>,
     failure: Option<BodyFailure>,
+}
+
+impl fmt::Debug for BodyReader<'_> {
+    /// The read state, without the buffer's contents.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BodyReader")
+            .field("buf_len", &self.buf.len())
+            .field("pos", &self.pos)
+            .field("end", &self.end)
+            .field("keep", &self.keep)
+            .field("mode", &self.mode)
+            .field("interim", &self.interim)
+            .field("delivered", &self.delivered)
+            .field("collected", &self.collected)
+            .field("failure", &self.failure)
+            .finish()
+    }
 }
 
 impl<'a> BodyReader<'a> {
@@ -142,7 +197,11 @@ impl<'a> BodyReader<'a> {
             end: buffered,
             keep: 0,
             mode,
-            expect_continue,
+            interim: if expect_continue {
+                Interim::Owed
+            } else {
+                Interim::Settled
+            },
             delivered: false,
             collected: None,
             failure: None,
@@ -166,17 +225,40 @@ impl<'a> BodyReader<'a> {
         self.failure
     }
 
-    const fn fail(&mut self, failure: BodyFailure, error: Error) -> Error {
-        self.failure = Some(failure);
-        error
+    /// An error if writing `100 Continue` was cut off, which leaves the
+    /// connection unfit for any further response.
+    pub(super) const fn check_interim(&self) -> Result<(), Error> {
+        match self.interim {
+            Interim::Sending => Err(Error::InvalidState("100 Continue was cut off")),
+            Interim::Settled | Interim::Owed => Ok(()),
+        }
+    }
+
+    /// Record a failed read and return its error.
+    const fn fail(&mut self, reply: Option<StatusCode>, cause: Cause) -> Error {
+        self.failure = Some(BodyFailure { reply, cause });
+        cause.error()
     }
 
     /// The error for a body that does not fit the buffer.
     const fn overflow(&mut self) -> Error {
-        self.fail(
-            BodyFailure::Status(StatusCode::RequestEntityTooLarge),
-            Error::BufferOverflow,
-        )
+        self.fail(Some(StatusCode::RequestEntityTooLarge), Cause::Overflow)
+    }
+
+    /// [`all`](Self::all) stopped part way: payload was moved down in the
+    /// buffer, so neither another `all` nor [`chunk`](Self::chunk) could
+    /// return the body whole.
+    const fn partly_collected(&self) -> bool {
+        self.collected.is_none() && self.keep > 0
+    }
+
+    /// The final response has started, so `100 Continue` may no longer be
+    /// sent. The client sends the body once it sees the final head or tires
+    /// of waiting.
+    fn final_head_sent(&mut self) {
+        if self.interim == Interim::Owed {
+            self.interim = Interim::Settled;
+        }
     }
 
     /// The next piece of the body, read from `response`'s connection, or
@@ -192,7 +274,8 @@ impl<'a> BodyReader<'a> {
     ///   server answers `400`) or the peer closes the connection before the
     ///   body is complete.
     /// - [`Error::TcpError`] if the stream fails.
-    /// - [`Error::InvalidState`] after [`all`](Self::all).
+    /// - [`Error::InvalidState`] after [`all`](Self::all), or after a failed
+    ///   `all` that had read part of the body.
     /// - [`Error::BufferOverflow`] if the buffer is too small to hold even one
     ///   piece of framing.
     pub async fn chunk<'b, S, const HEAD_SIZE: usize>(
@@ -202,6 +285,9 @@ impl<'a> BodyReader<'a> {
     where
         S: Read + Write,
     {
+        if response.head_sent() {
+            self.final_head_sent();
+        }
         self.chunk_from(response.stream_mut()).await
     }
 
@@ -217,7 +303,7 @@ impl<'a> BodyReader<'a> {
     ///
     /// - [`Error::BufferOverflow`] if the body does not fit.
     /// - [`Error::InvalidState`] if [`chunk`](Self::chunk) already returned
-    ///   part of the body.
+    ///   part of the body, or an earlier `all` failed after reading part of it.
     /// - The errors of [`chunk`](Self::chunk).
     pub async fn all<'b, S, const HEAD_SIZE: usize>(
         &'b mut self,
@@ -226,6 +312,9 @@ impl<'a> BodyReader<'a> {
     where
         S: Read + Write,
     {
+        if response.head_sent() {
+            self.final_head_sent();
+        }
         self.all_from(response.stream_mut()).await
     }
 
@@ -238,6 +327,9 @@ impl<'a> BodyReader<'a> {
     {
         if self.collected.is_some() {
             return Err(Error::InvalidState("Request body already collected"));
+        }
+        if self.partly_collected() {
+            return Err(Error::InvalidState("Request body read failed part way"));
         }
         match self.next_range(stream).await? {
             Some(range) => {
@@ -254,6 +346,9 @@ impl<'a> BodyReader<'a> {
     {
         if let Some(len) = self.collected {
             return Ok(&self.buf[..len]);
+        }
+        if self.partly_collected() {
+            return Err(Error::InvalidState("Request body read failed part way"));
         }
         if self.delivered {
             return Err(Error::InvalidState("Request body already partly read"));
@@ -286,8 +381,9 @@ impl<'a> BodyReader<'a> {
 
     /// Read and discard what is left of the body, up to `limit` bytes.
     ///
-    /// Does nothing for a client still waiting for `100 Continue`: it will
-    /// not send the body, so waiting for it would only stall.
+    /// Does nothing for a client still waiting for `100 Continue` (it will
+    /// not send the body, so waiting for it would only stall), nor after
+    /// `100 Continue` was cut off.
     ///
     /// # Errors
     ///
@@ -297,9 +393,12 @@ impl<'a> BodyReader<'a> {
     where
         S: Read + Write,
     {
-        if self.expect_continue {
+        if self.interim != Interim::Settled {
             return Ok(());
         }
+        // Payload collected by a failed `all` is of no use now; without this a
+        // collection that filled the buffer would leave no room to drain.
+        self.keep = 0;
         let mut skipped = 0usize;
         while let Some(range) = self.next_range(stream).await? {
             skipped = skipped.saturating_add(range.len());
@@ -341,10 +440,9 @@ impl<'a> BodyReader<'a> {
                     let step = match decoder.step(&self.buf[self.pos..self.end]) {
                         Ok(step) => step,
                         Err(reason) => {
-                            return Err(self.fail(
-                                BodyFailure::Status(StatusCode::BadRequest),
-                                Error::InvalidRequest(reason),
-                            ));
+                            return Err(
+                                self.fail(Some(StatusCode::BadRequest), Cause::Request(reason))
+                            );
                         }
                     };
                     let base = self.pos;
@@ -386,28 +484,44 @@ impl<'a> BodyReader<'a> {
             return Err(self.overflow());
         }
 
-        if self.expect_continue {
-            self.expect_continue = false;
-            let sent = match stream.write_all(CONTINUE).await {
-                Ok(()) => stream.flush().await,
-                Err(error) => Err(error),
-            };
-            if let Err(error) = sent {
-                return Err(self.fail(BodyFailure::PeerGone, Error::io(error)));
-            }
+        if self.interim == Interim::Owed {
+            self.send_continue(stream).await?;
         }
+        assert!(self.interim == Interim::Settled);
 
         match stream.read(&mut self.buf[self.end..]).await {
-            Ok(0) => Err(self.fail(
-                BodyFailure::PeerGone,
-                Error::InvalidRequest("Incomplete request"),
-            )),
+            Ok(0) => Err(self.fail(None, Cause::Request("Incomplete request"))),
             Ok(read) => {
                 self.end += read;
                 assert!(self.end <= self.buf.len());
                 Ok(())
             }
-            Err(error) => Err(self.fail(BodyFailure::PeerGone, Error::io(error))),
+            Err(error) => Err(self.fail(None, Cause::Io(error.kind()))),
+        }
+    }
+
+    /// Send the `100 Continue` the client waits for.
+    ///
+    /// The state stays [`Interim::Sending`] unless the write completes, so a
+    /// read abandoned here (a handler timeout drops it) or a failed write
+    /// keeps the server from sending anything after a partial interim
+    /// response.
+    async fn send_continue<S>(&mut self, stream: &mut S) -> Result<(), Error>
+    where
+        S: Write,
+    {
+        assert!(self.interim == Interim::Owed);
+        self.interim = Interim::Sending;
+        let sent = match stream.write_all(CONTINUE).await {
+            Ok(()) => stream.flush().await,
+            Err(error) => Err(error),
+        };
+        match sent {
+            Ok(()) => {
+                self.interim = Interim::Settled;
+                Ok(())
+            }
+            Err(error) => Err(self.fail(None, Cause::Io(error.kind()))),
         }
     }
 }
@@ -421,6 +535,15 @@ impl<'a> BodyReader<'a> {
 pub struct RequestBody<'a, S> {
     stream: &'a mut S,
     reader: BodyReader<'a>,
+}
+
+impl<S> fmt::Debug for RequestBody<'_, S> {
+    /// The read state; the stream is left out, as it need not be `Debug`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RequestBody")
+            .field("reader", &self.reader)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a, S> RequestBody<'a, S> {
@@ -459,7 +582,8 @@ where
     ///   server answers `400`) or the peer closes the connection before the
     ///   body is complete.
     /// - [`Error::TcpError`] if the stream fails.
-    /// - [`Error::InvalidState`] after [`all`](Self::all).
+    /// - [`Error::InvalidState`] after [`all`](Self::all), or after a failed
+    ///   `all` that had read part of the body.
     /// - [`Error::BufferOverflow`] if the buffer is too small to hold even one
     ///   piece of framing.
     pub async fn chunk(&mut self) -> Result<Option<&[u8]>, Error> {
@@ -477,7 +601,7 @@ where
     ///
     /// - [`Error::BufferOverflow`] if the body does not fit.
     /// - [`Error::InvalidState`] if [`chunk`](Self::chunk) already returned
-    ///   part of the body.
+    ///   part of the body, or an earlier `all` failed after reading part of it.
     /// - The errors of [`chunk`](Self::chunk).
     pub async fn all(&mut self) -> Result<&[u8], Error> {
         self.reader.all_from(self.stream).await

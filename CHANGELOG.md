@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `RequestBody` (`chunk()` returns the next piece of the body as a slice of the connection buffer, with no copy and without chunk framing; `all()` returns the whole body, decoded in place) and `BodyReader`, its stream-less form for streaming handlers.
-- `Expect: 100-continue` is answered when the handler first reads the body. A handler that rejects the request without reading never invites it.
+- `Expect: 100-continue` is answered when the handler first reads the body. A handler that rejects the request without reading never invites it, and a streaming handler that sends its response head before reading the body never gets `100 Continue` written into that response. If writing `100 Continue` is cut off (the handler timed out mid-write), nothing more is sent on the connection.
+- After a failed `all()` that had already read part of the body, `all()` and `chunk()` return `Error::InvalidState` instead of the rest of the body.
+- `RequestBody` and `BodyReader` implement `Debug`.
 - `headers::EXPECT`.
 
 ### Fixed

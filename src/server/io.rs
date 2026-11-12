@@ -12,7 +12,7 @@ use nanofish::{
     method::HttpMethod,
     protocol::{self, DOUBLE_CRLF_LEN},
     request::HttpRequest,
-    server::body::{BodyFailure, BodyParts, DRAIN_LIMIT_BYTES, RequestBody, reply_status},
+    server::body::{BodyFailure, BodyParts, DRAIN_BYTES_MAX, RequestBody, reply_status},
     server::response::ServerResponse,
     status_code::StatusCode,
 };
@@ -179,12 +179,17 @@ where
 
     let response = handler.handle_request(request, &mut body).await;
     let (stream, mut reader) = body.into_parts();
+    if let Err(cut_off) = reader.check_interim() {
+        // Part of `100 Continue` may be on the wire: no response after it
+        // would be framed, so the connection is closed unanswered.
+        return Err(response.err().unwrap_or(cut_off));
+    }
     let close = close || !reader.is_done() || reader.pipelined();
     let result =
         answer::<T, MAX_RESPONSE_SIZE>(stream, response, request.method, close, reader.failure())
             .await;
     if !reader.is_done()
-        && let Err(error) = reader.drain(stream, DRAIN_LIMIT_BYTES).await
+        && let Err(error) = reader.drain(stream, DRAIN_BYTES_MAX).await
     {
         // The connection closes either way; this only explains why the peer
         // may see a reset.
@@ -968,6 +973,9 @@ mod tests {
 
         assert!(matches!(err, Error::BufferOverflow));
         assert_status(&stream.output, "413 Request Entity Too Large");
+        // The rest of the body was read and discarded, so closing the
+        // connection does not reset it under the 413.
+        assert_eq!(stream.read_pos, stream.input.len());
     }
 
     #[test]
@@ -2051,27 +2059,6 @@ mod tests {
     fn test_streaming_handler_reads_the_request_while_it_writes_the_response() {
         // Goal: a streaming handler reads the request and writes the response in turn.
         // Method: echo a chunked upload back as a chunked response and decode it.
-        use nanofish::server::{BodyLength, ResponseWriter, StreamingHandler};
-
-        struct Echo;
-
-        impl StreamingHandler for Echo {
-            async fn handle<S: Read + Write, const HEAD_SIZE: usize>(
-                &mut self,
-                _request: &HttpRequest<'_>,
-                body: &mut nanofish::server::BodyReader<'_>,
-                response: &mut ResponseWriter<'_, S, HEAD_SIZE>,
-            ) -> Result<(), Error> {
-                response
-                    .send_head(StatusCode::Ok, &[], BodyLength::Unknown)
-                    .await?;
-                while let Some(piece) = body.chunk(response).await? {
-                    response.write(piece).await?;
-                }
-                response.finish().await
-            }
-        }
-
         let raw = chunked_post(200);
         let mut stream = MockStream::<1024, 1024>::new(&raw);
 
@@ -2095,5 +2082,262 @@ mod tests {
         let total = codec::dechunk(&mut raw_response, total_len).unwrap();
         let head_len = protocol::find_double_crlf(&raw_response).unwrap() + DOUBLE_CRLF_LEN;
         assert_eq!(&raw_response[head_len..total], [b'a'; 200].as_slice());
+    }
+
+    /// Streaming handler that sends its head first and then echoes the
+    /// request body back as it arrives.
+    struct Echo;
+
+    impl nanofish::server::StreamingHandler for Echo {
+        async fn handle<S: Read + Write, const HEAD_SIZE: usize>(
+            &mut self,
+            _request: &HttpRequest<'_>,
+            body: &mut nanofish::server::BodyReader<'_>,
+            response: &mut nanofish::server::ResponseWriter<'_, S, HEAD_SIZE>,
+        ) -> Result<(), Error> {
+            response
+                .send_head(StatusCode::Ok, &[], nanofish::server::BodyLength::Unknown)
+                .await?;
+            while let Some(piece) = body.chunk(response).await? {
+                response.write(piece).await?;
+            }
+            response.finish().await
+        }
+    }
+
+    #[test]
+    fn test_expect_continue_is_never_sent_after_the_final_head() {
+        // Goal: a streaming handler that starts its response before reading the
+        // body never gets `100 Continue` written into that response.
+        // Method: the echo handler against a client that asks for `100 Continue`
+        // (and sends the body anyway, as a client does once the final response
+        // starts); the response must decode cleanly to the body.
+        let head =
+            b"POST /up HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n";
+        let mut stream = ContinueStream {
+            head: head.to_vec(),
+            body_sent: false,
+            output: std::vec::Vec::new(),
+            continued_before_body: false,
+        };
+
+        futures_lite::future::block_on(
+            nanofish::server::handle_http_stream_connection_with_sizes::<_, _, 128, 256>(
+                &mut stream,
+                &mut Echo,
+            ),
+        )
+        .unwrap();
+
+        let response = response_text(&stream.output);
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(!response.contains("100 Continue"), "{response}");
+        let mut raw_response = stream.output.clone();
+        let total_len = raw_response.len();
+        let total = codec::dechunk(&mut raw_response, total_len).unwrap();
+        let head_len = protocol::find_double_crlf(&raw_response).unwrap() + DOUBLE_CRLF_LEN;
+        assert_eq!(&raw_response[head_len..total], b"hello");
+    }
+
+    /// Handler that collects the body, and when that fails part way, checks
+    /// that the body can no longer be read and passes the error on.
+    struct RetryAfterFailedCollect;
+
+    impl HttpHandler for RetryAfterFailedCollect {
+        async fn handle_request<S: Read + Write>(
+            &mut self,
+            _request: &HttpRequest<'_>,
+            body: &mut RequestBody<'_, S>,
+        ) -> Result<ServerResponse<'_>, Error> {
+            let Err(error) = body.all().await else {
+                return Err(Error::InvalidState("collected a malformed body"));
+            };
+            assert!(
+                matches!(body.all().await, Err(Error::InvalidState(_))),
+                "all() after a partial failure must not return a truncated body"
+            );
+            assert!(
+                matches!(body.chunk().await, Err(Error::InvalidState(_))),
+                "chunk() after a partial failure must not resume mid-body"
+            );
+            Err(error)
+        }
+    }
+
+    #[test]
+    fn test_body_cannot_be_read_again_after_a_partial_collection_failed() {
+        // Goal: a failed `all()` that already moved payload never lets a
+        // retry return part of the body as if it were all of it.
+        // Method: one good chunk, then malformed framing; the handler retries
+        // with `all()` and `chunk()`, then passes the framing error on.
+        let raw = b"POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\nZZ\r\n";
+        let mut stream = MockStream::<256, 512>::new(raw);
+
+        let err =
+            futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 256, 512>(
+                &mut stream,
+                &mut RetryAfterFailedCollect,
+            ))
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidRequest(_)), "{err:?}");
+        assert_status(&stream.output, "400 Bad Request");
+    }
+
+    /// Handler whose body read fails and which then fails with an error of
+    /// its own of the same kind.
+    struct OwnErrorAfterBodyFailure;
+
+    impl HttpHandler for OwnErrorAfterBodyFailure {
+        async fn handle_request<S: Read + Write>(
+            &mut self,
+            _request: &HttpRequest<'_>,
+            body: &mut RequestBody<'_, S>,
+        ) -> Result<ServerResponse<'_>, Error> {
+            assert!(matches!(body.all().await, Err(Error::BufferOverflow)));
+            Err(Error::InvalidRequest("handler rejected the request"))
+        }
+    }
+
+    #[test]
+    fn test_handler_error_after_a_body_failure_is_still_a_500() {
+        // Goal: only the body read's own error is answered like the body
+        // failure; a different error from the handler is a `500`.
+        // Method: a body too large for `all()`, then the handler fails with
+        // an unrelated `InvalidRequest`.
+        let raw = b"POST /up HTTP/1.1\r\nHost: h\r\nContent-Length: 500\r\n\r\n";
+        let mut stream = MockStream::<256, 512>::new(raw);
+
+        let err =
+            futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+                &mut stream,
+                &mut OwnErrorAfterBodyFailure,
+            ))
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidRequest(_)), "{err:?}");
+        assert_status(&stream.output, "500 Internal Server Error");
+    }
+
+    /// Streaming handler that collects the whole body.
+    struct CollectAll;
+
+    impl nanofish::server::StreamingHandler for CollectAll {
+        async fn handle<S: Read + Write, const HEAD_SIZE: usize>(
+            &mut self,
+            _request: &HttpRequest<'_>,
+            body: &mut nanofish::server::BodyReader<'_>,
+            response: &mut nanofish::server::ResponseWriter<'_, S, HEAD_SIZE>,
+        ) -> Result<(), Error> {
+            body.all(response).await?;
+            response
+                .send_head(StatusCode::Ok, &[], nanofish::server::BodyLength::Known(0))
+                .await
+        }
+    }
+
+    #[test]
+    fn test_streaming_413_drains_the_rest_of_the_body() {
+        // Goal: after a streaming handler fails with a body too large for the
+        // buffer, the server still reads and discards the rest of the body,
+        // so closing does not reset the connection under the 413.
+        // Method: a chunked body larger than the buffer; all input consumed.
+        let raw = chunked_post(600);
+        let mut stream = MockStream::<1024, 512>::new(&raw);
+
+        let err = futures_lite::future::block_on(
+            nanofish::server::handle_http_stream_connection_with_sizes::<_, _, 256, 256>(
+                &mut stream,
+                &mut CollectAll,
+            ),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::BufferOverflow), "{err:?}");
+        assert_status(&stream.output, "413 Request Entity Too Large");
+        assert_eq!(stream.read_pos, stream.input.len());
+    }
+
+    /// A client that asks for `100 Continue` on a connection whose writes of
+    /// it never complete.
+    struct StalledContinue {
+        head: std::vec::Vec<u8>,
+        output: std::vec::Vec<u8>,
+    }
+
+    impl ErrorType for StalledContinue {
+        type Error = Infallible;
+    }
+
+    impl Read for StalledContinue {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let n = buf.len().min(self.head.len());
+            buf[..n].copy_from_slice(&self.head[..n]);
+            self.head.drain(..n);
+            Ok(n)
+        }
+    }
+
+    impl Write for StalledContinue {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            if buf.starts_with(b"HTTP/1.1 100") {
+                core::future::pending::<()>().await;
+            }
+            self.output.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    /// Handler that gives up on a slow inner handler with a `503`, the way
+    /// the Embassy server's handler timeout does.
+    struct GiveUp<H>(H);
+
+    impl<H: HttpHandler> HttpHandler for GiveUp<H> {
+        async fn handle_request<S: Read + Write>(
+            &mut self,
+            request: &HttpRequest<'_>,
+            body: &mut RequestBody<'_, S>,
+        ) -> Result<ServerResponse<'_>, Error> {
+            futures_lite::future::or(self.0.handle_request(request, body), async {
+                futures_lite::future::yield_now().await;
+                Ok(ServerResponse {
+                    status_code: StatusCode::ServiceUnavailable,
+                    headers: Vec::new(),
+                    body: b"",
+                })
+            })
+            .await
+        }
+    }
+
+    #[test]
+    fn test_nothing_is_sent_after_a_cut_off_100_continue() {
+        // Goal: when the handler is abandoned while `100 Continue` is being
+        // written, the server sends no response after the partial interim one.
+        // Method: a write of `100 Continue` that never completes, raced against
+        // a `503`; the connection must end with no output and an error.
+        let head =
+            b"POST /up HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n";
+        let mut stream = StalledContinue {
+            head: head.to_vec(),
+            output: std::vec::Vec::new(),
+        };
+        let mut handler = GiveUp(StreamSum::new());
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidState(_)), "{err:?}");
+        assert!(
+            stream.output.is_empty(),
+            "{}",
+            response_text(&stream.output)
+        );
     }
 }

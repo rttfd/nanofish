@@ -11,7 +11,7 @@ use nanofish::{
     method::HttpMethod,
     protocol::MAX_HEADERS,
     request::HttpRequest,
-    server::body::{BodyReader, DRAIN_LIMIT_BYTES, reply_status},
+    server::body::{BodyReader, DRAIN_BYTES_MAX, reply_status},
     server::io::{DEFAULT_REQUEST_SIZE, DEFAULT_RESPONSE_SIZE, Received, receive_request},
     server::response::ServerResponse,
     status_code::StatusCode,
@@ -339,27 +339,28 @@ where
         Err(error) => Err(error),
     };
 
-    match result {
-        Ok(()) => {
-            if !body.is_done()
-                && let Err(error) = body.drain(writer.stream, DRAIN_LIMIT_BYTES).await
-            {
-                // The connection closes either way; this only explains why
-                // the peer may see a reset.
-                debug!("Request body not drained: {:?}", error);
-            }
-            Ok(())
-        }
-        Err(error) => {
-            // Only an unstarted response can still be turned into an error page.
-            if !writer.head_sent()
-                && let Some(status) = reply_status(body.failure(), &error)
-            {
-                nanofish::server::io::send_status(writer.stream, status).await;
-            }
-            Err(error)
-        }
+    if let Err(cut_off) = body.check_interim() {
+        // Part of `100 Continue` may be on the wire: nothing sent after it
+        // would be framed, so the connection is closed as it is.
+        return Err(result.err().unwrap_or(cut_off));
     }
+    // Only an unstarted response can still be turned into an error page.
+    if let Err(error) = &result
+        && !writer.head_sent()
+        && let Some(status) = reply_status(body.failure(), error)
+    {
+        nanofish::server::io::send_status(writer.stream, status).await;
+    }
+    // Discard what is left of the body on success and failure alike, so that
+    // closing the connection does not reset it under the response.
+    if !body.is_done()
+        && let Err(error) = body.drain(writer.stream, DRAIN_BYTES_MAX).await
+    {
+        // The connection closes either way; this only explains why the peer
+        // may see a reset.
+        debug!("Request body not drained: {:?}", error);
+    }
+    result
 }
 
 #[cfg(test)]
