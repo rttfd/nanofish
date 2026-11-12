@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-12
+
 ### Breaking changes
 
 - The server no longer buffers a request body before it calls the handler. It reads the head, and the body is read through a `RequestBody` that the handler receives, so a body of any size (chunked or `Content-Length`) can pass through a small buffer. `HttpHandler::handle_request` is now `handle_request<S: Read + Write>(&mut self, request: &HttpRequest<'_>, body: &mut RequestBody<'_, S>)`. **`request.body` is empty on the server**: a handler that read it still compiles and sees nothing, so look for every use of `request.body` in handlers.
@@ -500,7 +502,8 @@ HttpResponseBuilder::new()
 - Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, and CONNECT methods.
 - Configurable client options (retries, timeouts, delays).
 
-[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/rttfd/nanofish/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/rttfd/nanofish/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/rttfd/nanofish/compare/v0.14.2...v0.15.0
 [0.14.2]: https://github.com/rttfd/nanofish/compare/v0.14.1...v0.14.2
