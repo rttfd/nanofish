@@ -1,5 +1,6 @@
 //! HTTP server ports and adapters.
 
+pub(crate) mod body;
 #[cfg(feature = "embassy")]
 mod embassy;
 mod io;
@@ -7,6 +8,7 @@ pub(crate) mod response;
 mod static_site;
 mod stream;
 
+pub use body::{BodyReader, RequestBody};
 #[cfg(feature = "embassy")]
 pub use embassy::{
     DefaultEmbassyHttpServer, EmbassyHttpServer, ServerTimeouts, SmallEmbassyHttpServer,

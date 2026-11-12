@@ -3,6 +3,7 @@ use embassy_net::{
     tcp::{State, TcpSocket},
 };
 use embassy_time::{Duration, Timer, with_timeout};
+use embedded_io_async::{Read, Write};
 use nanofish::{
     error::Error,
     handler::HttpHandler,
@@ -11,7 +12,7 @@ use nanofish::{
     request::HttpRequest,
     server::response::{ServerResponse, ServerResponseBuilder},
     server::{
-        StreamingHandler, handle_http_connection_with_sizes,
+        RequestBody, StreamingHandler, handle_http_connection_with_sizes,
         handle_http_stream_connection_with_sizes, serve_http_connection_with_sizes,
     },
     status_code::StatusCode,
@@ -33,6 +34,9 @@ pub struct ServerTimeouts {
     /// Maximum time a request handler may run per request. A handler that
     /// takes longer is abandoned and the client gets `503 Service
     /// Unavailable`.
+    ///
+    /// The time a handler spends reading the request body counts, so a slow
+    /// upload needs a longer timeout than the handler's own work does.
     pub handler_timeout: TimeoutDuration,
     /// Maximum total time one connection may take, from accept to the end of
     /// the response.
@@ -303,13 +307,14 @@ impl<H> HttpHandler for TimeoutHandler<'_, H>
 where
     H: HttpHandler,
 {
-    async fn handle_request(
+    async fn handle_request<S: Read + Write>(
         &mut self,
         request: &HttpRequest<'_>,
+        body: &mut RequestBody<'_, S>,
     ) -> Result<ServerResponse<'_>, Error> {
         match with_timeout(
             Duration::from_millis(self.timeout.as_millis()),
-            self.inner.handle_request(request),
+            self.inner.handle_request(request, body),
         )
         .await
         {
