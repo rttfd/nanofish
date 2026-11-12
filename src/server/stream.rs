@@ -11,7 +11,8 @@ use nanofish::{
     method::HttpMethod,
     protocol::MAX_HEADERS,
     request::HttpRequest,
-    server::io::{DEFAULT_REQUEST_SIZE, DEFAULT_RESPONSE_SIZE, receive_request},
+    server::body::{BodyReader, DRAIN_BYTES_MAX, reply_status},
+    server::io::{DEFAULT_REQUEST_SIZE, DEFAULT_RESPONSE_SIZE, Received, receive_request},
     server::response::ServerResponse,
     status_code::StatusCode,
 };
@@ -71,6 +72,11 @@ where
             http10: request.version.eq_ignore_ascii_case("HTTP/1.0"),
             state: BodyState::NotStarted,
         }
+    }
+
+    /// The connection, for reading the request body.
+    pub(super) const fn stream_mut(&mut self) -> &mut S {
+        self.stream
     }
 
     /// Whether [`send_head`](Self::send_head) has been called.
@@ -256,16 +262,24 @@ fn is_framing_header(name: &str) -> bool {
     reason = "no_std embedded executors are single-threaded, so no `Send` bound is wanted"
 )]
 pub trait StreamingHandler {
-    /// Answer `request` through `response`.
+    /// Answer `request` through `response`, reading its body from `body`.
+    ///
+    /// `request` has the head only. The body is read with
+    /// [`BodyReader::chunk`] or [`BodyReader::all`], which take `response`
+    /// because it owns the connection; the pieces borrow `body`, so each can
+    /// be written to `response` as it arrives. A handler that does not read
+    /// the body leaves it to the server, which discards it after the
+    /// response.
     ///
     /// Return `Ok` after the response is complete (calling
     /// [`ResponseWriter::finish`] is optional). If the handler returns an error
     /// before sending the head, the client gets a `500`; after the head has been
     /// sent the connection is closed, which the client sees as a truncated
     /// response.
-    async fn handle<S: Write, const HEAD_SIZE: usize>(
+    async fn handle<S: Read + Write, const HEAD_SIZE: usize>(
         &mut self,
         request: &HttpRequest<'_>,
+        body: &mut BodyReader<'_>,
         response: &mut ResponseWriter<'_, S, HEAD_SIZE>,
     ) -> Result<(), Error>;
 }
@@ -315,25 +329,38 @@ where
     H: StreamingHandler,
 {
     let mut request_buffer = [0; REQ_SIZE];
-    let (request, _) = receive_request::<S, HEAD_SIZE>(stream, &mut request_buffer, false).await?;
+    let Received { request, body } =
+        receive_request::<S, HEAD_SIZE>(stream, &mut request_buffer, false).await?;
 
-    let mut writer = ResponseWriter::<S, HEAD_SIZE>::new(stream, &request);
-    let result = match handler.handle(&request, &mut writer).await {
+    let mut body = BodyReader::new(body);
+    let mut writer = ResponseWriter::<_, HEAD_SIZE>::new(stream, &request);
+    let result = match handler.handle(&request, &mut body, &mut writer).await {
         Ok(()) => writer.finish().await,
         Err(error) => Err(error),
     };
 
-    match result {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            // Only an unstarted response can still be turned into an error page.
-            if !writer.head_sent() {
-                nanofish::server::io::send_status(writer.stream, StatusCode::InternalServerError)
-                    .await;
-            }
-            Err(error)
-        }
+    if let Err(cut_off) = body.check_interim() {
+        // Part of `100 Continue` may be on the wire: nothing sent after it
+        // would be framed, so the connection is closed as it is.
+        return Err(result.err().unwrap_or(cut_off));
     }
+    // Only an unstarted response can still be turned into an error page.
+    if let Err(error) = &result
+        && !writer.head_sent()
+        && let Some(status) = reply_status(body.failure(), error)
+    {
+        nanofish::server::io::send_status(writer.stream, status).await;
+    }
+    // Discard what is left of the body on success and failure alike, so that
+    // closing the connection does not reset it under the response.
+    if !body.is_done()
+        && let Err(error) = body.drain(writer.stream, DRAIN_BYTES_MAX).await
+    {
+        // The connection closes either way; this only explains why the peer
+        // may see a reset.
+        debug!("Request body not drained: {:?}", error);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -413,9 +440,10 @@ mod tests {
             clippy::too_many_lines,
             reason = "one scripted step per response, kept in order for readability"
         )]
-        async fn handle<S: Write, const HEAD_SIZE: usize>(
+        async fn handle<S: Read + Write, const HEAD_SIZE: usize>(
             &mut self,
             _request: &HttpRequest<'_>,
+            _body: &mut BodyReader<'_>,
             response: &mut ResponseWriter<'_, S, HEAD_SIZE>,
         ) -> Result<(), Error> {
             let text = [HttpHeader::content_type("text/plain")];

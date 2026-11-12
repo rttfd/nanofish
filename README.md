@@ -485,14 +485,19 @@ where
 This example uses the Embassy-backed server (`features = ["embassy"]`).
 
 ```rust,ignore
-use nanofish::{DefaultEmbassyHttpServer, HttpHandler, HttpRequest, ServerResponse, StatusCode};
+use embedded_io_async::{Read, Write};
+use nanofish::{DefaultEmbassyHttpServer, HttpHandler, HttpRequest, RequestBody, ServerResponse, StatusCode};
 use embassy_net::Stack;
 
 // Create a simple request handler
 struct MyHandler;
 
 impl HttpHandler for MyHandler {
-    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<ServerResponse<'_>, nanofish::Error> {
+    async fn handle_request<S: Read + Write>(
+        &mut self,
+        request: &HttpRequest<'_>,
+        _body: &mut RequestBody<'_, S>,
+    ) -> Result<ServerResponse<'_>, nanofish::Error> {
         match request.path {
             "/" => Ok(ServerResponse {
                 status_code: StatusCode::Ok,
@@ -556,12 +561,17 @@ the client receives are `HttpResponse`s; responses a handler returns are `Server
 body is plain bytes.)
 
 ```rust,ignore
-use nanofish::{HttpHandler, HttpRequest, ServerResponse, ServerResponseBuilder, StatusCode, mime_types};
+use embedded_io_async::{Read, Write};
+use nanofish::{HttpHandler, HttpRequest, RequestBody, ServerResponse, ServerResponseBuilder, StatusCode, mime_types};
 
 struct ApiHandler;
 
 impl HttpHandler for ApiHandler {
-    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<ServerResponse<'_>, nanofish::Error> {
+    async fn handle_request<S: Read + Write>(
+        &mut self,
+        request: &HttpRequest<'_>,
+        _body: &mut RequestBody<'_, S>,
+    ) -> Result<ServerResponse<'_>, nanofish::Error> {
         Ok(match request.path {
             "/api/health" => ServerResponseBuilder::new().json(r#"{"status":"ok"}"#)?.build()?,
             "/"           => ServerResponseBuilder::new()
@@ -597,7 +607,8 @@ impl HttpHandler for ApiHandler {
 ### Dynamic Responses
 
 ```rust,ignore
-use nanofish::{HttpHandler, HttpRequest, ServerResponse, StatusCode, HttpHeader};
+use embedded_io_async::{Read, Write};
+use nanofish::{HttpHandler, HttpRequest, RequestBody, ServerResponse, StatusCode, HttpHeader};
 use heapless::String;
 use core::fmt::Write;
 
@@ -613,7 +624,11 @@ impl DynamicHandler {
 }
 
 impl HttpHandler for DynamicHandler {
-    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<ServerResponse<'_>, nanofish::Error> {
+    async fn handle_request<S: Read + Write>(
+        &mut self,
+        request: &HttpRequest<'_>,
+        _body: &mut RequestBody<'_, S>,
+    ) -> Result<ServerResponse<'_>, nanofish::Error> {
         match request.path {
             "/api/counter" => {
                 self.counter += 1;
@@ -687,7 +702,11 @@ Your handler receives detailed information about each request:
 
 ```rust,ignore
 impl HttpHandler for MyHandler {
-    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<ServerResponse<'_>, nanofish::Error> {
+    async fn handle_request<S: Read + Write>(
+        &mut self,
+        request: &HttpRequest<'_>,
+        body: &mut RequestBody<'_, S>,
+    ) -> Result<ServerResponse<'_>, nanofish::Error> {
         // Check the HTTP method
         match request.method {
             HttpMethod::GET => { /* handle GET */ }
@@ -703,10 +722,10 @@ impl HttpHandler for MyHandler {
             println!("Header: {}: {}", header.name, header.value);
         }
         
-        // Access request body (for POST, PUT, etc.)
-        if !request.body.is_empty() {
-            println!("Body: {} bytes", request.body.len());
-        }
+        // Read the request body (for POST, PUT, etc.). `request.body` is empty
+        // on the server: the body is read through `body`, however it is framed.
+        let payload = body.all().await?;
+        println!("Body: {} bytes", payload.len());
         
         // Return your response...
         Ok(ServerResponse { /* ... */ })
@@ -905,7 +924,11 @@ Any `TlsVerifier` works, including your own that compares the certificate with a
 
 ```rust,ignore
 impl HttpHandler for Api {
-    async fn handle_request(&mut self, request: &HttpRequest<'_>) -> Result<ServerResponse<'_>, Error> {
+    async fn handle_request<S: Read + Write>(
+        &mut self,
+        request: &HttpRequest<'_>,
+        _body: &mut RequestBody<'_, S>,
+    ) -> Result<ServerResponse<'_>, Error> {
         if let Some(params) = request.match_path::<2>("/led/:id") {
             let id = params.get("id");
             // ...
@@ -919,17 +942,44 @@ impl HttpHandler for Api {
 ```
 
 `HEAD` requests get their headers without the body, and malformed or oversized requests are answered
-with `400`, `413`, `431` or `501` instead of a silent close. Chunked request bodies are decoded
-before your handler runs.
+with `400`, `413`, `431` or `501` instead of a silent close.
+
+The server reads only the request head before it calls your handler (`request.body` is empty). The
+body is read through the `RequestBody` the handler receives, `Content-Length` or chunked alike, and
+framing never reaches you. `body.all()` returns the whole body as one slice, decoded in place (`413`
+if it does not fit the request buffer); `body.chunk()` hands out the body piece by piece, borrowed
+from the connection buffer with no copy, so an upload of any size passes through a small buffer:
+
+```rust,ignore
+impl HttpHandler for Upload {
+    async fn handle_request<S: Read + Write>(
+        &mut self,
+        _request: &HttpRequest<'_>,
+        body: &mut RequestBody<'_, S>,
+    ) -> Result<ServerResponse<'_>, Error> {
+        while let Some(piece) = body.chunk().await? {
+            self.flash.write(piece).await?;
+        }
+        ServerResponseBuilder::new().status(StatusCode::NoContent).build()
+    }
+}
+```
+
+A body the handler leaves unread is read and discarded after the response (up to 16 KiB), and the
+connection closes. `Expect: 100-continue` is answered when the handler first reads the body, so a
+handler that rejects the request never invites it. The buffer holds the head and the body's room
+together, so a large head leaves less for `body.all()`. On the Embassy server the time spent reading
+counts toward `ServerTimeouts::handler_timeout`.
 
 For responses that are large or produced incrementally, implement `StreamingHandler` and write
 through a `ResponseWriter`; run it with `EmbassyHttpServer::serve_streaming`:
 
 ```rust,ignore
 impl StreamingHandler for Log {
-    async fn handle<S: Write, const HEAD_SIZE: usize>(
+    async fn handle<S: Read + Write, const HEAD_SIZE: usize>(
         &mut self,
         _request: &HttpRequest<'_>,
+        _body: &mut BodyReader<'_>,
         response: &mut ResponseWriter<'_, S, HEAD_SIZE>,
     ) -> Result<(), Error> {
         response.send_head(StatusCode::Ok, &[HttpHeader::content_type(mime_types::TEXT)], BodyLength::Unknown).await?;
@@ -940,6 +990,10 @@ impl StreamingHandler for Log {
     }
 }
 ```
+
+A streaming handler reads the request body with `body.chunk(response)` or `body.all(response)`:
+the `ResponseWriter` owns the connection, so it is passed to read through it, and the pieces borrow
+`body`, so each can be written to `response` as it arrives.
 
 `EmbassyHttpServer::with_keep_alive(n)` serves up to `n` requests per connection. A connection that
 sits idle keeps the server's socket busy until `read_timeout` expires, so lower that timeout when
@@ -972,13 +1026,12 @@ static SITE: StaticSite<2> = StaticSite::new([
 ]);
 
 impl StreamingHandler for Handler {
-    type Error = nanofish::Error;
-
-    async fn handle(
+    async fn handle<S: Read + Write, const HEAD_SIZE: usize>(
         &mut self,
         request: &HttpRequest<'_>,
-        response: &mut ResponseWriter<'_>,
-    ) -> Result<(), Self::Error> {
+        _body: &mut BodyReader<'_>,
+        response: &mut ResponseWriter<'_, S, HEAD_SIZE>,
+    ) -> Result<(), nanofish::Error> {
         let mut buf = [0u8; 512];
         if serve(&SITE, request, response, &mut buf).await? {
             return Ok(());

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking changes
+
+- The server no longer buffers a request body before it calls the handler. It reads the head, and the body is read through a `RequestBody` that the handler receives, so a body of any size (chunked or `Content-Length`) can pass through a small buffer. `HttpHandler::handle_request` is now `handle_request<S: Read + Write>(&mut self, request: &HttpRequest<'_>, body: &mut RequestBody<'_, S>)`. **`request.body` is empty on the server**: a handler that read it still compiles and sees nothing, so look for every use of `request.body` in handlers.
+- `StreamingHandler::handle` takes a `&mut BodyReader<'_>` between the request and the `ResponseWriter` (`handle(request, body, response)`), and its stream type is `S: Read + Write`. The writer owns the connection, so the body is read with `body.chunk(response)` or `body.all(response)`; the pieces borrow `body`, so each can be written to `response` as it arrives.
+- A body that does not fit the request buffer is refused with `413` when the handler asks for all of it (`body.all()`), not before the handler runs. A request whose `Content-Length` is larger than the buffer used to be refused at once; a handler that never reads the body now answers it normally. What the handler leaves unread is read and discarded after the response, up to 16 KiB, and the connection closes (the response says `Connection: close`).
+- `REQ_SIZE` is shared by the head and the body's room: `body.all()` can hold what the head leaves. On the Embassy server the time a handler spends reading the body counts toward `ServerTimeouts::handler_timeout`.
+
+### Added
+
+- `RequestBody` (`chunk()` returns the next piece of the body as a slice of the connection buffer, with no copy and without chunk framing; `all()` returns the whole body, decoded in place) and `BodyReader`, its stream-less form for streaming handlers.
+- `Expect: 100-continue` is answered when the handler first reads the body. A handler that rejects the request without reading never invites it, and a streaming handler that sends its response head before reading the body never gets `100 Continue` written into that response. If writing `100 Continue` is cut off (the handler timed out mid-write), nothing more is sent on the connection.
+- After a failed `all()` that had already read part of the body, `all()` and `chunk()` return `Error::InvalidState` instead of the rest of the body.
+- `RequestBody` and `BodyReader` implement `Debug`.
+- `headers::EXPECT`.
+
+### Fixed
+
+- A chunked request larger than the request buffer could not be handled at all (`413`). A streaming handler now takes it piece by piece.
+
 ## [0.16.0] - 2026-11-10
 
 ### Breaking changes

@@ -16,6 +16,8 @@ pub mod headers {
     pub const HOST: &str = "Host";
     /// Connection header
     pub const CONNECTION: &str = "Connection";
+    /// Expect header
+    pub const EXPECT: &str = "Expect";
     /// X-API-Key header for API authentication
     pub const X_API_KEY: &str = "X-API-Key";
     /// Accept-Encoding header

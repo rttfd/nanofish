@@ -13,7 +13,8 @@ use futures_lite::future::block_on;
 use nanofish::client::SliceSource;
 use nanofish::encode::{base64_encode, percent_encode};
 use nanofish::{
-    HttpClient, HttpClientRequest, HttpMethod, SimpleHandler, handle_http_connection_with_sizes,
+    Error, HttpClient, HttpClientRequest, HttpHandler, HttpMethod, HttpRequest, RequestBody,
+    ServerResponse, SimpleHandler, StatusCode, handle_http_connection_with_sizes,
 };
 use std::hint::black_box;
 
@@ -158,6 +159,119 @@ fn server_request(c: &mut Criterion) {
     });
 }
 
+/// How a bench handler takes the request body.
+#[derive(Clone, Copy)]
+enum Take {
+    /// Collect all of it with `RequestBody::all`.
+    All,
+    /// Read it piece by piece with `RequestBody::chunk`.
+    Pieces,
+}
+
+/// Reads the request body the way `take` says and answers `200`.
+struct BodyHandler {
+    take: Take,
+    seen: usize,
+}
+
+impl HttpHandler for BodyHandler {
+    async fn handle_request<S: Read + Write>(
+        &mut self,
+        _request: &HttpRequest<'_>,
+        body: &mut RequestBody<'_, S>,
+    ) -> Result<ServerResponse<'_>, Error> {
+        self.seen = 0;
+        match self.take {
+            Take::All => self.seen = body.all().await?.len(),
+            Take::Pieces => {
+                while let Some(piece) = body.chunk().await? {
+                    self.seen += piece.len();
+                }
+            }
+        }
+        Ok(ServerResponse {
+            status_code: StatusCode::Ok,
+            headers: heapless::Vec::new(),
+            body: b"ok",
+        })
+    }
+}
+
+fn length_request(body: usize) -> Vec<u8> {
+    let mut raw =
+        format!("POST /up HTTP/1.1\r\nHost: device.local\r\nContent-Length: {body}\r\n\r\n")
+            .into_bytes();
+    raw.resize(raw.len() + body, b'x');
+    raw
+}
+
+fn chunked_request(chunks: usize, chunk: usize) -> Vec<u8> {
+    let mut raw =
+        b"POST /up HTTP/1.1\r\nHost: device.local\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+    for _ in 0..chunks {
+        raw.extend(format!("{chunk:x}\r\n").bytes());
+        raw.resize(raw.len() + chunk, b'x');
+        raw.extend(b"\r\n");
+    }
+    raw.extend(b"0\r\n\r\n");
+    raw
+}
+
+/// Serves one request to a `BodyHandler` over a 1024-byte connection buffer
+/// and returns how many body bytes the handler saw.
+fn serve_body(raw: &[u8], take: Take) -> usize {
+    let mut stream = Replay {
+        input: raw,
+        max: 1460,
+    };
+    let mut handler = BodyHandler { take, seen: 0 };
+    block_on(handle_http_connection_with_sizes::<_, _, 1024, 1024>(
+        &mut stream,
+        &mut handler,
+    ))
+    .expect("request is served");
+    handler.seen
+}
+
+fn server_body(c: &mut Criterion) {
+    // A body that fits the buffer: `all()` is the cost of the old buffered
+    // path, so it must stay cheap.
+    let small = length_request(256);
+    c.bench_function("server_body/all_256", |b| {
+        b.iter(|| black_box(serve_body(black_box(&small), Take::All)));
+    });
+    // A handler that ignores the body: the server drains it after answering.
+    c.bench_function("server_body/ignored_256", |b| {
+        b.iter(|| {
+            let mut stream = Replay {
+                input: black_box(&small),
+                max: 1460,
+            };
+            block_on(handle_http_connection_with_sizes::<_, _, 1024, 1024>(
+                &mut stream,
+                &mut SimpleHandler,
+            ))
+            .expect("request is served");
+        });
+    });
+
+    // Bodies far larger than the buffer, which only streaming can take.
+    let mut group = c.benchmark_group("server_body/stream_64k");
+    for chunk in [256usize, 1460, 4096] {
+        let raw = chunked_request(65_536 / chunk, chunk);
+        group.throughput(criterion::Throughput::Bytes(65_536));
+        group.bench_with_input(BenchmarkId::new("chunked", chunk), &raw, |b, raw| {
+            b.iter(|| black_box(serve_body(black_box(raw), Take::Pieces)));
+        });
+    }
+    let raw = length_request(65_536);
+    group.throughput(criterion::Throughput::Bytes(65_536));
+    group.bench_with_input(BenchmarkId::new("length", 65_536), &raw, |b, raw| {
+        b.iter(|| black_box(serve_body(black_box(raw), Take::Pieces)));
+    });
+    group.finish();
+}
+
 fn encoders(c: &mut Criterion) {
     let mut out = [0u8; 256];
     c.bench_function("encode/percent", |b| {
@@ -185,6 +299,7 @@ criterion_group!(
     client_response,
     client_upload,
     server_request,
+    server_body,
     encoders
 );
 criterion_main!(benches);

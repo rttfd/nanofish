@@ -6,12 +6,13 @@ use nanofish::{
     handler::HttpHandler,
     header::{
         HttpHeader,
-        headers::{CONNECTION, CONTENT_LENGTH},
+        headers::{CONNECTION, CONTENT_LENGTH, EXPECT},
         mime_types,
     },
     method::HttpMethod,
     protocol::{self, DOUBLE_CRLF_LEN},
     request::HttpRequest,
+    server::body::{BodyFailure, BodyParts, DRAIN_BYTES_MAX, RequestBody, reply_status},
     server::response::ServerResponse,
     status_code::StatusCode,
 };
@@ -22,6 +23,12 @@ const SMALL_REQUEST_SIZE: usize = 1024;
 const SMALL_RESPONSE_SIZE: usize = 1024;
 
 /// Transport-generic HTTP server for already-accepted streams.
+///
+/// `REQ_SIZE` is the connection buffer: the request head is read into it,
+/// and what is left behind the head is the room the body is read through
+/// ([`RequestBody::all`] needs the whole body to fit there; streaming with
+/// [`RequestBody::chunk`] needs no more than one piece). A larger head
+/// leaves less room for the body.
 pub struct HttpServer<
     const REQ_SIZE: usize = DEFAULT_REQUEST_SIZE,
     const MAX_RESPONSE_SIZE: usize = DEFAULT_RESPONSE_SIZE,
@@ -79,11 +86,18 @@ pub type SmallHttpServer = HttpServer<SMALL_REQUEST_SIZE, SMALL_RESPONSE_SIZE>;
 /// fails, or response serialization exceeds the configured response buffer.
 ///
 /// Where the peer can still be answered, it first gets an error response:
-/// `400` for a malformed request, `413` for a body that does not fit the
-/// request buffer, `431` for headers that do not fit, and `500` when the
-/// handler fails or its response cannot be serialized. The original error is
-/// still returned. Nothing is sent when the stream itself failed or the peer
-/// closed the connection mid-request.
+/// `400` for a malformed request or bad chunk framing, `413` for a body the
+/// handler collects with [`RequestBody::all`] that does not fit the request
+/// buffer, `431` for headers that do not fit, and `500` when the handler
+/// fails or its response cannot be serialized. The original error is still
+/// returned. Nothing is sent when the stream itself failed or the peer closed
+/// the connection mid-request.
+///
+/// The body is read by the handler. What it leaves unread is read and
+/// discarded after the response (up to 16 KiB; the stream's own timeout bounds
+/// how long a stalled peer can hold the connection), and the connection is
+/// closed. A body larger than the buffer is therefore only refused when the
+/// handler asks for all of it.
 pub async fn handle_http_connection<S, H>(stream: &mut S, handler: &mut H) -> Result<(), Error>
 where
     S: Read + Write,
@@ -103,11 +117,18 @@ where
 /// fails, or response serialization exceeds the configured response buffer.
 ///
 /// Where the peer can still be answered, it first gets an error response:
-/// `400` for a malformed request, `413` for a body that does not fit the
-/// request buffer, `431` for headers that do not fit, and `500` when the
-/// handler fails or its response cannot be serialized. The original error is
-/// still returned. Nothing is sent when the stream itself failed or the peer
-/// closed the connection mid-request.
+/// `400` for a malformed request or bad chunk framing, `413` for a body the
+/// handler collects with [`RequestBody::all`] that does not fit the request
+/// buffer, `431` for headers that do not fit, and `500` when the handler
+/// fails or its response cannot be serialized. The original error is still
+/// returned. Nothing is sent when the stream itself failed or the peer closed
+/// the connection mid-request.
+///
+/// The body is read by the handler. What it leaves unread is read and
+/// discarded after the response (up to 16 KiB; the stream's own timeout bounds
+/// how long a stalled peer can hold the connection), and the connection is
+/// closed. A body larger than the buffer is therefore only refused when the
+/// handler asks for all of it.
 pub async fn handle_http_connection_with_sizes<
     S,
     H,
@@ -122,16 +143,59 @@ where
     H: HttpHandler,
 {
     let mut request_buffer = [0; REQ_SIZE];
-    let (request, _) =
+    let Received { request, body } =
         receive_request::<S, MAX_RESPONSE_SIZE>(stream, &mut request_buffer, false).await?;
 
     // One request per connection: say so, or an HTTP/1.1 client assumes the
     // connection stays open and sends its next request into a socket that is
     // already gone.
-    let response = handler.handle_request(&request).await;
-    answer::<S, MAX_RESPONSE_SIZE>(stream, response, request.method, true)
+    exchange::<S, H, MAX_RESPONSE_SIZE>(stream, handler, &request, body, true)
         .await
         .map(|_| ())
+}
+
+/// Run the handler on one request and send its response.
+///
+/// Returns whether the connection must be closed now. It must when the caller
+/// asked for it (`close`), when the handler left part of the body unread (the
+/// connection would be out of step), or when bytes of a further request were
+/// read along with this one.
+///
+/// A body the handler did not finish is read and discarded after the response,
+/// up to a limit, so that closing the connection does not reset it and take
+/// the response with it.
+async fn exchange<T, H, const MAX_RESPONSE_SIZE: usize>(
+    stream: &mut T,
+    handler: &mut H,
+    request: &HttpRequest<'_>,
+    parts: BodyParts<'_>,
+    close: bool,
+) -> Result<bool, Error>
+where
+    T: Read + Write,
+    H: HttpHandler,
+{
+    let mut body = RequestBody::new(stream, parts);
+
+    let response = handler.handle_request(request, &mut body).await;
+    let (stream, mut reader) = body.into_parts();
+    if let Err(cut_off) = reader.check_interim() {
+        // Part of `100 Continue` may be on the wire: no response after it
+        // would be framed, so the connection is closed unanswered.
+        return Err(response.err().unwrap_or(cut_off));
+    }
+    let close = close || !reader.is_done() || reader.pipelined();
+    let result =
+        answer::<T, MAX_RESPONSE_SIZE>(stream, response, request.method, close, reader.failure())
+            .await;
+    if !reader.is_done()
+        && let Err(error) = reader.drain(stream, DRAIN_BYTES_MAX).await
+    {
+        // The connection closes either way; this only explains why the peer
+        // may see a reset.
+        debug!("Request body not drained: {:?}", error);
+    }
+    result
 }
 
 /// Send the handler's `response` (or a `500` when it failed), framed for a
@@ -140,11 +204,16 @@ where
 ///
 /// The handler's error, or the error that kept its response from being
 /// serialized, is returned after the client got its `500`.
+///
+/// A handler that fails with the error of a failed body read (`failure`) gets
+/// the status for that failure instead of a `500`: `400` for bad framing,
+/// `413` for a body that does not fit, nothing for a peer that is gone.
 async fn answer<S, const MAX_RESPONSE_SIZE: usize>(
     stream: &mut S,
     response: Result<ServerResponse<'_>, Error>,
     method: HttpMethod,
     close: bool,
+    failure: Option<BodyFailure>,
 ) -> Result<bool, Error>
 where
     S: Write,
@@ -152,7 +221,9 @@ where
     let response = match response {
         Ok(response) => response,
         Err(error) => {
-            send_status(stream, StatusCode::InternalServerError).await;
+            if let Some(status) = reply_status(failure, &error) {
+                send_status(stream, status).await;
+            }
             return Err(error);
         }
     };
@@ -216,7 +287,7 @@ where
     let mut request_buffer = [0; REQ_SIZE];
     let mut served = 0;
     loop {
-        let (request, pipelined) =
+        let Received { request, body } =
             match receive_request::<S, MAX_RESPONSE_SIZE>(stream, &mut request_buffer, served > 0)
                 .await
             {
@@ -225,11 +296,10 @@ where
                 Err(error) => return Err(error),
             };
         served += 1;
-        let close_requested = pipelined || served >= max_requests || !is_persistent(&request);
+        let close_requested = served >= max_requests || !is_persistent(&request);
 
-        let response = handler.handle_request(&request).await;
         let close =
-            answer::<S, MAX_RESPONSE_SIZE>(stream, response, request.method, close_requested)
+            exchange::<S, H, MAX_RESPONSE_SIZE>(stream, handler, &request, body, close_requested)
                 .await?;
         if close {
             return Ok(());
@@ -307,15 +377,23 @@ fn persistent_head<const MAX_RESPONSE_SIZE: usize>(
     Ok((head, close))
 }
 
-/// Read, decode and parse one request into `buffer`.
+/// One request read from a connection: its head, parsed, and what is needed
+/// to read its body.
+pub(super) struct Received<'b> {
+    /// The request line and headers. Its `body` is empty: the body is read
+    /// through [`RequestBody`].
+    pub request: HttpRequest<'b>,
+    pub body: BodyParts<'b>,
+}
+
+/// Read and parse the head of one request into `buffer`.
 ///
-/// A malformed or oversized request is answered with the matching error
-/// status (see [`handle_http_connection_with_sizes`]) before the error is
-/// returned. A chunked body is decoded in place, so the request's body is the
-/// payload.
-///
-/// Besides the request this returns whether bytes of another request followed
-/// it (pipelining), which makes the connection unfit for reuse.
+/// A malformed request or headers that do not fit are answered with the
+/// matching error status (see [`handle_http_connection_with_sizes`]) before
+/// the error is returned. The body is not read: the buffer behind the head,
+/// with the bytes of the body that arrived with it, is handed over to read it
+/// from. The head and the body share `buffer`, so the body gets what the
+/// head leaves.
 ///
 /// With `allow_idle`, a connection that is closed or fails before sending a
 /// single byte is reported as [`Error::NoResponse`] instead of a read error,
@@ -324,12 +402,12 @@ pub(super) async fn receive_request<'b, S, const MAX_RESPONSE_SIZE: usize>(
     stream: &mut S,
     buffer: &'b mut [u8],
     allow_idle: bool,
-) -> Result<(HttpRequest<'b>, bool), Error>
+) -> Result<Received<'b>, Error>
 where
     S: Read + Write,
 {
-    let (request_end, pipelined) = match read_request(stream, buffer, allow_idle).await {
-        Ok(read) => read,
+    let head = match read_head(stream, buffer, allow_idle).await {
+        Ok(head) => head,
         Err(failure) => {
             if let Some(status) = failure.reply {
                 send_status(stream, status).await;
@@ -338,19 +416,24 @@ where
         }
     };
 
-    // Only the request itself: bytes of a pipelined request after it are not
-    // part of its body.
-    let request_end = match codec::dechunk_with(buffer, request_end, Error::InvalidRequest) {
-        Ok(request_end) => request_end,
-        Err(error) => {
-            send_status(stream, StatusCode::BadRequest).await;
-            return Err(error);
+    let (head_bytes, body_buf) = buffer.split_at_mut(head.body_start);
+    let head_bytes: &'b [u8] = head_bytes;
+    match HttpRequest::try_from(head_bytes) {
+        Ok(request) => {
+            let expect_continue = request.version.eq_ignore_ascii_case("HTTP/1.1")
+                && request
+                    .header(EXPECT)
+                    .is_some_and(|value| value.eq_ignore_ascii_case("100-continue"));
+            Ok(Received {
+                body: BodyParts {
+                    buf: body_buf,
+                    buffered: head.total_read - head.body_start,
+                    framing: head.framing,
+                    expect_continue,
+                },
+                request,
+            })
         }
-    };
-
-    let buffer: &'b [u8] = buffer;
-    match HttpRequest::try_from(&buffer[..request_end]) {
-        Ok(request) => Ok((request, pipelined)),
         Err(error) => {
             send_status(stream, StatusCode::BadRequest).await;
             Err(error)
@@ -378,42 +461,32 @@ impl ReadFailure {
     }
 }
 
-/// Read one complete HTTP request (headers plus any `Content-Length` body).
-///
-/// Returns where the request ends in `buf` and whether more bytes followed
-/// it (a pipelined request).
-///
-/// A body is delimited by `Content-Length` or by chunked transfer coding.
-/// Requests with neither are considered complete once the headers end; the
-/// peer is expected to close the connection after such a request. Chunked
-/// bodies are returned as received; the caller decodes them with
-/// [`codec::dechunk`].
-///
-/// A declared `Content-Length` that cannot fit in `buf` is rejected as soon as
-/// the headers arrive, instead of reading until the buffer fills.
+/// Where the head of a request ends and how its body is delimited.
+struct Head {
+    /// Offset of the first byte behind the head.
+    body_start: usize,
+    /// How many bytes were read in all.
+    total_read: usize,
+    framing: Framing,
+}
+
+/// Read from `stream` until the request head is complete.
 ///
 /// # Errors
 ///
 /// - [`Error::TcpError`] if the stream fails.
 /// - [`Error::InvalidRequest`] if the peer closes the connection before the
-///   request headers (or a declared body) are complete.
-/// - [`Error::BufferOverflow`] if the request does not fit in `buf`, answered
-///   with `413` when the headers were read and `431` when they were not.
-async fn read_request<S>(
-    stream: &mut S,
-    buf: &mut [u8],
-    allow_idle: bool,
-) -> Result<(usize, bool), ReadFailure>
+///   request headers are complete, or the framing headers are malformed.
+/// - [`Error::BufferOverflow`] if the headers do not fit in `buf`, answered
+///   with `431`.
+async fn read_head<S>(stream: &mut S, buf: &mut [u8], allow_idle: bool) -> Result<Head, ReadFailure>
 where
     S: Read,
 {
     let mut total_read = 0;
-    let mut header_end = None;
     // Where to resume looking for the end of the headers, so a client that
     // sends one byte per read costs linear rather than quadratic time.
     let mut searched: usize = 0;
-    let mut framing = None;
-    let mut chunk_scan = codec::ChunkScan::default();
 
     while total_read < buf.len() {
         let n = match stream.read(&mut buf[total_read..]).await {
@@ -431,61 +504,24 @@ where
         };
         total_read += n;
 
-        if header_end.is_none() {
-            // A terminator split across reads starts up to 3 bytes back.
-            let from = searched.saturating_sub(DOUBLE_CRLF_LEN - 1);
-            header_end = protocol::find_double_crlf(&buf[from..total_read]).map(|pos| from + pos);
-            searched = total_read;
-        }
-
-        if let Some(hdr_end) = header_end {
-            let framing = if let Some(framing) = framing {
-                framing
-            } else {
-                let found = codec::request_framing(&buf[..hdr_end]).map_err(framing_failure)?;
-                framing = Some(found);
-                found
-            };
-            let body_start = hdr_end + DOUBLE_CRLF_LEN;
-            match framing {
-                // Headers are complete and no body is expected.
-                Framing::None => return Ok((body_start, total_read > body_start)),
-                Framing::Length(content_length) => {
-                    let needed = body_start.saturating_add(content_length);
-                    if needed > buf.len() {
-                        return Err(ReadFailure::reply(
-                            Error::BufferOverflow,
-                            StatusCode::RequestEntityTooLarge,
-                        ));
-                    }
-                    if total_read >= needed {
-                        return Ok((needed, total_read > needed));
-                    }
-                }
-                Framing::Chunked => {
-                    if chunk_scan.advance(&buf[body_start..total_read]) {
-                        // On malformed framing `end` stops short of the bad
-                        // bytes; keep them all so `dechunk` reports the error.
-                        let end = body_start + chunk_scan.end();
-                        return Ok(if chunk_scan.is_valid() {
-                            (end, total_read > end)
-                        } else {
-                            (total_read, false)
-                        });
-                    }
-                }
-            }
+        // A terminator split across reads starts up to 3 bytes back.
+        let from = searched.saturating_sub(DOUBLE_CRLF_LEN - 1);
+        searched = total_read;
+        if let Some(pos) = protocol::find_double_crlf(&buf[from..total_read]) {
+            let header_end = from + pos;
+            let framing = codec::request_framing(&buf[..header_end]).map_err(framing_failure)?;
+            return Ok(Head {
+                body_start: header_end + DOUBLE_CRLF_LEN,
+                total_read,
+                framing,
+            });
         }
     }
 
-    // The buffer filled up: with the headers if they never ended, otherwise
-    // with a chunked body of unknown length.
-    let status = if header_end.is_some() {
-        StatusCode::RequestEntityTooLarge
-    } else {
-        StatusCode::RequestHeaderFieldsTooLarge
-    };
-    Err(ReadFailure::reply(Error::BufferOverflow, status))
+    Err(ReadFailure::reply(
+        Error::BufferOverflow,
+        StatusCode::RequestHeaderFieldsTooLarge,
+    ))
 }
 
 /// Map a request framing error to the response the peer should get.
@@ -633,14 +669,15 @@ mod tests {
     struct BodyCheckHandler;
 
     impl HttpHandler for BodyCheckHandler {
-        async fn handle_request(
+        async fn handle_request<S: Read + Write>(
             &mut self,
             request: &HttpRequest<'_>,
+            body: &mut RequestBody<'_, S>,
         ) -> Result<ServerResponse<'_>, Error> {
             let mut headers = Vec::new();
             let _ = headers.push(HttpHeader::content_type(mime_types::TEXT));
-            let body = if request.body == b"hello".as_slice() && request.content_length() == Some(5)
-            {
+            let payload = body.all().await?;
+            let body = if payload == b"hello".as_slice() && request.content_length() == Some(5) {
                 "body-ok"
             } else {
                 "body-bad"
@@ -674,9 +711,10 @@ mod tests {
     struct ReflectHandler;
 
     impl HttpHandler for ReflectHandler {
-        async fn handle_request(
+        async fn handle_request<S: Read + Write>(
             &mut self,
             _request: &HttpRequest<'_>,
+            _body: &mut RequestBody<'_, S>,
         ) -> Result<ServerResponse<'_>, Error> {
             let mut headers = Vec::new();
             let _ = headers.push(HttpHeader::new("Location", "/a\r\nSet-Cookie: evil=1"));
@@ -839,11 +877,12 @@ mod tests {
     struct HelloBodyHandler;
 
     impl HttpHandler for HelloBodyHandler {
-        async fn handle_request(
+        async fn handle_request<S: Read + Write>(
             &mut self,
-            request: &HttpRequest<'_>,
+            _request: &HttpRequest<'_>,
+            body: &mut RequestBody<'_, S>,
         ) -> Result<ServerResponse<'_>, Error> {
-            let body = if request.body == b"hello".as_slice() {
+            let body = if body.all().await? == b"hello".as_slice() {
                 "body-ok"
             } else {
                 "body-bad"
@@ -934,6 +973,9 @@ mod tests {
 
         assert!(matches!(err, Error::BufferOverflow));
         assert_status(&stream.output, "413 Request Entity Too Large");
+        // The rest of the body was read and discarded, so closing the
+        // connection does not reset it under the 413.
+        assert_eq!(stream.read_pos, stream.input.len());
     }
 
     #[test]
@@ -1038,9 +1080,10 @@ mod tests {
     struct EtagHandler;
 
     impl HttpHandler for EtagHandler {
-        async fn handle_request(
+        async fn handle_request<S: Read + Write>(
             &mut self,
             request: &HttpRequest<'_>,
+            _body: &mut RequestBody<'_, S>,
         ) -> Result<ServerResponse<'_>, Error> {
             let builder = nanofish::ServerResponseBuilder::new();
             if request.if_none_match("\"v1\"") {
@@ -1156,9 +1199,10 @@ mod tests {
     struct KeepAliveHandler;
 
     impl HttpHandler for KeepAliveHandler {
-        async fn handle_request(
+        async fn handle_request<S: Read + Write>(
             &mut self,
             request: &HttpRequest<'_>,
+            body: &mut RequestBody<'_, S>,
         ) -> Result<ServerResponse<'_>, Error> {
             let builder = nanofish::ServerResponseBuilder::new();
             match request.route_path() {
@@ -1167,7 +1211,7 @@ mod tests {
                 "/204" => builder.status(StatusCode::NoContent).build(),
                 "/close" => builder.header("Connection", "Close")?.text("bye").build(),
                 "/echo" => builder
-                    .text(match request.body {
+                    .text(match body.all().await? {
                         b"hello" => "got-hello",
                         b"abc" => "got-abc",
                         b"" => "got-empty",
@@ -1369,9 +1413,10 @@ mod tests {
     struct FailingHandler;
 
     impl HttpHandler for FailingHandler {
-        async fn handle_request(
+        async fn handle_request<S: Read + Write>(
             &mut self,
             _request: &HttpRequest<'_>,
+            _body: &mut RequestBody<'_, S>,
         ) -> Result<ServerResponse<'_>, Error> {
             Err(Error::NoResponse)
         }
@@ -1431,9 +1476,10 @@ mod tests {
     struct LargeBodyHandler;
 
     impl HttpHandler for LargeBodyHandler {
-        async fn handle_request(
+        async fn handle_request<S: Read + Write>(
             &mut self,
             _request: &HttpRequest<'_>,
+            _body: &mut RequestBody<'_, S>,
         ) -> Result<ServerResponse<'_>, Error> {
             Ok(ServerResponse {
                 status_code: StatusCode::Ok,
@@ -1612,5 +1658,686 @@ mod tests {
         .unwrap();
         assert_eq!(stream.reads, request.len());
         assert!(stream.output.ends_with(b"hi"));
+    }
+
+    /// Handler that reads the body piece by piece and reports its length, the
+    /// sum of its bytes, and the number and largest size of the pieces.
+    struct StreamSum {
+        out: heapless::String<96>,
+    }
+
+    impl StreamSum {
+        const fn new() -> Self {
+            Self {
+                out: heapless::String::new(),
+            }
+        }
+    }
+
+    impl HttpHandler for StreamSum {
+        async fn handle_request<S: Read + Write>(
+            &mut self,
+            _request: &HttpRequest<'_>,
+            body: &mut RequestBody<'_, S>,
+        ) -> Result<ServerResponse<'_>, Error> {
+            use core::fmt::Write as _;
+            let (mut len, mut sum, mut largest) = (0usize, 0usize, 0usize);
+            while let Some(piece) = body.chunk().await? {
+                assert!(!piece.is_empty());
+                len += piece.len();
+                largest = largest.max(piece.len());
+                sum += piece.iter().map(|&b| usize::from(b)).sum::<usize>();
+            }
+            self.out.clear();
+            write!(self.out, "len={len} sum={sum} largest={largest}")
+                .map_err(|_| Error::BufferOverflow)?;
+            Ok(ServerResponse {
+                status_code: StatusCode::Ok,
+                headers: Vec::new(),
+                body: self.out.as_bytes(),
+            })
+        }
+    }
+
+    /// A request whose chunked body is `len` bytes of `b'a'` in chunks of 50.
+    fn chunked_post(len: usize) -> std::vec::Vec<u8> {
+        let mut raw = std::vec::Vec::from(
+            b"POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(),
+        );
+        let mut left = len;
+        while left > 0 {
+            let size = left.min(50);
+            raw.extend_from_slice(std::format!("{size:x}\r\n").as_bytes());
+            raw.extend(core::iter::repeat_n(b'a', size));
+            raw.extend_from_slice(b"\r\n");
+            left -= size;
+        }
+        raw.extend_from_slice(b"0\r\n\r\n");
+        raw
+    }
+
+    fn response_text(output: &[u8]) -> &str {
+        core::str::from_utf8(output).unwrap()
+    }
+
+    #[test]
+    fn test_chunked_body_larger_than_the_buffer_streams_through() {
+        // Goal: a body far larger than the request buffer reaches the handler whole.
+        // Method: stream 600 chunked bytes through a 128-byte buffer and sum them.
+        // 600 bytes through a 128-byte buffer: far too big for `all()`.
+        let raw = chunked_post(600);
+        let mut stream = MockStream::<2048, 512>::new(&raw);
+        let mut handler = StreamSum::new();
+
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut handler,
+        ))
+        .unwrap();
+
+        let response = response_text(&stream.output);
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        let sum = 600 * usize::from(b'a');
+        assert!(
+            response.ends_with(&std::format!("len=600 sum={sum} largest=50")),
+            "{response}"
+        );
+    }
+
+    #[test]
+    fn test_chunked_body_streams_when_the_buffer_cuts_framing_lines() {
+        // Goal: chunk framing survives being cut between two buffer fills.
+        // Method: shrink the buffer so size lines and CRLFs straddle fills.
+        // The body region is only a few bytes, so size lines and CRLFs are
+        // split between buffer fills.
+        let raw = chunked_post(130);
+        for req_size in [80, 84, 90, 97] {
+            let mut stream = MockStream::<1024, 512>::new(&raw);
+            let mut handler = StreamSum::new();
+            let result = match req_size {
+                80 => futures_lite::future::block_on(handle_http_connection_with_sizes::<
+                    _,
+                    _,
+                    80,
+                    512,
+                >(&mut stream, &mut handler)),
+                84 => futures_lite::future::block_on(handle_http_connection_with_sizes::<
+                    _,
+                    _,
+                    84,
+                    512,
+                >(&mut stream, &mut handler)),
+                90 => futures_lite::future::block_on(handle_http_connection_with_sizes::<
+                    _,
+                    _,
+                    90,
+                    512,
+                >(&mut stream, &mut handler)),
+                _ => futures_lite::future::block_on(handle_http_connection_with_sizes::<
+                    _,
+                    _,
+                    97,
+                    512,
+                >(&mut stream, &mut handler)),
+            };
+            result.unwrap();
+            let response = response_text(&stream.output);
+            let sum = 130 * usize::from(b'a');
+            assert!(
+                response.contains(&std::format!("len=130 sum={sum}")),
+                "{req_size}: {response}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_streamed_chunked_body_arriving_in_small_pieces() {
+        // Goal: the body is the same however the network splits it.
+        // Method: deliver the request 1 to 50 bytes per read.
+        let raw = chunked_post(120);
+        for max in [1, 2, 3, 7, 50] {
+            let mut stream = SlowStream {
+                inner: MockStream::<1024, 512>::new(&raw),
+                max,
+            };
+            let mut handler = StreamSum::new();
+
+            futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+                &mut stream,
+                &mut handler,
+            ))
+            .unwrap();
+
+            let response = response_text(&stream.inner.output);
+            let sum = 120 * usize::from(b'a');
+            assert!(
+                response.contains(&std::format!("len=120 sum={sum}")),
+                "max={max}: {response}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_content_length_body_larger_than_the_buffer_streams_through() {
+        // Goal: `Content-Length` bodies stream like chunked ones.
+        // Method: send 300 bytes through a 128-byte buffer.
+        let mut raw = std::vec::Vec::from(
+            b"POST /up HTTP/1.1\r\nHost: h\r\nContent-Length: 300\r\n\r\n".as_slice(),
+        );
+        raw.extend(core::iter::repeat_n(b'b', 300));
+        let mut stream = MockStream::<1024, 512>::new(&raw);
+        let mut handler = StreamSum::new();
+
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut handler,
+        ))
+        .unwrap();
+
+        let sum = 300 * usize::from(b'b');
+        let response = response_text(&stream.output);
+        assert!(
+            response.contains(&std::format!("len=300 sum={sum}")),
+            "{response}"
+        );
+    }
+
+    #[test]
+    fn test_streamed_body_is_not_copied_out_of_the_connection_buffer() {
+        // Goal: pieces are slices of the connection buffer, not copies.
+        // Method: a body that arrives in one read comes out as one piece of that size.
+        // Pieces are slices of the buffer holding the request: the largest
+        // piece is what one read delivered, not a bounded copy.
+        let raw = chunked_post(50);
+        let mut stream = MockStream::<256, 512>::new(&raw);
+        let mut handler = StreamSum::new();
+
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 256, 512>(
+            &mut stream,
+            &mut handler,
+        ))
+        .unwrap();
+
+        assert!(response_text(&stream.output).contains("largest=50"));
+    }
+
+    #[test]
+    fn test_unread_body_is_discarded_and_the_connection_closes() {
+        // Goal: a handler that ignores the body leaves the connection in step.
+        // Method: answer, then check the whole body was read off the stream and
+        // the response says it closes.
+        let mut raw = std::vec::Vec::from(
+            b"POST /health HTTP/1.1\r\nHost: h\r\nContent-Length: 300\r\n\r\n".as_slice(),
+        );
+        raw.extend(core::iter::repeat_n(b'c', 300));
+        let mut stream = MockStream::<1024, 512>::new(&raw);
+        let mut handler = SimpleHandler;
+
+        futures_lite::future::block_on(serve_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut handler,
+            5,
+        ))
+        .unwrap();
+
+        let response = response_text(&stream.output);
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(response.contains("Connection: close\r\n"), "{response}");
+        // The rest of the body was read off the connection after the answer.
+        assert_eq!(stream.read_pos, raw.len());
+    }
+
+    #[test]
+    fn test_fully_read_body_keeps_the_connection_open() {
+        // Goal: a body read to its end does not cost the connection.
+        // Method: the response must not announce a close.
+        let raw = chunked_post(20);
+        let mut stream = MockStream::<1024, 512>::new(&raw);
+        let mut handler = StreamSum::new();
+
+        futures_lite::future::block_on(serve_http_connection_with_sizes::<_, _, 256, 512>(
+            &mut stream,
+            &mut handler,
+            5,
+        ))
+        .unwrap();
+
+        // Read to the end, so the response does not announce a close.
+        let response = response_text(&stream.output);
+        assert!(!response.contains("Connection: close"), "{response}");
+        assert!(response.contains("len=20"), "{response}");
+    }
+
+    #[test]
+    fn test_malformed_chunk_after_streaming_started_gets_400() {
+        // Goal: bad framing found mid-stream is still answered with `400`.
+        // Method: a valid chunk, then a bad size line, read piece by piece.
+        let raw = b"POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\nZZ\r\nx\r\n0\r\n\r\n";
+        let mut stream = MockStream::<256, 512>::new(raw);
+        let mut handler = StreamSum::new();
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidRequest(_)), "{err:?}");
+        assert_status(&stream.output, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_connection_closed_mid_body_is_not_answered() {
+        // Goal: a peer that vanished mid-body gets nothing written.
+        // Method: end the input inside a chunk.
+        let raw = b"POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel";
+        let mut stream = MockStream::<256, 512>::new(raw);
+        let mut handler = StreamSum::new();
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, Error::InvalidRequest("Incomplete request")),
+            "{err:?}"
+        );
+        assert!(stream.output.is_empty());
+    }
+
+    #[test]
+    fn test_expect_continue_is_answered_when_the_body_is_read() {
+        // Goal: `100 Continue` is sent when the handler asks for the body, and the
+        // body is only sent after it.
+        // Method: a client that withholds the body until it sees the interim response.
+        let raw = b"POST /up HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello";
+        let mut stream = MockStream::<256, 512>::new(raw);
+        let mut handler = StreamSum::new();
+
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut handler,
+        ))
+        .unwrap();
+
+        // The body arrived with the head, so there was nothing to wait for.
+        let response = response_text(&stream.output);
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+
+        // Headers only: the handler has to ask for the body.
+        let head =
+            b"POST /up HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n";
+        let mut stream = ContinueStream {
+            head: head.to_vec(),
+            body_sent: false,
+            output: std::vec::Vec::new(),
+            continued_before_body: false,
+        };
+        let mut handler = StreamSum::new();
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut handler,
+        ))
+        .unwrap();
+        assert!(stream.continued_before_body);
+        assert!(
+            response_text(&stream.output)
+                .starts_with("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n"),
+            "{}",
+            response_text(&stream.output)
+        );
+    }
+
+    #[test]
+    fn test_expect_continue_is_not_sent_to_a_handler_that_ignores_the_body() {
+        // Goal: a handler that never reads the body never invites it.
+        // Method: the same waiting client against a handler that ignores the body.
+        let head = b"POST /health HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n";
+        let mut stream = ContinueStream {
+            head: head.to_vec(),
+            body_sent: false,
+            output: std::vec::Vec::new(),
+            continued_before_body: false,
+        };
+        let mut handler = SimpleHandler;
+
+        futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+            &mut stream,
+            &mut handler,
+        ))
+        .unwrap();
+
+        let response = response_text(&stream.output);
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(!response.contains("100 Continue"), "{response}");
+    }
+
+    /// A client that sends the head and then waits for `100 Continue` before
+    /// it sends the body.
+    struct ContinueStream {
+        head: std::vec::Vec<u8>,
+        body_sent: bool,
+        output: std::vec::Vec<u8>,
+        continued_before_body: bool,
+    }
+
+    impl ErrorType for ContinueStream {
+        type Error = Infallible;
+    }
+
+    impl Read for ContinueStream {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            if !self.head.is_empty() {
+                let n = buf.len().min(self.head.len());
+                buf[..n].copy_from_slice(&self.head[..n]);
+                self.head.drain(..n);
+                return Ok(n);
+            }
+            if self.body_sent {
+                return Ok(0);
+            }
+            // The body only comes after the interim response.
+            self.continued_before_body = self.output.starts_with(b"HTTP/1.1 100 Continue\r\n\r\n");
+            self.body_sent = true;
+            buf[..5].copy_from_slice(b"hello");
+            Ok(5)
+        }
+    }
+
+    impl Write for ContinueStream {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.output.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_streaming_handler_reads_the_request_while_it_writes_the_response() {
+        // Goal: a streaming handler reads the request and writes the response in turn.
+        // Method: echo a chunked upload back as a chunked response and decode it.
+        let raw = chunked_post(200);
+        let mut stream = MockStream::<1024, 1024>::new(&raw);
+
+        futures_lite::future::block_on(
+            nanofish::server::handle_http_stream_connection_with_sizes::<_, _, 128, 256>(
+                &mut stream,
+                &mut Echo,
+            ),
+        )
+        .unwrap();
+
+        let response = response_text(&stream.output);
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(
+            response.contains("Transfer-Encoding: chunked"),
+            "{response}"
+        );
+
+        let mut raw_response = stream.output.to_vec();
+        let total_len = raw_response.len();
+        let total = codec::dechunk(&mut raw_response, total_len).unwrap();
+        let head_len = protocol::find_double_crlf(&raw_response).unwrap() + DOUBLE_CRLF_LEN;
+        assert_eq!(&raw_response[head_len..total], [b'a'; 200].as_slice());
+    }
+
+    /// Streaming handler that sends its head first and then echoes the
+    /// request body back as it arrives.
+    struct Echo;
+
+    impl nanofish::server::StreamingHandler for Echo {
+        async fn handle<S: Read + Write, const HEAD_SIZE: usize>(
+            &mut self,
+            _request: &HttpRequest<'_>,
+            body: &mut nanofish::server::BodyReader<'_>,
+            response: &mut nanofish::server::ResponseWriter<'_, S, HEAD_SIZE>,
+        ) -> Result<(), Error> {
+            response
+                .send_head(StatusCode::Ok, &[], nanofish::server::BodyLength::Unknown)
+                .await?;
+            while let Some(piece) = body.chunk(response).await? {
+                response.write(piece).await?;
+            }
+            response.finish().await
+        }
+    }
+
+    #[test]
+    fn test_expect_continue_is_never_sent_after_the_final_head() {
+        // Goal: a streaming handler that starts its response before reading the
+        // body never gets `100 Continue` written into that response.
+        // Method: the echo handler against a client that asks for `100 Continue`
+        // (and sends the body anyway, as a client does once the final response
+        // starts); the response must decode cleanly to the body.
+        let head =
+            b"POST /up HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n";
+        let mut stream = ContinueStream {
+            head: head.to_vec(),
+            body_sent: false,
+            output: std::vec::Vec::new(),
+            continued_before_body: false,
+        };
+
+        futures_lite::future::block_on(
+            nanofish::server::handle_http_stream_connection_with_sizes::<_, _, 128, 256>(
+                &mut stream,
+                &mut Echo,
+            ),
+        )
+        .unwrap();
+
+        let response = response_text(&stream.output);
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(!response.contains("100 Continue"), "{response}");
+        let mut raw_response = stream.output.clone();
+        let total_len = raw_response.len();
+        let total = codec::dechunk(&mut raw_response, total_len).unwrap();
+        let head_len = protocol::find_double_crlf(&raw_response).unwrap() + DOUBLE_CRLF_LEN;
+        assert_eq!(&raw_response[head_len..total], b"hello");
+    }
+
+    /// Handler that collects the body, and when that fails part way, checks
+    /// that the body can no longer be read and passes the error on.
+    struct RetryAfterFailedCollect;
+
+    impl HttpHandler for RetryAfterFailedCollect {
+        async fn handle_request<S: Read + Write>(
+            &mut self,
+            _request: &HttpRequest<'_>,
+            body: &mut RequestBody<'_, S>,
+        ) -> Result<ServerResponse<'_>, Error> {
+            let Err(error) = body.all().await else {
+                return Err(Error::InvalidState("collected a malformed body"));
+            };
+            assert!(
+                matches!(body.all().await, Err(Error::InvalidState(_))),
+                "all() after a partial failure must not return a truncated body"
+            );
+            assert!(
+                matches!(body.chunk().await, Err(Error::InvalidState(_))),
+                "chunk() after a partial failure must not resume mid-body"
+            );
+            Err(error)
+        }
+    }
+
+    #[test]
+    fn test_body_cannot_be_read_again_after_a_partial_collection_failed() {
+        // Goal: a failed `all()` that already moved payload never lets a
+        // retry return part of the body as if it were all of it.
+        // Method: one good chunk, then malformed framing; the handler retries
+        // with `all()` and `chunk()`, then passes the framing error on.
+        let raw = b"POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\nZZ\r\n";
+        let mut stream = MockStream::<256, 512>::new(raw);
+
+        let err =
+            futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 256, 512>(
+                &mut stream,
+                &mut RetryAfterFailedCollect,
+            ))
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidRequest(_)), "{err:?}");
+        assert_status(&stream.output, "400 Bad Request");
+    }
+
+    /// Handler whose body read fails and which then fails with an error of
+    /// its own of the same kind.
+    struct OwnErrorAfterBodyFailure;
+
+    impl HttpHandler for OwnErrorAfterBodyFailure {
+        async fn handle_request<S: Read + Write>(
+            &mut self,
+            _request: &HttpRequest<'_>,
+            body: &mut RequestBody<'_, S>,
+        ) -> Result<ServerResponse<'_>, Error> {
+            assert!(matches!(body.all().await, Err(Error::BufferOverflow)));
+            Err(Error::InvalidRequest("handler rejected the request"))
+        }
+    }
+
+    #[test]
+    fn test_handler_error_after_a_body_failure_is_still_a_500() {
+        // Goal: only the body read's own error is answered like the body
+        // failure; a different error from the handler is a `500`.
+        // Method: a body too large for `all()`, then the handler fails with
+        // an unrelated `InvalidRequest`.
+        let raw = b"POST /up HTTP/1.1\r\nHost: h\r\nContent-Length: 500\r\n\r\n";
+        let mut stream = MockStream::<256, 512>::new(raw);
+
+        let err =
+            futures_lite::future::block_on(handle_http_connection_with_sizes::<_, _, 128, 512>(
+                &mut stream,
+                &mut OwnErrorAfterBodyFailure,
+            ))
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidRequest(_)), "{err:?}");
+        assert_status(&stream.output, "500 Internal Server Error");
+    }
+
+    /// Streaming handler that collects the whole body.
+    struct CollectAll;
+
+    impl nanofish::server::StreamingHandler for CollectAll {
+        async fn handle<S: Read + Write, const HEAD_SIZE: usize>(
+            &mut self,
+            _request: &HttpRequest<'_>,
+            body: &mut nanofish::server::BodyReader<'_>,
+            response: &mut nanofish::server::ResponseWriter<'_, S, HEAD_SIZE>,
+        ) -> Result<(), Error> {
+            body.all(response).await?;
+            response
+                .send_head(StatusCode::Ok, &[], nanofish::server::BodyLength::Known(0))
+                .await
+        }
+    }
+
+    #[test]
+    fn test_streaming_413_drains_the_rest_of_the_body() {
+        // Goal: after a streaming handler fails with a body too large for the
+        // buffer, the server still reads and discards the rest of the body,
+        // so closing does not reset the connection under the 413.
+        // Method: a chunked body larger than the buffer; all input consumed.
+        let raw = chunked_post(600);
+        let mut stream = MockStream::<1024, 512>::new(&raw);
+
+        let err = futures_lite::future::block_on(
+            nanofish::server::handle_http_stream_connection_with_sizes::<_, _, 256, 256>(
+                &mut stream,
+                &mut CollectAll,
+            ),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::BufferOverflow), "{err:?}");
+        assert_status(&stream.output, "413 Request Entity Too Large");
+        assert_eq!(stream.read_pos, stream.input.len());
+    }
+
+    /// A client that asks for `100 Continue` on a connection whose writes of
+    /// it never complete.
+    struct StalledContinue {
+        head: std::vec::Vec<u8>,
+        output: std::vec::Vec<u8>,
+    }
+
+    impl ErrorType for StalledContinue {
+        type Error = Infallible;
+    }
+
+    impl Read for StalledContinue {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let n = buf.len().min(self.head.len());
+            buf[..n].copy_from_slice(&self.head[..n]);
+            self.head.drain(..n);
+            Ok(n)
+        }
+    }
+
+    impl Write for StalledContinue {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            if buf.starts_with(b"HTTP/1.1 100") {
+                core::future::pending::<()>().await;
+            }
+            self.output.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    /// Handler that gives up on a slow inner handler with a `503`, the way
+    /// the Embassy server's handler timeout does.
+    struct GiveUp<H>(H);
+
+    impl<H: HttpHandler> HttpHandler for GiveUp<H> {
+        async fn handle_request<S: Read + Write>(
+            &mut self,
+            request: &HttpRequest<'_>,
+            body: &mut RequestBody<'_, S>,
+        ) -> Result<ServerResponse<'_>, Error> {
+            futures_lite::future::or(self.0.handle_request(request, body), async {
+                futures_lite::future::yield_now().await;
+                Ok(ServerResponse {
+                    status_code: StatusCode::ServiceUnavailable,
+                    headers: Vec::new(),
+                    body: b"",
+                })
+            })
+            .await
+        }
+    }
+
+    #[test]
+    fn test_nothing_is_sent_after_a_cut_off_100_continue() {
+        // Goal: when the handler is abandoned while `100 Continue` is being
+        // written, the server sends no response after the partial interim one.
+        // Method: a write of `100 Continue` that never completes, raced against
+        // a `503`; the connection must end with no output and an error.
+        let head =
+            b"POST /up HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n";
+        let mut stream = StalledContinue {
+            head: head.to_vec(),
+            output: std::vec::Vec::new(),
+        };
+        let mut handler = GiveUp(StreamSum::new());
+
+        let err = futures_lite::future::block_on(
+            handle_http_connection_with_sizes::<_, _, 128, 512>(&mut stream, &mut handler),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidState(_)), "{err:?}");
+        assert!(
+            stream.output.is_empty(),
+            "{}",
+            response_text(&stream.output)
+        );
     }
 }

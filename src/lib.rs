@@ -60,11 +60,11 @@ pub use request::{
 };
 pub use response::{HttpResponse, ResponseBody};
 pub use server::{
-    BodyLength, DefaultHttpServer, FileStat, FileStore, HttpServer, ResponseWriter, ServerResponse,
-    ServerResponseBuilder, SmallHttpServer, StaticFile, StaticSite, StreamingHandler,
-    handle_http_connection, handle_http_connection_with_sizes, handle_http_stream_connection,
-    handle_http_stream_connection_with_sizes, mime_for_extension, serve,
-    serve_http_connection_with_sizes, serve_with,
+    BodyLength, BodyReader, DefaultHttpServer, FileStat, FileStore, HttpServer, RequestBody,
+    ResponseWriter, ServerResponse, ServerResponseBuilder, SmallHttpServer, StaticFile, StaticSite,
+    StreamingHandler, handle_http_connection, handle_http_connection_with_sizes,
+    handle_http_stream_connection, handle_http_stream_connection_with_sizes, mime_for_extension,
+    serve, serve_http_connection_with_sizes, serve_with,
 };
 #[cfg(feature = "embassy")]
 pub use server::{

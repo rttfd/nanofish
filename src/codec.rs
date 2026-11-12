@@ -433,7 +433,8 @@ impl ChunkState {
 ///
 /// The one implementation of the chunked framing: [`dechunk`] decodes a
 /// buffered body with it, [`ChunkScan`] uses it to find where a body ends,
-/// and streaming responses decode their body piece by piece with it. Lines
+/// and streaming responses and server request bodies decode piece by piece
+/// with it. Lines
 /// must end in CRLF, chunk data must be followed by CRLF, and a chunk size is
 /// plain hex digits, optionally followed by whitespace and `;` extensions. Any
 /// other byte is an error rather than a guess, since two parties guessing
@@ -617,6 +618,7 @@ impl ChunkScan {
     }
 
     /// Whether the framing walked so far is well formed.
+    #[cfg(test)]
     #[must_use]
     pub const fn is_valid(&self) -> bool {
         !self.invalid

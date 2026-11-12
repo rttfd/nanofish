@@ -84,6 +84,11 @@ pub struct HttpRequest<'a> {
     /// Request headers
     pub headers: Vec<HttpHeader<'a>, MAX_HEADERS>,
     /// Request body (if present)
+    ///
+    /// A request the server received has no body here: the server reads only
+    /// the head before it calls the handler, and the body is read through
+    /// [`RequestBody`](nanofish::RequestBody) (or
+    /// [`BodyReader`](nanofish::BodyReader)), however it is framed.
     pub body: &'a [u8],
 }
 
