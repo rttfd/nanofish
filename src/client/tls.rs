@@ -48,6 +48,46 @@ pub use embedded_tls::TlsVerifier;
 /// checked: the connection is vulnerable to man-in-the-middle attacks.
 /// Prefer [`TlsVerification::Verified`] with a root CA wherever possible.
 /// See the [`TlsVerification`] variants for the exact guarantees.
+///
+/// # Example
+///
+/// Verify the server against a pinned root CA:
+///
+/// ```rust
+/// use embedded_io_async::{Read, Write};
+/// use embedded_tls::{Aes128GcmSha256, Certificate, CryptoRngCore, pki::CertVerifier};
+/// use nanofish::{DefaultHttpTlsClient, Error, HttpClientRequest, HttpMethod};
+///
+/// /// Unix time for certificate expiry checks, from an RTC or NTP.
+/// struct WallClock;
+///
+/// impl embedded_tls::TlsClock for WallClock {
+///     fn now() -> Option<u64> {
+///         None // Unknown: the validity period is not checked.
+///     }
+/// }
+///
+/// async fn fetch<S: Read + Write>(
+///     stream: &mut S,
+///     root_ca_der: &[u8],
+///     rng: impl CryptoRngCore,
+/// ) -> Result<(), Error> {
+///     let mut verifier =
+///         CertVerifier::<Aes128GcmSha256, WallClock, 4096>::new(Certificate::X509(root_ca_der));
+///     let mut client = DefaultHttpTlsClient::verified(rng, &mut verifier);
+///     let request = HttpClientRequest {
+///         method: HttpMethod::GET,
+///         host: "example.com",
+///         path: "/",
+///         query: None,
+///         headers: &[],
+///         body: None,
+///     };
+///     let mut buffer = [0u8; 4096];
+///     client.request(stream, "example.com", request, &mut buffer).await?;
+///     Ok(())
+/// }
+/// ```
 pub struct HttpTlsClient<
     'a,
     RNG,

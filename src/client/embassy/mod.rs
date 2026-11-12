@@ -73,6 +73,34 @@ pub type SmallEmbassyHttpClient<'a> = EmbassyHttpClient<
 /// a cryptographic RNG. Only use HTTPS on trusted networks, or terminate TLS
 /// elsewhere (for example on a reverse proxy).
 ///
+/// # Example
+///
+/// ```rust
+/// use embassy_net::Stack;
+/// use nanofish::{DefaultEmbassyHttpClient, Error, HttpClientOptions, HttpHeader, mime_types};
+///
+/// async fn status(stack: &Stack<'_>) -> Result<(), Error> {
+///     // Follow up to three redirects; the default returns them to the caller.
+///     let options = HttpClientOptions {
+///         max_redirects: 3,
+///         ..HttpClientOptions::default()
+///     };
+///     let client = DefaultEmbassyHttpClient::with_options(stack, options);
+///     let headers = [HttpHeader::accept(mime_types::JSON)];
+///     let mut buffer = [0u8; 4096];
+///     let (response, _) = client
+///         .get("http://example.com/api/status", &headers, &mut buffer)
+///         .await?;
+///     assert!(response.is_success());
+///     Ok(())
+/// }
+/// ```
+///
+/// The sizes in the type are the socket and TLS record buffers, which each
+/// request holds while it runs (in its future, not in the client); the
+/// response goes into the buffer you pass. [`SmallEmbassyHttpClient`] uses 1 KiB buffers, or pick
+/// your own: `EmbassyHttpClient<'_, 2048, 2048, 8192, 8192, 2048>`.
+///
 /// # Type Parameters
 ///
 /// * `TCP_RX` - TCP receive buffer size (default: 4096 bytes)
@@ -860,6 +888,28 @@ async fn resolve_host(stack: Stack<'_>, host: &str) -> Result<embassy_net::IpAdd
 /// second time.
 ///
 /// Sessions speak plain HTTP; use [`EmbassyHttpClient`] for `https` URLs.
+///
+/// ```rust
+/// use embassy_net::Stack;
+/// use nanofish::{EmbassyHttpSession, Error, HttpClientOptions, HttpMethod};
+///
+/// async fn poll(stack: Stack<'_>) -> Result<(), Error> {
+///     let (mut rx, mut tx) = ([0u8; 2048], [0u8; 2048]);
+///     let mut session = EmbassyHttpSession::<1024>::connect(
+///         stack,
+///         &mut rx,
+///         &mut tx,
+///         "http://sensor-hub.local",
+///         HttpClientOptions::default(),
+///     )
+///     .await?;
+///     let mut buffer = [0u8; 1024];
+///     session.request(HttpMethod::GET, "/api/temperature", &[], None, &mut buffer).await?;
+///     session.request(HttpMethod::GET, "/api/humidity", &[], None, &mut buffer).await?;
+///     session.close().await;
+///     Ok(())
+/// }
+/// ```
 pub struct EmbassyHttpSession<'a, const RQ: usize = REQUEST_SIZE> {
     socket: TcpSocket<'a>,
     options: HttpClientOptions,
