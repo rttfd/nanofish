@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-11-12
+
 ### Changed
 
 - The README is now a short overview. The guides moved into the API documentation: the `client` and `server` module docs, and examples on `EmbassyHttpClient`, `EmbassyHttpSession`, `EmbassyHttpServer` and `HttpTlsClient`. Every example is compiled as a doctest, so it fails CI when the API changes instead of going stale. The old README's outdated examples (`BodySink::head` taking a `ServerResponse`, version `0.16`) are gone.
@@ -506,7 +508,8 @@ HttpResponseBuilder::new()
 - Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, and CONNECT methods.
 - Configurable client options (retries, timeouts, delays).
 
-[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/rttfd/nanofish/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/rttfd/nanofish/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/rttfd/nanofish/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/rttfd/nanofish/compare/v0.14.2...v0.15.0
