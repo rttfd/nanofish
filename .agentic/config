@@ -10,3 +10,6 @@
 [deploy]
 	trigger = tag:v*
 	trigger = command:cargo publish
+	trigger = merge-head:release-please--*
+[release]
+	pr-title = conventional

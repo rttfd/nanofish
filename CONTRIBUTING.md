@@ -50,9 +50,4 @@ rules.
 
 ### Releasing
 
-1. Update `CHANGELOG.md` under `[Unreleased]`
-2. Bump version in `Cargo.toml`
-3. Create a `release/vX.Y.Z` branch
-4. Open PR, merge to `main`
-5. Tag `main` with `vX.Y.Z`
-6. Push tag (triggers release workflow)
+Releases are generated. Give every pull request a `type(scope): description` title and merge with squash; release-please keeps a release pull request open with the next version and `CHANGELOG.md`. Merging it tags `vX.Y.Z`, which starts the release workflow. See `AGENTS.md`.

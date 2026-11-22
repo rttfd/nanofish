@@ -1,0 +1,29 @@
+# Copy to .github/workflows/release-please.yml. Keeps one release pull request open: the next
+# version and CHANGELOG.md, worked out from the titles of what was merged. Merging it tags
+# vX.Y.Z and creates the GitHub release. It deploys nothing.
+#
+# RELEASE_TOKEN (a fine-grained token or GitHub App token with contents, pull-requests and issues
+# write on this repository only) is
+# what makes CI run on the release pull request and what lets the new tag start tag-triggered
+# workflows such as image builds. Without it the fallback token still opens the pull request, if
+# "Allow GitHub Actions to create and approve pull requests" is on, but nothing else starts.
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        with:
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

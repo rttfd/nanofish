@@ -15,11 +15,11 @@ jobs:
         run: |
           BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
           echo "Checking branch: $BRANCH"
-          if [[ "$BRANCH" =~ ^(feat|fix|chore|docs|refactor|test|release)/.+$ ]]; then
+          if [[ "$BRANCH" =~ ^((feat|fix|chore|docs|refactor|test|release)/.+|release-please--.+)$ ]]; then
             echo "Branch name is valid"
           else
             echo "Error: Branch name '$BRANCH' does not match required pattern"
             echo "Expected format: <type>/<short-description>"
-            echo "Allowed types: feat, fix, chore, docs, refactor, test, release"
+            echo "Allowed types: feat, fix, chore, docs, refactor, test, release (and release-please--*)"
             exit 1
           fi
