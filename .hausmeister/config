@@ -1,4 +1,4 @@
-# .agentic/config: read by agents and hooks with `git config -f .agentic/config <key>`.
+# .hausmeister/config: read by agents and hooks with `git config -f .hausmeister/config <key>`.
 # Keys and defaults: core/config.md in the agentic-engineering package.
 [repo]
 	tier = production
